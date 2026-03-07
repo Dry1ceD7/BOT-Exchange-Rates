@@ -30,7 +30,11 @@ A Python toolset designed for corporate finance departments to automatically fet
      ```
 
    > [!TIP]
-   > You can obtain your tokens by registering on the [Bank of Thailand API Portal](https://api.bot.or.th/).
+   > **How to get your Bank of Thailand API Tokens:**
+   > 1. **Register:** Sign up at the [BOT Developer Portal](https://portal.api.bot.or.th/).
+   > 2. **Subscribe:** Go to **Catalogues**, find the "Daily Average Exchange Rate" and "Holiday" APIs, and click **Access with this plan** for each.
+   > 3. **Create App:** Click your cart icon and "Create a new app" to register these subscriptions to a project.
+   > 4. **Copy Token:** Go to **Profile** > **My apps**, select your app, and you'll find the **Token** ready to copy.
 
 ## Usage
 
