@@ -18,6 +18,21 @@ A Python toolset designed for corporate finance departments to automatically fet
 1. **Install Dependencies:**
    The `bot_excel_report.py` script requires `openpyxl`. It will attempt to install it automatically into a local `_libs` folder if it cannot find it, preventing system package conflicts.
 
+2. **Configure API Tokens:**
+   This project requires two API tokens from the Bank of Thailand.
+
+   - Create a file named `.env` in the root directory.
+   - Copy the content of `.env.example` into `.env`.
+   - Update the values with your actual tokens:
+
+     ```env
+     BOT_TOKEN_EXG=your_exchange_rate_token_here
+     BOT_TOKEN_HOL=your_holiday_token_here
+     ```
+
+   > [!TIP]
+   > You can obtain your tokens by registering on the [Bank of Thailand API Portal](https://api.bot.or.th/).
+
 ## Usage
 
 **To generate an Executive Excel Report:**
