@@ -1,0 +1,61 @@
+============================================================
+  BOT Exchange Rate CSV Generator
+  Run Date: 2026-03-07 17:45:09
+  Period:   2025-01-01 to 2026-03-07
+============================================================
+
+[STEP 1/3] Fetching Thai holidays from BOT API...
+  ✓ 2025: 19 holidays loaded
+  ✓ 2026: 19 holidays loaded
+  Total holidays: 38
+
+[STEP 2/3] Fetching exchange rates from BOT API...
+  Currencies: USD, EUR
+  Chunk size: 30 days per request (API limit: 31 days)
+
+
+============================================================
+SAMPLE RAW API RESPONSE (USD 2025-01-01)
+============================================================
+{"result":{"timestamp":"2026-03-07 17:45:10","api":"Daily Weighted-average Interbank Exchange Rate - THB / USD","data":{"data_header":{"report_name_eng":"Rates of Exchange of Commercial Banks in Bangkok Metropolis (2002-present)","report_name_th":"อัตราแลกเปลี่ยนเฉลี่ยของธนาคารพาณิชย์ในกรุงเทพมหานคร (2545-ปัจจุบัน)","report_uoq_name_eng":"(Unit: Baht / 1 Unit of Foreign Currency)","report_uoq_name_th":"(หน่วย: บาท ต่อ 1 หน่วยเงินตราต่างประเทศ)","report_source_of_data":[{"source_of_data_eng":"Bank of Thailand","source_of_data_th":"ธนาคารแห่งประเทศไทย"}],"report_remark":[{"report_remark_eng":"Since Nov 16, 2015 the data regarding Buying Transfer Rate of PKR has been changed to Buying Rate using Foreign Exchange Rates (LSEG) with Bangkok Market Crossing.","report_remark_th":"ตั้งแต่วันที่ 16 พ.ย. 2558 ข้อมูลในอัตราซื้อเงินโอนของสกุล PKR ได้เปลี่ยนเป็นอัตราซื้อที่ใช้อัตราในตลาดต่างประเทศ (LSEG) คำนวณผ่านอัตราซื้อขายเงินดอลลาร์ สรอ. ในตลาดกรุงเทพฯ"}],"last_updated":"2026-03-06"},"data_detail":[{"period":"2025-01-31","currency_id":"USD","currency_name_th":"สหรัฐอเมริกา : ดอลลาร์ (USD)","currency_name_eng":"USA : DOLLAR (USD) ","buying_sight":"33.4092000","buying_transfer":"33.4853000","selling":"33.8042000","mid_rate":"33.6448000"},{"period":"2025-01-30","currency_id":"USD","currency_name_th":"สหรัฐอเมริกา : ดอลลาร์ (USD)","currency_name_eng":"USA : DOLLAR (USD) ","buying_sight":"33.5611000","buying_transfer":"33.6210000","selling":"33.9338000","mid_rate":"33.7774000"},{"period":"2025-01-29","currency_id":"USD","currency_name_th":"สหรัฐอเมริกา : ดอลลาร์ (USD)","currency_name_eng":"USA : DOLLAR (USD) ","buying_sight":"33.5344000","buying_transfer":"33.6150000","selling":"33.9397000","mid_rate":"33.7774000"},{"period":"2025-01-28","currency_id":"USD","currency_name_th":"สหรัฐอเมริกา : ดอลลาร์ (USD)","currency_name_eng":"USA : DOLLAR (USD) ","buying_sight":"33.6251000","buying_transfer":"33.7090000","selling":"34.0311000","mid_rate":"33.8701000"},{"period":"2025-01-27","curr
+  ✓ USD 2025-01-01 → 2025-01-31: 22 days
+  ✓ EUR 2025-01-01 → 2025-01-31: 22 days
+  ✓ USD 2025-02-01 → 2025-03-03: 20 days
+  ✓ EUR 2025-02-01 → 2025-03-03: 20 days
+  ✓ USD 2025-03-04 → 2025-04-03: 23 days
+  ✓ EUR 2025-03-04 → 2025-04-03: 23 days
+  ✓ USD 2025-04-04 → 2025-05-04: 17 days
+  ✓ EUR 2025-04-04 → 2025-05-04: 17 days
+  ✓ USD 2025-05-05 → 2025-06-04: 19 days
+  ✓ EUR 2025-05-05 → 2025-06-04: 19 days
+  ✓ USD 2025-06-05 → 2025-07-05: 22 days
+  ✓ EUR 2025-06-05 → 2025-07-05: 22 days
+  ✓ USD 2025-07-06 → 2025-08-05: 20 days
+  ✓ EUR 2025-07-06 → 2025-08-05: 20 days
+  ✓ USD 2025-08-06 → 2025-09-05: 21 days
+  ✓ EUR 2025-08-06 → 2025-09-05: 21 days
+  ✓ USD 2025-09-06 → 2025-10-06: 21 days
+  ✓ EUR 2025-09-06 → 2025-10-06: 21 days
+  ✓ USD 2025-10-07 → 2025-11-06: 21 days
+  ✓ EUR 2025-10-07 → 2025-11-06: 21 days
+  ✓ USD 2025-11-07 → 2025-12-07: 20 days
+  ✓ EUR 2025-11-07 → 2025-12-07: 20 days
+  ✓ USD 2025-12-08 → 2026-01-07: 19 days
+  ✓ EUR 2025-12-08 → 2026-01-07: 19 days
+  ✓ USD 2026-01-08 → 2026-02-07: 22 days
+  ✓ EUR 2026-01-08 → 2026-02-07: 22 days
+  ✓ USD 2026-02-08 → 2026-03-07: 19 days
+  ✓ EUR 2026-02-08 → 2026-03-07: 19 days
+
+  Total days with exchange rate data: 286
+
+[STEP 3/3] Generating CSV output...
+
+============================================================
+  GENERATION COMPLETE
+  Total CSV rows:     431
+  Rows with rates:    286
+  Holidays loaded:    38
+  Date range:         2025-01-01 to 2026-03-07
+  Debug log:          /Users/d7y1ce/AAE/Works/debug.log
+============================================================
