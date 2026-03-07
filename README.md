@@ -4,7 +4,7 @@ A Python toolset designed for corporate finance departments to automatically fet
 
 ## Features
 
-- **Accurate:** Hits the official BOT API for Weighted-Average Interbank Exchange Rates.
+- **Authoritative Data Integration:** Synchronizes directly with the official Bank of Thailand (BOT) API to ensure precise, authoritative Weighted-Average Interbank Exchange Rates.
 - **Corporate Formatting:** Generates a presentation-ready Excel workbook with multiple tabs, conditional formatting, and performance line charts.
 - **Robust Accounting:** Calculates up to 4+ decimal places. Includes built-in Thai fixed holiday calendars to annotate holidays that fall on weekends.
 
