@@ -10,8 +10,15 @@ A Python toolset designed for corporate finance departments to automatically fet
 
 ## Prerequisites
 
-- Python 3.7+
-- Bank of Thailand API Tokens
+- **Python 3.7+**  &nbsp; [![Download Python](https://img.shields.io/badge/Download-Python-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/downloads/)
+- **Bank of Thailand API Tokens**
+
+> [!NOTE]
+> **Need Python?**
+>
+> - **Windows:** [Download](https://www.python.org/downloads/windows/) the latest installer and **IMPORTANT**: Check the box **"Add Python to PATH"** during installation.
+> - **macOS:** [Download](https://www.python.org/downloads/macos/) and run the installer, or use `brew install python` if you have Homebrew.
+> - **Verify:** Open your terminal and type `python3 --version` to check.
 
 ## Setup
 
