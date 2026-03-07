@@ -21,8 +21,8 @@ A Python toolset designed for corporate finance departments to automatically fet
 2. **Configure API Tokens:**
    This project requires two API tokens from the Bank of Thailand.
 
-   - Create a file named `.env` in the root directory.
-   - Add your tokens to the file in the following format:
+   - Edit the `.env` file in the root directory.
+   - Add or update your tokens in the following format:
 
      ```env
      BOT_TOKEN_EXG="your_exchange_rate_token_here"
