@@ -22,12 +22,11 @@ A Python toolset designed for corporate finance departments to automatically fet
    This project requires two API tokens from the Bank of Thailand.
 
    - Create a file named `.env` in the root directory.
-   - Copy the content of `.env.example` into `.env`.
-   - Update the values with your actual tokens:
+   - Add your tokens to the file in the following format:
 
      ```env
-     BOT_TOKEN_EXG=your_exchange_rate_token_here
-     BOT_TOKEN_HOL=your_holiday_token_here
+     BOT_TOKEN_EXG="your_exchange_rate_token_here"
+     BOT_TOKEN_HOL="your_holiday_token_here"
      ```
 
    > [!TIP]
