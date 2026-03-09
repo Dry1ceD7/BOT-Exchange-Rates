@@ -57,7 +57,8 @@ python3 bot_excel_report.py
 **To generate a raw CSV:**
 
 ```bash
-python3 bot_generator.py > BOT_Exchange_rates.csv
+python3 bot_generator.py
 ```
 
-*Outputs columns: Year, Date, USD_Buying_TT, USD_Selling, EUR_Buying_TT, EUR_Selling, Remark*
+*Outputs: `BOT_Exchange_rates_YYYY-MM-DD.csv`*
+*Columns: Year, Date, USD_Buying_TT, USD_Selling, EUR_Buying_TT, EUR_Selling, Remark*
