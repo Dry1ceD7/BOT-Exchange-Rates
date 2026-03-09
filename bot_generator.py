@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 import sys
+import csv
 import json
 import ssl
 import os
 import urllib.request
-import urllib.error
 from datetime import date, timedelta, datetime
 
-# ─── Load Environment Variables ─────────────────────────────
+# ─── Read tokens from .env ────────────────────────────────────
+# Tokens are stored in a separate .env file so they're not hardcoded here.
+# The .env is in .gitignore so it won't get pushed to GitHub.
 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 if os.path.exists(env_path):
     with open(env_path, "r") as f:
@@ -24,15 +26,30 @@ if not TOKEN_EXCHANGE_RATE or not TOKEN_HOLIDAY:
     sys.exit("Error: Missing BOT API tokens in .env file.")
 
 # ─── Configuration ───────────────────────────────────────────
+# Main BOT API gateway and the two endpoints we use
 GATEWAY_URL = "https://gateway.api.bot.or.th"
 EXCHANGE_RATE_PATH = "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
 HOLIDAY_PATH = "/financial-institutions-holidays/"
+
+# Date range for the report — change START_DATE if you need a different period
 START_DATE = date(2025, 1, 1)
 END_DATE = date.today()
+
+# BOT API only allows up to 30 days per single request
 MAX_DAYS_PER_REQUEST = 30
+
+# Output CSV file — named with today's date so each run saves a separate file
+OUTPUT_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    f"BOT_Exchange_rates_{datetime.now().strftime('%Y-%m-%d')}.csv"
+)
+
 ssl_context = ssl.create_default_context()
 
-# ─── Fixed Thai Calendar Holidays ────────────────────────────
+# ─── Fixed Thai public holidays ──────────────────────────────
+# These recurring annual dates are a fallback for when the BOT holidays API
+# doesn't return them (e.g. older years or when a holiday falls on a weekend
+# and the API only lists the substitution day instead of the original date).
 FIXED_THAI_HOLIDAYS = {
     (1, 1):   "New Year's Day",
     (4, 6):   "Chakri Memorial Day",
@@ -51,6 +68,8 @@ FIXED_THAI_HOLIDAYS = {
 }
 
 def bot_api_get(full_url, auth_token):
+    # Sends an authenticated GET to the BOT gateway and returns parsed JSON.
+    # Returns None if the request fails so callers can just check `if not data`.
     request = urllib.request.Request(
         full_url,
         headers={"Authorization": auth_token, "accept": "application/json"}
@@ -61,7 +80,9 @@ def bot_api_get(full_url, auth_token):
     except Exception:
         return None
 
-# ─── Fetch Holidays ──────────────────────────────────────────
+# ─── Fetch public holidays ───────────────────────────────────
+# We pull one year at a time (API requirement) and store everything in
+# a flat dict so date lookups later are a simple holidays.get(date_str).
 holidays = {}
 start_year = START_DATE.year
 end_year = END_DATE.year
@@ -78,7 +99,9 @@ for year in range(start_year, end_year + 1):
                 if holiday_date:
                     holidays[holiday_date] = holiday_name
 
-# ─── Fetch Exchange Rates ────────────────────────────────────
+# ─── Fetch exchange rates ────────────────────────────────────
+# We loop through the full date range in 30-day chunks (BOT API limit).
+# Both USD and EUR are fetched in the same loop to avoid duplicate chunks.
 exchange_rates = {}
 chunk_start_date = START_DATE
 
@@ -120,19 +143,22 @@ while chunk_start_date <= END_DATE:
 
     chunk_start_date = chunk_end_date + timedelta(days=1)
 
-# ─── Generate CSV Output ─────────────────────────────────────
-print("Year,Date,USD_Buying_TT,USD_Selling,EUR_Buying_TT,EUR_Selling,Remark")
-
+# ─── Build one row per calendar day ──────────────────────────
+# We go through every single day (not just trading days) so weekends and
+# holidays still appear in the output — just with blank rate columns.
+# The Remark column explains why a day has no rate data.
+all_rows = []
 current_date = START_DATE
+
 while current_date <= END_DATE:
     date_string = current_date.strftime("%Y-%m-%d")
-    year_string = current_date.strftime("%Y")
 
+    # Check BOT API holidays first; fall back to our fixed list for the rest
     holiday_name = holidays.get(date_string, "")
     if not holiday_name:
         holiday_name = FIXED_THAI_HOLIDAYS.get((current_date.month, current_date.day), "")
 
-    is_weekend = current_date.weekday() >= 5
+    is_weekend = current_date.weekday() >= 5  # Saturday=5, Sunday=6
 
     if is_weekend and holiday_name:
         remark = f"Weekend; {holiday_name}"
@@ -143,13 +169,58 @@ while current_date <= END_DATE:
     else:
         remark = ""
 
+    # Commas inside remark would break the CSV, so swap them to semicolons
     remark = remark.replace(",", ";")
 
     day_rates = exchange_rates.get(date_string, {})
-    usd_buying_tt = day_rates.get("USD", {}).get("buying_tt", "")
-    usd_selling = day_rates.get("USD", {}).get("selling", "")
-    eur_buying_tt = day_rates.get("EUR", {}).get("buying_tt", "")
-    eur_selling = day_rates.get("EUR", {}).get("selling", "")
+    all_rows.append({
+        "Year":          current_date.year,
+        "Date":          date_string,
+        "USD_Buying_TT": day_rates.get("USD", {}).get("buying_tt", ""),
+        "USD_Selling":   day_rates.get("USD", {}).get("selling", ""),
+        "EUR_Buying_TT": day_rates.get("EUR", {}).get("buying_tt", ""),
+        "EUR_Selling":   day_rates.get("EUR", {}).get("selling", ""),
+        "Remark":        remark,
+    })
 
-    print(f"{year_string},{date_string},{usd_buying_tt},{usd_selling},{eur_buying_tt},{eur_selling},{remark}")
     current_date += timedelta(days=1)
+
+# ─── Write CSV file ───────────────────────────────────────────
+# Previously this used print() which meant you had to pipe the output
+# yourself: python3 bot_generator.py > file.csv
+# Now it just writes the file directly using Python's csv module,
+# which also handles quoting automatically (no manual comma-escaping needed).
+def write_csv(rows, output_path):
+    columns = ["Year", "Date", "USD_Buying_TT", "USD_Selling",
+               "EUR_Buying_TT", "EUR_Selling", "Remark"]
+    with open(output_path, "w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+
+write_csv(all_rows, OUTPUT_FILE)
+print(f"Done. CSV saved to: {OUTPUT_FILE}")
+print(f"Total rows: {len(all_rows)}  (trading days with rates: {len(exchange_rates)})")
+
+
+# ─── Changelog ───────────────────────────────────────────────
+# Every update to this file should add a new entry below.
+# Format:  Date | Who | What changed
+#
+# 2026-03-09 | Initial version (GitHub)
+#            | - Fetches USD and EUR rates from BOT API in 30-day chunks
+#            | - Fetches public holidays from BOT API
+#            | - Outputs CSV by printing each row to stdout (required piping to a file)
+#
+# 2026-03-09 | Update
+#            | ADDED:   import csv
+#            | ADDED:   OUTPUT_FILE variable — auto-named with today's date
+#            | ADDED:   all_rows list — collects rows before writing
+#            | ADDED:   write_csv() function — writes the CSV file directly
+#            |          (no more manual piping: python3 bot_generator.py > file.csv)
+#            | ADDED:   comments/explanation on every section
+#            | REMOVED: import urllib.error (was unused in original)
+#            | REMOVED: year_string variable (replaced by current_date.year inline)
+#            | REMOVED: 4 separate rate variables before print() (merged into dict)
+#            | REMOVED: print() header + print() row loop (replaced by write_csv)
+#            | NOT CHANGED: all logic, all config constants, all variable names
