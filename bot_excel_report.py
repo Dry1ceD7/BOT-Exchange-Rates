@@ -37,7 +37,18 @@ from datetime import date, timedelta, datetime
 from collections import OrderedDict
 
 # ─── Auto-install openpyxl to local _libs folder if missing ──
-_LIBS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_libs")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = SCRIPT_DIR
+
+# Possible locations for _libs
+_LIBS_LOCAL = os.path.join(SCRIPT_DIR, "_libs")
+_LIBS_PARENT = os.path.join(PARENT_DIR, "_libs")
+
+if os.path.exists(_LIBS_PARENT):
+    _LIBS = _LIBS_PARENT
+else:
+    _LIBS = _LIBS_LOCAL
+
 if _LIBS not in sys.path:
     sys.path.insert(0, _LIBS)
 
@@ -58,16 +69,24 @@ except ImportError:
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import LineChart, Reference
+from openpyxl.formatting.rule import ColorScaleRule
 
 # ─── Load Environment Variables ─────────────────────────────
-env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+# Checks for .env in current folder or parent folder
+env_path_local = os.path.join(SCRIPT_DIR, ".env")
+env_path_parent = os.path.join(PARENT_DIR, ".env")
+
+env_path = env_path_parent if os.path.exists(env_path_parent) else env_path_local
+
 if os.path.exists(env_path):
     with open(env_path, "r") as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith("#"):
-                key, val = line.split("=", 1)
-                os.environ[key.strip()] = val.strip().strip("\"'")
+                parts = line.split("=", 1)
+                if len(parts) == 2:
+                    key, val = parts
+                    os.environ[key.strip()] = val.strip().strip("\"'")
 
 TOKEN_EXG = os.environ.get("BOT_TOKEN_EXG", "")
 TOKEN_HOL = os.environ.get("BOT_TOKEN_HOL", "")
@@ -81,9 +100,13 @@ HOL_PATH  = "/financial-institutions-holidays/"
 START     = date(2025, 1, 1)
 END       = date.today()
 CHUNK     = 30
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TODAY_STR  = datetime.now().strftime("%Y-%m-%d")
-OUTPUT     = os.path.join(SCRIPT_DIR, f"BOT_ExchangeRate_Report_{TODAY_STR}.xlsx")
+# Output file — redirected to ../data/output/ if it exists
+DATA_OUTPUT_DIR = os.path.join(PARENT_DIR, "data", "output")
+if os.path.exists(DATA_OUTPUT_DIR):
+    OUTPUT = os.path.join(DATA_OUTPUT_DIR, "BOT_ExchangeRate_Report.xlsx")
+else:
+    OUTPUT = os.path.join(SCRIPT_DIR, "BOT_ExchangeRate_Report.xlsx")
 
 ssl_ctx = ssl.create_default_context()
 
@@ -179,7 +202,7 @@ NUM_FMT_AMT  = '#,##0.00'
 
 
 def log(msg):
-    pass
+    print(msg)
 
 
 def bot_get(url, token):
@@ -457,7 +480,7 @@ def build_rate_sheet(wb, ccy, tab_color, buy_key, sell_key):
             row_fill = FILL_WHITE          # Normal → white
 
         write_cell(ws, row, 1, dt.year, FONT_BODY, row_fill, ALIGN_C, THIN_BORDER)
-        write_cell(ws, row, 2, dt, FONT_BODY, row_fill, ALIGN_C, THIN_BORDER, "YYYY-MM-DD")
+        write_cell(ws, row, 2, dt, FONT_BODY, row_fill, ALIGN_C, THIN_BORDER, "DD MMM YYYY")
         write_cell(ws, row, 3, dt.strftime("%a"), FONT_SMALL, row_fill, ALIGN_C, THIN_BORDER)
 
         # Buying TT
@@ -526,6 +549,16 @@ def build_rate_sheet(wb, ccy, tab_color, buy_key, sell_key):
         for ci in [6, 7, 8]:
             write_cell(ws, sr, ci, "", FONT_BODY, FILL_GOLD_BG, ALIGN_R, THIN_BORDER)
 
+    # ── FEATURE: Heatmap on Daily Δ column (F) ──────────────────
+    delta_range = f"F5:F{last_data_row}"
+    ws.conditional_formatting.add(delta_range,
+        ColorScaleRule(
+            start_type='num', start_value=-0.5, start_color='F4CCCC',   # Light red
+            mid_type='num',   mid_value=0,      mid_color='FFFFFF',     # White
+            end_type='num',   end_value=0.5,     end_color='D9EAD3',    # Light green
+        )
+    )
+
     return ws
 
 
@@ -541,8 +574,8 @@ ws = wb.create_sheet("Summary Dashboard")
 ws.sheet_properties.tabColor = C_GOLD
 
 set_col_widths(ws, {
-    "A": 4, "B": 16, "C": 16, "D": 16, "E": 16,
-    "F": 4, "G": 16, "H": 16, "I": 16, "J": 16, "K": 4
+    "A": 4, "B": 22, "C": 18, "D": 14, "E": 14,
+    "F": 4, "G": 22, "H": 18, "I": 14, "J": 14, "K": 4
 })
 
 # Title
@@ -553,10 +586,154 @@ write_cell(ws, 1, 1, "  EXCHANGE RATE SUMMARY DASHBOARD",
 ws.row_dimensions[1].height = 40
 
 ws.merge_cells("A2:K2")
-write_cell(ws, 2, 1, f"  Monthly Analysis  |  {START} to {END}",
+write_cell(ws, 2, 1, f"  Period: {START.strftime('%d %b %Y')} – {END.strftime('%d %b %Y')}  |  Generated: {TODAY_STR}",
            FONT_SMALL, FILL_ACCENT_LT, ALIGN_L, NO_BORDER)
 
-# Build monthly aggregates
+# ── Prepare data for the highlight boxes ───────────────────
+usd_all_sells = [d["usd_sell"] for d in all_days if d["usd_sell"] is not None]
+eur_all_sells = [d["eur_sell"] for d in all_days if d["eur_sell"] is not None]
+
+# Find latest, yesterday, high date, low date
+def get_rate_info(all_days_list, sell_key):
+    """Extract latest rate, previous rate, high/low with dates."""
+    trading = [(d["date"], d[sell_key]) for d in all_days_list if d[sell_key] is not None]
+    if not trading:
+        return {}
+    latest_date, latest_rate = trading[-1]
+    prev_date, prev_rate = trading[-2] if len(trading) >= 2 else (None, None)
+    first_date, first_rate = trading[0]
+    all_rates = [r for _, r in trading]
+    high_rate = max(all_rates)
+    low_rate = min(all_rates)
+    high_date = next(d for d, r in trading if r == high_rate)
+    low_date = next(d for d, r in trading if r == low_rate)
+    avg_rate = sum(all_rates) / len(all_rates) if all_rates else 0
+    ytd_change = latest_rate - first_rate
+    ytd_pct = (ytd_change / first_rate * 100) if first_rate else 0
+    daily_chg = (latest_rate - prev_rate) if prev_rate else 0
+    daily_pct = (daily_chg / prev_rate * 100) if prev_rate else 0
+    return {
+        "latest_rate": latest_rate, "latest_date": latest_date,
+        "prev_rate": prev_rate, "prev_date": prev_date,
+        "high_rate": high_rate, "high_date": high_date,
+        "low_rate": low_rate, "low_date": low_date,
+        "avg_rate": avg_rate, "trading_days": len(trading),
+        "first_rate": first_rate, "first_date": first_date,
+        "ytd_change": ytd_change, "ytd_pct": ytd_pct,
+        "daily_chg": daily_chg, "daily_pct": daily_pct,
+    }
+
+usd_info = get_rate_info(all_days, "usd_sell")
+eur_info = get_rate_info(all_days, "eur_sell")
+
+# ── Styling ────────────────────────────────────────────────
+HIGHLIGHT_FILL = PatternFill("solid", fgColor="EBF5FB")
+HL_BORDER = Border(
+    bottom=Side(style="thin", color=C_BORDER),
+    top=Side(style="thin", color=C_BORDER),
+    left=Side(style="thin", color=C_BORDER),
+    right=Side(style="thin", color=C_BORDER),
+)
+FONT_BIG_NUM = Font(name="Calibri", size=18, bold=True, color=C_PRIMARY)
+FONT_CHG_UP = Font(name="Calibri", size=11, bold=True, color=C_GREEN)
+FONT_CHG_DN = Font(name="Calibri", size=11, bold=True, color=C_RED)
+FONT_DATE_SM = Font(name="Calibri", size=9, italic=True, color=C_GREY)
+
+def build_overview_box(ws, start_col, info, ccy, header_color):
+    """Build one overview card for a currency."""
+    c1 = start_col      # Label column (merged)
+    c2 = start_col + 1  
+    c3 = start_col + 2  # Value column (merged)
+    c4 = start_col + 3
+
+    eur_fill = PatternFill("solid", fgColor=header_color)
+
+    # Header row
+    ws.merge_cells(start_row=4, start_column=c1, end_row=4, end_column=c4)
+    write_cell(ws, 4, c1, f"  {ccy} / THB", FONT_HDR, eur_fill, ALIGN_L, HL_BORDER)
+    for c in range(c1, c4 + 1):
+        ws.cell(row=4, column=c).fill = eur_fill
+        ws.cell(row=4, column=c).border = HL_BORDER
+
+    if not info:
+        return
+
+    # Row 5: Latest Rate (BIG)
+    ws.merge_cells(start_row=5, start_column=c1, end_row=5, end_column=c2)
+    write_cell(ws, 5, c1, "  Latest Selling Rate", FONT_BODY_B, HIGHLIGHT_FILL, ALIGN_L, HL_BORDER)
+    ws.merge_cells(start_row=5, start_column=c3, end_row=5, end_column=c4)
+    write_cell(ws, 5, c3, info["latest_rate"], FONT_BIG_NUM, HIGHLIGHT_FILL, ALIGN_R, HL_BORDER, NUM_FMT_RATE)
+    ws.row_dimensions[5].height = 32
+
+    # Row 6: vs Yesterday — with arrow
+    chg = info["daily_chg"]
+    pct = info["daily_pct"]
+    arrow = "▲" if chg >= 0 else "▼"
+    chg_font = FONT_CHG_UP if chg >= 0 else FONT_CHG_DN
+    chg_text = f"{arrow} {abs(chg):.4f}  ({abs(pct):.2f}%)"
+
+    ws.merge_cells(start_row=6, start_column=c1, end_row=6, end_column=c2)
+    write_cell(ws, 6, c1, f"  vs {info['prev_date'].strftime('%d %b') if info.get('prev_date') else 'N/A'}",
+               FONT_BODY_B, HIGHLIGHT_FILL, ALIGN_L, HL_BORDER)
+    ws.merge_cells(start_row=6, start_column=c3, end_row=6, end_column=c4)
+    write_cell(ws, 6, c3, chg_text, chg_font, HIGHLIGHT_FILL, ALIGN_R, HL_BORDER)
+    ws.row_dimensions[6].height = 22
+
+    # Row 7: Period High
+    ws.merge_cells(start_row=7, start_column=c1, end_row=7, end_column=c2)
+    write_cell(ws, 7, c1, f"  Period High  ({info['high_date'].strftime('%d %b')})",
+               FONT_BODY_B, FILL_WHITE, ALIGN_L, HL_BORDER)
+    ws.merge_cells(start_row=7, start_column=c3, end_row=7, end_column=c4)
+    write_cell(ws, 7, c3, info["high_rate"], FONT_NUM, FILL_WHITE, ALIGN_R, HL_BORDER, NUM_FMT_RATE)
+    ws.row_dimensions[7].height = 22
+
+    # Row 8: Period Low
+    ws.merge_cells(start_row=8, start_column=c1, end_row=8, end_column=c2)
+    write_cell(ws, 8, c1, f"  Period Low  ({info['low_date'].strftime('%d %b')})",
+               FONT_BODY_B, FILL_WHITE, ALIGN_L, HL_BORDER)
+    ws.merge_cells(start_row=8, start_column=c3, end_row=8, end_column=c4)
+    write_cell(ws, 8, c3, info["low_rate"], FONT_NUM, FILL_WHITE, ALIGN_R, HL_BORDER, NUM_FMT_RATE)
+    ws.row_dimensions[8].height = 22
+
+    # Row 9: Period Average
+    ws.merge_cells(start_row=9, start_column=c1, end_row=9, end_column=c2)
+    write_cell(ws, 9, c1, "  Period Average", FONT_BODY_B, FILL_WHITE, ALIGN_L, HL_BORDER)
+    ws.merge_cells(start_row=9, start_column=c3, end_row=9, end_column=c4)
+    write_cell(ws, 9, c3, info["avg_rate"], FONT_NUM, FILL_WHITE, ALIGN_R, HL_BORDER, NUM_FMT_RATE)
+    ws.row_dimensions[9].height = 22
+
+    # Row 10: Trading Range (High − Low)
+    t_range = info["high_rate"] - info["low_rate"]
+    ws.merge_cells(start_row=10, start_column=c1, end_row=10, end_column=c2)
+    write_cell(ws, 10, c1, "  Trading Range (H−L)", FONT_BODY_B, FILL_WHITE, ALIGN_L, HL_BORDER)
+    ws.merge_cells(start_row=10, start_column=c3, end_row=10, end_column=c4)
+    write_cell(ws, 10, c3, t_range, FONT_NUM, FILL_WHITE, ALIGN_R, HL_BORDER, NUM_FMT_RATE)
+    ws.row_dimensions[10].height = 22
+
+    # Row 11: YTD Change
+    ytd_arrow = "▲" if info["ytd_change"] >= 0 else "▼"
+    ytd_font = FONT_CHG_UP if info["ytd_change"] >= 0 else FONT_CHG_DN
+    ytd_text = f"{ytd_arrow} {abs(info['ytd_change']):.4f}  ({abs(info['ytd_pct']):.2f}%)"
+
+    ws.merge_cells(start_row=11, start_column=c1, end_row=11, end_column=c2)
+    write_cell(ws, 11, c1, f"  YTD Change  ({info['first_date'].strftime('%d %b')} → today)",
+               FONT_BODY_B, HIGHLIGHT_FILL, ALIGN_L, HL_BORDER)
+    ws.merge_cells(start_row=11, start_column=c3, end_row=11, end_column=c4)
+    write_cell(ws, 11, c3, ytd_text, ytd_font, HIGHLIGHT_FILL, ALIGN_R, HL_BORDER)
+    ws.row_dimensions[11].height = 22
+
+    # Row 12: Trading Days Count
+    ws.merge_cells(start_row=12, start_column=c1, end_row=12, end_column=c2)
+    write_cell(ws, 12, c1, "  Total Trading Days", FONT_BODY_B, HIGHLIGHT_FILL, ALIGN_L, HL_BORDER)
+    ws.merge_cells(start_row=12, start_column=c3, end_row=12, end_column=c4)
+    write_cell(ws, 12, c3, info["trading_days"], FONT_BODY_B, HIGHLIGHT_FILL, ALIGN_R, HL_BORDER, "#,##0")
+    ws.row_dimensions[12].height = 22
+
+
+build_overview_box(ws, 2, usd_info, "USD", "1F4E79")
+build_overview_box(ws, 7, eur_info, "EUR", "1E8449")
+
+# ── Build monthly aggregates ──────────────────────────────
 monthly = OrderedDict()
 for d in all_days:
     mkey = d["date"].strftime("%Y-%m")
@@ -570,8 +747,9 @@ for d in all_days:
         monthly[mkey]["eur_buys"].append(d["eur_buy"])
         monthly[mkey]["eur_sells"].append(d["eur_sell"])
 
+# ── Monthly Summary Tables ────────────────────────────────
 # USD Section
-r = 4
+r = 14
 ws.merge_cells(f"B{r}:E{r}")
 write_cell(ws, r, 2, "  USD / THB — Monthly Summary", FONT_HDR, FILL_PRIMARY, ALIGN_L, THIN_BORDER)
 for c in range(2, 6):
@@ -596,17 +774,17 @@ for mkey, mdata in monthly.items():
     r += 1
 
 # EUR Section
-ws.merge_cells(f"G4:J4")
-write_cell(ws, 4, 7, "  EUR / THB — Monthly Summary", FONT_HDR,
+ws.merge_cells(f"G14:J14")
+write_cell(ws, 14, 7, "  EUR / THB — Monthly Summary", FONT_HDR,
            PatternFill("solid", fgColor="1E8449"), ALIGN_L, THIN_BORDER)
 for c in range(7, 11):
-    ws.cell(row=4, column=c).fill = PatternFill("solid", fgColor="1E8449")
-    ws.cell(row=4, column=c).border = THIN_BORDER
+    ws.cell(row=14, column=c).fill = PatternFill("solid", fgColor="1E8449")
+    ws.cell(row=14, column=c).border = THIN_BORDER
 
 for i, h in enumerate(["Month", "Avg Buying TT", "Avg Selling", "Spread"], 7):
-    write_cell(ws, 5, i, h, FONT_HDR, FILL_ACCENT, ALIGN_C, THIN_BORDER)
+    write_cell(ws, 15, i, h, FONT_HDR, FILL_ACCENT, ALIGN_C, THIN_BORDER)
 
-er = 6
+er = 16
 for mkey, mdata in monthly.items():
     row_fill = FILL_ALT if er % 2 == 0 else FILL_WHITE
     write_cell(ws, er, 7, mkey, FONT_BODY_B, row_fill, ALIGN_C, THIN_BORDER)
@@ -619,25 +797,45 @@ for mkey, mdata in monthly.items():
         write_cell(ws, er, 10, spread, FONT_NUM, row_fill, ALIGN_R, THIN_BORDER, NUM_FMT_RATE)
     er += 1
 
-# Line chart for USD selling rates
-chart = LineChart()
-chart.title = "USD/THB Selling Rate Trend"
-chart.style = 10
-chart.y_axis.title = "THB per 1 USD"
-chart.x_axis.title = "Month"
-chart.height = 14
-chart.width = 28
-chart.y_axis.numFmt = NUM_FMT_RATE
+# ── Charts: USD + EUR side by side ────────────────────────
+chart_start = max(r, er) + 2
 
-usd_data_end = 5 + len(monthly)
-data_ref = Reference(ws, min_col=4, min_row=5, max_row=usd_data_end)
-cats_ref = Reference(ws, min_col=2, min_row=6, max_row=usd_data_end)
-chart.add_data(data_ref, titles_from_data=True)
-chart.set_categories(cats_ref)
-chart.series[0].graphicalProperties.line.width = 25000
+# USD Chart
+usd_chart = LineChart()
+usd_chart.title = "USD/THB Selling Rate Trend"
+usd_chart.style = 10
+usd_chart.y_axis.title = "THB per 1 USD"
+usd_chart.x_axis.title = "Month"
+usd_chart.height = 14
+usd_chart.width = 14
+usd_chart.y_axis.numFmt = NUM_FMT_RATE
 
-chart_row = max(r, er) + 2
-ws.add_chart(chart, f"B{chart_row}")
+usd_data_end = 15 + len(monthly)
+data_ref = Reference(ws, min_col=4, min_row=15, max_row=usd_data_end)
+cats_ref = Reference(ws, min_col=2, min_row=16, max_row=usd_data_end)
+usd_chart.add_data(data_ref, titles_from_data=True)
+usd_chart.set_categories(cats_ref)
+usd_chart.series[0].graphicalProperties.line.width = 25000
+ws.add_chart(usd_chart, f"B{chart_start}")
+
+# EUR Chart
+eur_chart = LineChart()
+eur_chart.title = "EUR/THB Selling Rate Trend"
+eur_chart.style = 10
+eur_chart.y_axis.title = "THB per 1 EUR"
+eur_chart.x_axis.title = "Month"
+eur_chart.height = 14
+eur_chart.width = 14
+eur_chart.y_axis.numFmt = NUM_FMT_RATE
+
+eur_data_end = 15 + len(monthly)
+eur_data_ref = Reference(ws, min_col=9, min_row=15, max_row=eur_data_end)
+eur_cats_ref = Reference(ws, min_col=7, min_row=16, max_row=eur_data_end)
+eur_chart.add_data(eur_data_ref, titles_from_data=True)
+eur_chart.set_categories(eur_cats_ref)
+eur_chart.series[0].graphicalProperties.line.width = 25000
+eur_chart.series[0].graphicalProperties.line.solidFill = "1E8449"
+ws.add_chart(eur_chart, f"G{chart_start}")
 
 ws.sheet_view.showGridLines = False
 
@@ -740,7 +938,7 @@ ws.merge_cells("B4:C4")
 write_cell(ws, 4, 2, "  USD ⇄ THB", FONT_HDR, FILL_PRIMARY, ALIGN_L, THIN_BORDER)
 
 write_cell(ws, 6, 2, "Rate Date:", FONT_BODY_B, FILL_WHITE, ALIGN_L, THIN_BORDER)
-write_cell(ws, 6, 3, latest_usd["date"] if latest_usd else "", FONT_BODY, FILL_WHITE, ALIGN_C, THIN_BORDER, "YYYY-MM-DD")
+write_cell(ws, 6, 3, latest_usd["date"] if latest_usd else "", FONT_BODY, FILL_WHITE, ALIGN_C, THIN_BORDER, "DD MMM YYYY")
 
 write_cell(ws, 7, 2, "Buying TT:", FONT_BODY_B, FILL_WHITE, ALIGN_L, THIN_BORDER)
 write_cell(ws, 7, 3, latest_usd["usd_buy"] if latest_usd else "", FONT_NUM, FILL_WHITE, ALIGN_R, THIN_BORDER, NUM_FMT_RATE)
@@ -774,7 +972,7 @@ write_cell(ws, 4, 6, "  EUR ⇄ THB", FONT_HDR,
            PatternFill("solid", fgColor="1E8449"), ALIGN_L, THIN_BORDER)
 
 write_cell(ws, 6, 6, "Rate Date:", FONT_BODY_B, FILL_WHITE, ALIGN_L, THIN_BORDER)
-write_cell(ws, 6, 7, latest_eur["date"] if latest_eur else "", FONT_BODY, FILL_WHITE, ALIGN_C, THIN_BORDER, "YYYY-MM-DD")
+write_cell(ws, 6, 7, latest_eur["date"] if latest_eur else "", FONT_BODY, FILL_WHITE, ALIGN_C, THIN_BORDER, "DD MMM YYYY")
 
 write_cell(ws, 7, 6, "Buying TT:", FONT_BODY_B, FILL_WHITE, ALIGN_L, THIN_BORDER)
 write_cell(ws, 7, 7, latest_eur["eur_buy"] if latest_eur else "", FONT_NUM, FILL_WHITE, ALIGN_R, THIN_BORDER, NUM_FMT_RATE)
@@ -855,6 +1053,19 @@ sections = [
         "Under TAS 21 (IAS 21), spot rates at transaction date should be used for initial recognition.",
         "Closing rates at reporting date should be used for monetary items at period end.",
     ]),
+    ("AUTOMATION SCRIPT LOGIC", [
+        "This report is automatically generated using a Python script ('bot_excel_report.py').",
+        "It fetches the latest historical rates and holiday data directly from the Bank of Thailand APIs.",
+        "The script computes the Daily Δ (change) and Δ % automatically.",
+        "It then compiles all trading days and non-trading days (weekends/holidays) into this formatted workbook.",
+    ]),
+    ("UNDERSTANDING DAILY Δ (DELTA)", [
+        "The Greek letter Δ (Delta) is the universal shorthand for 'change' or 'difference'.",
+        "Daily Δ Formula: [Today's Rate] - [Previous Trading Day's Rate]",
+        "Example: If Tuesday's rate is 34.10 and Wednesday's is 34.15, the Daily Δ is +0.05",
+        "Δ % Formula: ( [Daily Δ] / [Previous Trading Day's Rate] ) * 100",
+        "Example: (0.05 / 34.10) * 100 = a +0.14% change compared to the previous day.",
+    ]),
 ]
 
 r = 3
@@ -881,8 +1092,8 @@ write_cell(ws, r + 1, 1,
 
 ws.sheet_view.showGridLines = False
 
-
 # ═══════════════════════════════════════════════════════════════
+
 # SAVE THE WORKBOOK
 # ═══════════════════════════════════════════════════════════════
 wb.save(OUTPUT)
@@ -893,3 +1104,17 @@ log(f"  File: {OUTPUT}")
 log(f"  Tabs: {len(wb.sheetnames)}")
 log(f"  Sheets: {', '.join(wb.sheetnames)}")
 log("=" * 60)
+
+# ─── Changelog ───────────────────────────────────────────────
+# Every major logic or visual update to this script is noted here.
+#
+# 2026-03-10 | v1 — Initial Dashboard version
+#            | - Added Summary Dashboard with High/Low/Average metrics
+#            | - Added visual heatmaps for daily changes
+#            | - Added line charts for USD/EUR trends
+#
+# 2026-03-11 | v2 — Overhaul
+#            | - Fixed log() function (switched from pass to print)
+#            | - Standardized all Excel date formats to "DD MMM YYYY"
+#            | - Fixed output filename to BOT_ExchangeRate_Report.xlsx
+#            | - Improved code documentation and section summaries

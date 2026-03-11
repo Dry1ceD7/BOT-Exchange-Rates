@@ -52,7 +52,7 @@ A Python toolset designed for corporate finance departments to automatically fet
 python3 bot_excel_report.py
 ```
 
-*Outputs: `BOT_ExchangeRate_Report_YYYY-MM-DD.xlsx`*
+*Outputs: `BOT_ExchangeRate_Report.xlsx`*
 
 **To generate a raw CSV:**
 
@@ -60,5 +60,18 @@ python3 bot_excel_report.py
 python3 bot_generator.py
 ```
 
-*Outputs: `BOT_Exchange_rates_YYYY-MM-DD.csv`*
-*Columns: Year, Date, USD_Buying_TT, USD_Selling, EUR_Buying_TT, EUR_Selling, Remark*
+*Outputs: `BOT_Exchange_rates.csv`*
+
+**To automatically fill accountant spreadsheets:**
+
+```bash
+python3 bot_acc_filler.py data/input/exchange_rate_file_sample.xlsx
+```
+
+*Outputs: `<filename>_updated.xlsx`*
+
+### How `bot_acc_filler.py` Works:
+1. **Reads API Data:** Fetches the valid trading days directly from Bank of Thailand.
+2. **Converts Dates:** Converts the text dates in your "Exrate USD" and "Exrate EUR" reference sheets into real Excel Datetime objects so Excel formulas can interact with them.
+3. **Smart Fallback Formulas (`XLOOKUP`):** It writes a dynamic Excel formula (`=XLOOKUP(..., -1)`) into the "วันที่ดึง Exchange rate date" column. If your export date ("วันที่ใบขน") lands on a weekend or public holiday, this formula automatically steps backward until it finds the *most recent valid trading day*.
+4. **Writes VLOOKUP:** Injects the standard `=VLOOKUP` formula into the "EX Rate" column pointing at those resolved trading days, keeping your spreadsheet fully dynamic and interactive!

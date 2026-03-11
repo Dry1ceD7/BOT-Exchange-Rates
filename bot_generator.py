@@ -8,16 +8,24 @@ import urllib.request
 from datetime import date, timedelta, datetime
 
 # ─── Read tokens from .env ────────────────────────────────────
-# Tokens are stored in a separate .env file so they're not hardcoded here.
-# The .env is in .gitignore so it won't get pushed to GitHub.
-env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+# Checks for .env in current folder or parent folder
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = SCRIPT_DIR
+
+env_path_local = os.path.join(SCRIPT_DIR, ".env")
+env_path_parent = os.path.join(PARENT_DIR, ".env")
+
+env_path = env_path_parent if os.path.exists(env_path_parent) else env_path_local
+
 if os.path.exists(env_path):
     with open(env_path, "r") as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith("#"):
-                key, val = line.split("=", 1)
-                os.environ[key.strip()] = val.strip().strip("\"'")
+                parts = line.split("=", 1)
+                if len(parts) == 2:
+                    key, val = parts
+                    os.environ[key.strip()] = val.strip().strip("\"'")
 
 TOKEN_EXCHANGE_RATE = os.environ.get("BOT_TOKEN_EXG", "")
 TOKEN_HOLIDAY = os.environ.get("BOT_TOKEN_HOL", "")
@@ -38,11 +46,12 @@ END_DATE = date.today()
 # BOT API only allows up to 30 days per single request
 MAX_DAYS_PER_REQUEST = 30
 
-# Output CSV file — named with today's date so each run saves a separate file
-OUTPUT_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    f"BOT_Exchange_rates_{datetime.now().strftime('%Y-%m-%d')}.csv"
-)
+# Output CSV file — redirected to ../data/output/ if it exists
+DATA_OUTPUT_DIR = os.path.join(PARENT_DIR, "data", "output")
+if os.path.exists(DATA_OUTPUT_DIR):
+    OUTPUT_FILE = os.path.join(DATA_OUTPUT_DIR, "BOT_Exchange_rates.csv")
+else:
+    OUTPUT_FILE = os.path.join(SCRIPT_DIR, "BOT_Exchange_rates.csv")
 
 ssl_context = ssl.create_default_context()
 
@@ -87,6 +96,7 @@ holidays = {}
 start_year = START_DATE.year
 end_year = END_DATE.year
 
+print(f"Fetching holidays from BOT API ({start_year}-{end_year})...")
 for year in range(start_year, end_year + 1):
     holiday_url = f"{GATEWAY_URL}{HOLIDAY_PATH}?year={year}"
     response_data = bot_api_get(holiday_url, TOKEN_HOLIDAY)
@@ -105,6 +115,7 @@ for year in range(start_year, end_year + 1):
 exchange_rates = {}
 chunk_start_date = START_DATE
 
+print(f"Fetching USD and EUR exchange rates from {START_DATE} to {END_DATE}...")
 while chunk_start_date <= END_DATE:
     chunk_end_date = min(chunk_start_date + timedelta(days=MAX_DAYS_PER_REQUEST), END_DATE)
     start_str = chunk_start_date.strftime("%Y-%m-%d")
@@ -151,15 +162,24 @@ all_rows = []
 current_date = START_DATE
 
 while current_date <= END_DATE:
-    date_string = current_date.strftime("%Y-%m-%d")
+    # Use formatted date like "04 Feb 2026" to match the accountant sample
+    date_string = current_date.strftime("%d %b %Y")
+    # For dictionary parsing (BOT api keys use YYYY-MM-DD), we keep an iso string
+    iso_date = current_date.strftime("%Y-%m-%d")
 
     # Check BOT API holidays first; fall back to our fixed list for the rest
-    holiday_name = holidays.get(date_string, "")
+    holiday_name = holidays.get(iso_date, "")
     if not holiday_name:
         holiday_name = FIXED_THAI_HOLIDAYS.get((current_date.month, current_date.day), "")
 
-    is_weekend = current_date.weekday() >= 5  # Saturday=5, Sunday=6
-
+    is_weekend = (current_date.weekday() >= 5)  # 5=Sat, 6=Sun
+    
+    # We always use the exact output date string for the result column
+    row_date = date_string
+    
+    remark = ""
+    # Look up the rate using the ISO format dictionary key
+    day_rates = exchange_rates.get(iso_date, {})
     if is_weekend and holiday_name:
         remark = f"Weekend; {holiday_name}"
     elif is_weekend:
@@ -199,8 +219,12 @@ def write_csv(rows, output_path):
         writer.writerows(rows)
 
 write_csv(all_rows, OUTPUT_FILE)
-print(f"Done. CSV saved to: {OUTPUT_FILE}")
-print(f"Total rows: {len(all_rows)}  (trading days with rates: {len(exchange_rates)})")
+print("=" * 60)
+print("  DONE!")
+print(f"  Rows written: {len(all_rows)}")
+print(f"  Trading days: {len(exchange_rates)}")
+print(f"  Output saved: {os.path.basename(OUTPUT_FILE)}")
+print("=" * 60)
 
 
 # ─── Changelog ───────────────────────────────────────────────
@@ -224,3 +248,8 @@ print(f"Total rows: {len(all_rows)}  (trading days with rates: {len(exchange_rat
 #            | REMOVED: 4 separate rate variables before print() (merged into dict)
 #            | REMOVED: print() header + print() row loop (replaced by write_csv)
 #            | NOT CHANGED: all logic, all config constants, all variable names
+# 2026-03-11 | Overhaul
+#            | - Standardized date format to "DD MMM YYYY" (e.g. 04 Feb 2026)
+#            | - Fixed output filename to BOT_Exchange_rates.csv (removed date suffix)
+#            | - Added detailed progress logging in the terminal
+#            | - Added iso_date for internal logic while keeping formatted display
