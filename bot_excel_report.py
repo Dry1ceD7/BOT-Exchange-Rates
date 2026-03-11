@@ -31,12 +31,15 @@ import json
 import ssl
 import os
 import urllib.request
+import argparse
+import asyncio
+from typing import Dict, Any, Optional, List
 
 import importlib
 from datetime import date, timedelta, datetime
 from collections import OrderedDict
 
-# ─── Auto-install openpyxl to local _libs folder if missing ──
+# ─── Auto-install openpyxl and aiohttp to local _libs folder 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = SCRIPT_DIR
 
@@ -54,17 +57,19 @@ if _LIBS not in sys.path:
 
 try:
     import openpyxl
+    import aiohttp
 except ImportError:
-    print("  Installing openpyxl to local _libs folder...", file=sys.stderr)
+    print("  Installing openpyxl and aiohttp to local _libs folder...", file=sys.stderr)
     import subprocess
     os.makedirs(_LIBS, exist_ok=True)
     subprocess.check_call([
         sys.executable, "-m", "pip", "install",
-        "--target", _LIBS, "openpyxl",
+        "--target", _LIBS, "openpyxl", "aiohttp",
         "--break-system-packages"
     ])
     importlib.invalidate_caches()
     import openpyxl
+    import aiohttp
 
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -97,8 +102,22 @@ if not TOKEN_EXG or not TOKEN_HOL:
 GATEWAY   = "https://gateway.api.bot.or.th"
 EXG_PATH  = "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
 HOL_PATH  = "/financial-institutions-holidays/"
-START     = date(2025, 1, 1)
-END       = date.today()
+
+# CLI Arguments
+parser = argparse.ArgumentParser(description="Bank of Thailand Executive Excel Report")
+parser.add_argument("--start", type=str, default="2025-01-01", help="Start date YYYY-MM-DD")
+parser.add_argument("--end", type=str, default=datetime.now().strftime("%Y-%m-%d"), help="End date YYYY-MM-DD")
+args = parser.parse_args()
+
+try:
+    START = datetime.strptime(args.start, "%Y-%m-%d").date()
+    END = datetime.strptime(args.end, "%Y-%m-%d").date()
+except ValueError:
+    sys.exit("Error: Dates must be in YYYY-MM-DD format.")
+    
+if START > END:
+    sys.exit("Error: Start date cannot be after end date.")
+
 CHUNK     = 30
 TODAY_STR  = datetime.now().strftime("%Y-%m-%d")
 # Output file — redirected to ../data/output/ if it exists
@@ -205,18 +224,101 @@ def log(msg):
     print(msg)
 
 
-def bot_get(url, token):
-    """Authenticated GET to official BOT API gateway."""
-    req = urllib.request.Request(url, headers={
-        "Authorization": token, "accept": "application/json"
-    })
-    try:
-        with urllib.request.urlopen(req, context=ssl_ctx, timeout=30) as r:
-            raw = r.read().decode("utf-8")
-            return json.loads(raw)
-    except Exception as e:
-        log(f"  API Error: {e}")
-        return None
+async def bot_api_get_async(session: aiohttp.ClientSession, full_url: str, auth_token: str, retries: int = 3) -> Optional[Dict[str, Any]]:
+    """Fetches data from BOT API asychronously with exponential backoff retries."""
+    headers = {"Authorization": auth_token, "accept": "application/json"}
+    for attempt in range(1, retries + 1):
+        try:
+            async with session.get(full_url, headers=headers, ssl=ssl_ctx, timeout=30) as response:
+                if response.status == 200:
+                    return await response.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            pass
+        if attempt < retries:
+            await asyncio.sleep(2 ** attempt)
+    return None
+
+async def fetch_all_data(start_date, end_date):
+    holidays = {}
+    rates = {}
+    async with aiohttp.ClientSession() as session:
+        holiday_tasks = []
+        for yr in range(start_date.year, end_date.year + 1):
+            url = f"{GATEWAY}{HOL_PATH}?year={yr}"
+            holiday_tasks.append(bot_api_get_async(session, url, TOKEN_HOL))
+            
+        rate_tasks = []
+        cs = start_date
+        while cs <= end_date:
+            ce = min(cs + timedelta(days=CHUNK), end_date)
+            sp, ep = cs.strftime("%Y-%m-%d"), ce.strftime("%Y-%m-%d")
+            for ccy in ("USD", "EUR"):
+                url = f"{GATEWAY}{EXG_PATH}?start_period={sp}&end_period={ep}&currency={ccy}"
+                rate_tasks.append((ccy, bot_api_get_async(session, url, TOKEN_EXG)))
+            cs = ce + timedelta(days=1)
+            
+        log(f"\n  [1/3] Fetching data ({len(holiday_tasks)} holiday years, {len(rate_tasks)} rate chunks concurrently)...")
+        holiday_results = await asyncio.gather(*holiday_tasks)
+        rate_results = await asyncio.gather(*(task[1] for task in rate_tasks))
+        
+        for data in holiday_results:
+            if data:
+                for h in data.get("result", {}).get("data", []):
+                    dt = str(h.get("Date", "")).strip()[:10]
+                    nm = str(h.get("HolidayDescription", "Holiday")).strip()
+                    if dt:
+                        holidays[dt] = nm
+                        
+        for (ccy, _), data in zip(rate_tasks, rate_results):
+            if data:
+                try:
+                    details = data.get("result", {}).get("data", {}).get("data_detail", [])
+                except (KeyError, AttributeError):
+                    continue
+                if not isinstance(details, list):
+                    continue
+                for row in details:
+                    dt = str(row.get("period", "")).strip()[:10]
+                    if not dt: continue
+                    bt = str(row.get("buying_transfer", "")).strip()
+                    sl = str(row.get("selling", "")).strip()
+                    if dt not in rates: rates[dt] = {}
+                    rates[dt][ccy] = {
+                        "buy_tt": float(bt) if bt else None,
+                        "sell": float(sl) if sl else None
+                    }
+                    
+    log(f"        Loaded {len(rates)} trading days.")
+    log("\n  [2/3] Building report data...")
+    all_days = []
+    cur = start_date
+    while cur <= end_date:
+        ds = cur.strftime("%Y-%m-%d")
+        hol = holidays.get(ds, "")
+        if not hol:
+            hol = FIXED_HOLIDAYS.get((cur.month, cur.day), "")
+        is_wknd = cur.weekday() >= 5
+        if is_wknd and hol:
+            remark = f"Weekend; {hol}"
+        elif is_wknd:
+            remark = "Weekend"
+        elif hol:
+            remark = hol
+        else:
+            remark = ""
+
+        day = rates.get(ds, {})
+        all_days.append({
+            "date": cur,
+            "usd_buy": day.get("USD", {}).get("buy_tt"),
+            "usd_sell": day.get("USD", {}).get("sell"),
+            "eur_buy": day.get("EUR", {}).get("buy_tt"),
+            "eur_sell": day.get("EUR", {}).get("sell"),
+            "remark": remark,
+        })
+        cur += timedelta(days=1)
+        
+    return all_days, rates
 
 
 def write_cell(ws, row, col, value, font=FONT_BODY, fill=None,
@@ -249,89 +351,13 @@ log(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 log("=" * 60)
 
 # ─── Holidays ────────────────────────────────────────────────
-log("\n[1/4] Fetching holidays...")
-holidays = {}
-for yr in range(START.year, END.year + 1):
-    data = bot_get(f"{GATEWAY}{HOL_PATH}?year={yr}", TOKEN_HOL)
-    if data:
-        for h in data.get("result", {}).get("data", []):
-            dt = str(h.get("Date", "")).strip()[:10]
-            nm = str(h.get("HolidayDescription", "Holiday")).strip()
-            if dt:
-                holidays[dt] = nm
-        log(f"  ✓ {yr}: {len([d for d in holidays if d.startswith(str(yr))])} holidays")
-
-# ─── Exchange Rates ──────────────────────────────────────────
-log("\n[2/4] Fetching exchange rates...")
-rates = {}
-cs = START
-while cs <= END:
-    ce = min(cs + timedelta(days=CHUNK), END)
-    sp, ep = cs.strftime("%Y-%m-%d"), ce.strftime("%Y-%m-%d")
-    for ccy in ("USD", "EUR"):
-        data = bot_get(
-            f"{GATEWAY}{EXG_PATH}?start_period={sp}&end_period={ep}&currency={ccy}",
-            TOKEN_EXG
-        )
-        if data:
-            try:
-                details = data["result"]["data"]["data_detail"]
-            except (KeyError, TypeError):
-                continue
-            cnt = 0
-            for row in (details if isinstance(details, list) else []):
-                dt = str(row.get("period", "")).strip()[:10]
-                if not dt:
-                    continue
-                bt = row.get("buying_transfer", "")
-                sl = row.get("selling", "")
-                if dt not in rates:
-                    rates[dt] = {}
-                rates[dt][ccy] = {
-                    "buy_tt": float(bt) if bt else None,
-                    "sell": float(sl) if sl else None,
-                }
-                cnt += 1
-            log(f"  ✓ {ccy} {sp} → {ep}: {cnt} days")
-    cs = ce + timedelta(days=1)
-
-log(f"  Total days: {len(rates)}")
-
-# ─── Build day-by-day list ───────────────────────────────────
-log("\n[3/4] Building report data...")
-all_days = []
-cur = START
-while cur <= END:
-    ds = cur.strftime("%Y-%m-%d")
-    hol = holidays.get(ds, "")
-    if not hol:
-        hol = FIXED_HOLIDAYS.get((cur.month, cur.day), "")
-    is_wknd = cur.weekday() >= 5
-    if is_wknd and hol:
-        remark = f"Weekend; {hol}"
-    elif is_wknd:
-        remark = "Weekend"
-    elif hol:
-        remark = hol
-    else:
-        remark = ""
-
-    day = rates.get(ds, {})
-    all_days.append({
-        "date": cur,
-        "usd_buy": day.get("USD", {}).get("buy_tt"),
-        "usd_sell": day.get("USD", {}).get("sell"),
-        "eur_buy": day.get("EUR", {}).get("buy_tt"),
-        "eur_sell": day.get("EUR", {}).get("sell"),
-        "remark": remark,
-    })
-    cur += timedelta(days=1)
+all_days, rates = asyncio.run(fetch_all_data(START, END))
 
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 4: BUILD THE EXCEL WORKBOOK
 # ═══════════════════════════════════════════════════════════════
-log("\n[4/4] Building Excel workbook...")
+log("\n  [3/3] Building Excel workbook...")
 wb = openpyxl.Workbook()
 
 # ─────────────────────────────────────────────────────────────
@@ -1099,8 +1125,11 @@ ws.sheet_view.showGridLines = False
 wb.save(OUTPUT)
 log("")
 log("=" * 60)
-log("  EXCEL REPORT GENERATED SUCCESSFULLY")
-log(f"  File: {OUTPUT}")
+log("=" * 60)
+log("  DONE!")
+log(f"  Rows written: {len(all_days)}")
+log(f"  Trading days: {len(rates)}")
+log(f"  Output saved: {os.path.basename(OUTPUT)}")
 log(f"  Tabs: {len(wb.sheetnames)}")
 log(f"  Sheets: {', '.join(wb.sheetnames)}")
 log("=" * 60)
@@ -1113,8 +1142,14 @@ log("=" * 60)
 #            | - Added visual heatmaps for daily changes
 #            | - Added line charts for USD/EUR trends
 #
-# 2026-03-11 | v2 — Overhaul
+# 2026-03-11 | v1.03 — Overhaul
 #            | - Fixed log() function (switched from pass to print)
 #            | - Standardized all Excel date formats to "DD MMM YYYY"
 #            | - Fixed output filename to BOT_ExchangeRate_Report.xlsx
 #            | - Improved code documentation and section summaries
+#
+# 2026-03-11 | v1.0.7 — Optimizations
+#            | - Implemented argparse for --start and --end CLI arguments
+#            | - Switched to asyncio and aiohttp for massive download speedup
+#            | - Implemented exponential backoff and retries for network resilience
+#            | - Handled Pyre type safety warnings by using explicit gets and lists

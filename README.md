@@ -7,6 +7,8 @@ A Python toolset designed for corporate finance departments to automatically fet
 - **Authoritative Data Integration:** Synchronizes directly with the official Bank of Thailand (BOT) API to ensure precise, authoritative Weighted-Average Interbank Exchange Rates.
 - **Corporate Formatting:** Generates a presentation-ready Excel workbook with multiple tabs, conditional formatting, and performance line charts.
 - **Precision Financial Compliance:** Supports high-precision calculations (4+ decimal places) and incorporates a comprehensive Thai fiscal holiday calendar to ensure accurate reporting for weekend-adjusted bank settlements.
+- **Ultra-Fast Performance:** Re-engineered with an **asynchronous fetching engine** (`asyncio` + `aiohttp`), enabling concurrent API requests that reduce multi-year data downloads from minutes to seconds.
+- **Command-Line Flexibility:** Easily specify report start and end dates via CLI flags.
 
 ## Prerequisites
 
@@ -49,7 +51,11 @@ A Python toolset designed for corporate finance departments to automatically fet
 **To generate an Executive Excel Report:**
 
 ```bash
+# Default (Start 2025-01-01 to today)
 python3 bot_excel_report.py
+
+# Custom Period
+python3 bot_excel_report.py --start 2024-01-01 --end 2024-12-31
 ```
 
 *Outputs: `BOT_ExchangeRate_Report.xlsx`*
@@ -57,7 +63,22 @@ python3 bot_excel_report.py
 **To generate a raw CSV:**
 
 ```bash
+# Default (Start 2025-01-01 to today)
 python3 bot_generator.py
+
+# Custom Period
+python3 bot_generator.py --start 2024-01-01
 ```
 
 *Outputs: `BOT_Exchange_rates.csv`*
+
+---
+
+### Command Line Arguments
+
+Both scripts support the following parameters:
+
+| Argument | Format | Description | Default |
+| :--- | :--- | :--- | :--- |
+| `--start` | `YYYY-MM-DD` | The start date for the data fetch | `2025-01-01` |
+| `--end` | `YYYY-MM-DD` | The end date for the data fetch | `Today` |
