@@ -27,83 +27,43 @@
 
 # ─── Standard Library Imports ────────────────────────────────
 import sys
-import json
-import ssl
 import os
-import urllib.request
 import argparse
 import asyncio
-from typing import Dict, Any, Optional, List
-
-import importlib
 from datetime import date, timedelta, datetime
 from collections import OrderedDict
 
-# ─── Auto-install openpyxl and aiohttp to local _libs folder 
+# ─── Ensure local _libs is on path ──────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PARENT_DIR = SCRIPT_DIR
+_LIBS_DIR = os.path.join(SCRIPT_DIR, "_libs")
+if _LIBS_DIR not in sys.path:
+    sys.path.insert(0, _LIBS_DIR)
 
-# Possible locations for _libs
-_LIBS_LOCAL = os.path.join(SCRIPT_DIR, "_libs")
-_LIBS_PARENT = os.path.join(PARENT_DIR, "_libs")
+# ─── Import the shared core module ──────────────────────────
+# bot_core.py handles: .env loading, aiohttp + openpyxl install,
+# async API client, holiday/rate fetching, and constants.
+from bot_core import (  # noqa: E402
+    bot_api_get_async,
+    get_tokens,
+    GATEWAY,
+    EXG_PATH,
+    HOL_PATH,
+    CHUNK_DAYS,
+    SSL_CTX,
+    FIXED_HOLIDAYS,
+)
 
-if os.path.exists(_LIBS_PARENT):
-    _LIBS = _LIBS_PARENT
-else:
-    _LIBS = _LIBS_LOCAL
-
-if _LIBS not in sys.path:
-    sys.path.insert(0, _LIBS)
-
-try:
-    import openpyxl
-    import aiohttp
-except ImportError:
-    print("  Installing openpyxl and aiohttp to local _libs folder...", file=sys.stderr)
-    import subprocess
-    os.makedirs(_LIBS, exist_ok=True)
-    subprocess.check_call([
-        sys.executable, "-m", "pip", "install",
-        "--target", _LIBS, "openpyxl", "aiohttp",
-        "--break-system-packages"
-    ])
-    importlib.invalidate_caches()
-    import openpyxl
-    import aiohttp
-
+import aiohttp  # noqa: E402 — installed by bot_core
+import openpyxl  # noqa: E402 — installed by bot_core
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import LineChart, Reference
 from openpyxl.formatting.rule import ColorScaleRule
 
-# ─── Load Environment Variables ─────────────────────────────
-# Checks for .env in current folder or parent folder
-env_path_local = os.path.join(SCRIPT_DIR, ".env")
-env_path_parent = os.path.join(PARENT_DIR, ".env")
+# ─── Load tokens via bot_core ────────────────────────────────
+TOKEN_EXG, TOKEN_HOL = get_tokens()
 
-env_path = env_path_parent if os.path.exists(env_path_parent) else env_path_local
-
-if os.path.exists(env_path):
-    with open(env_path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#"):
-                parts = line.split("=", 1)
-                if len(parts) == 2:
-                    key, val = parts
-                    os.environ[key.strip()] = val.strip().strip("\"'")
-
-TOKEN_EXG = os.environ.get("BOT_TOKEN_EXG", "")
-TOKEN_HOL = os.environ.get("BOT_TOKEN_HOL", "")
-if not TOKEN_EXG or not TOKEN_HOL:
-    sys.exit("Error: Missing BOT API tokens in .env file.")
-
-# ─── Configuration ───────────────────────────────────────────
-GATEWAY   = "https://gateway.api.bot.or.th"
-EXG_PATH  = "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
-HOL_PATH  = "/financial-institutions-holidays/"
-
-# CLI Arguments
+# ─── CLI Arguments ───────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Bank of Thailand Executive Excel Report")
 parser.add_argument("--start", type=str, default="2025-01-01", help="Start date YYYY-MM-DD")
 parser.add_argument("--end", type=str, default=datetime.now().strftime("%Y-%m-%d"), help="End date YYYY-MM-DD")
@@ -114,38 +74,19 @@ try:
     END = datetime.strptime(args.end, "%Y-%m-%d").date()
 except ValueError:
     sys.exit("Error: Dates must be in YYYY-MM-DD format.")
-    
+
 if START > END:
     sys.exit("Error: Start date cannot be after end date.")
 
-CHUNK     = 30
-TODAY_STR  = datetime.now().strftime("%Y-%m-%d")
-# Output file — redirected to ../data/output/ if it exists
-DATA_OUTPUT_DIR = os.path.join(PARENT_DIR, "data", "output")
+CHUNK = CHUNK_DAYS
+TODAY_STR = datetime.now().strftime("%Y-%m-%d")
+
+# Output file — redirected to data/output/ if it exists
+DATA_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "data", "output")
 if os.path.exists(DATA_OUTPUT_DIR):
     OUTPUT = os.path.join(DATA_OUTPUT_DIR, "BOT_ExchangeRate_Report.xlsx")
 else:
     OUTPUT = os.path.join(SCRIPT_DIR, "BOT_ExchangeRate_Report.xlsx")
-
-ssl_ctx = ssl.create_default_context()
-
-# ─── Fixed Thai Calendar Holidays (for weekend annotation) ───
-FIXED_HOLIDAYS = {
-    (1, 1):   "New Year's Day",
-    (4, 6):   "Chakri Memorial Day",
-    (4, 13):  "Songkran Festival",
-    (4, 14):  "Songkran Festival",
-    (4, 15):  "Songkran Festival",
-    (5, 1):   "National Labour Day",
-    (6, 3):   "H.M. Queen Suthida's Birthday",
-    (7, 28):  "H.M. King Vajiralongkorn's Birthday",
-    (8, 12):  "H.M. Queen Sirikit's Birthday / Mother's Day",
-    (10, 13): "King Bhumibol Memorial Day",
-    (10, 23): "Chulalongkorn Memorial Day",
-    (12, 5):  "King Bhumibol's Birthday / Father's Day",
-    (12, 10): "Constitution Day",
-    (12, 31): "New Year's Eve",
-}
 
 # ═══════════════════════════════════════════════════════════════
 # DESIGN SYSTEM — Light Professional Theme
@@ -220,23 +161,10 @@ NUM_FMT_PCT  = '0.00%'
 NUM_FMT_AMT  = '#,##0.00'
 
 
+
 def log(msg):
     print(msg)
 
-
-async def bot_api_get_async(session: aiohttp.ClientSession, full_url: str, auth_token: str, retries: int = 3) -> Optional[Dict[str, Any]]:
-    """Fetches data from BOT API asychronously with exponential backoff retries."""
-    headers = {"Authorization": auth_token, "accept": "application/json"}
-    for attempt in range(1, retries + 1):
-        try:
-            async with session.get(full_url, headers=headers, ssl=ssl_ctx, timeout=30) as response:
-                if response.status == 200:
-                    return await response.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            pass
-        if attempt < retries:
-            await asyncio.sleep(2 ** attempt)
-    return None
 
 async def fetch_all_data(start_date, end_date):
     holidays = {}
