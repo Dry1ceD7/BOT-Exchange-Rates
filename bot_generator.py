@@ -193,13 +193,18 @@ async def main():
     exchange_rates: Dict[str, Dict[str, Dict[str, str]]] = {}
     
     async with aiohttp.ClientSession() as session:
+        sem = asyncio.Semaphore(10) # Prevent overloading old PCs
+        async def fetch_bounded(url: str, token: str) -> Optional[Dict[str, Any]]:
+            async with sem:
+                return await bot_api_get_async(session, url, token)
+
         # 1. Prepare Holiday Tasks
         start_year = start_date.year
         end_year = end_date.year
         holiday_tasks = []
         for year in range(start_year, end_year + 1):
             url = f"{GATEWAY_URL}{HOLIDAY_PATH}?year={year}"
-            holiday_tasks.append(bot_api_get_async(session, url, TOKEN_HOLIDAY))
+            holiday_tasks.append(fetch_bounded(url, TOKEN_HOLIDAY))
             
         # 2. Prepare Exchange Rate Tasks
         rate_tasks = []
@@ -213,7 +218,7 @@ async def main():
                 url = (f"{GATEWAY_URL}{EXCHANGE_RATE_PATH}?start_period={start_str}"
                        f"&end_period={end_str}&currency={currency_code}")
                 # We attach the currency code so we know how to parse the result later
-                rate_tasks.append((currency_code, bot_api_get_async(session, url, TOKEN_EXCHANGE_RATE)))
+                rate_tasks.append((currency_code, fetch_bounded(url, TOKEN_EXCHANGE_RATE)))
                 
             chunk_start = chunk_end + timedelta(days=1)
             
@@ -360,3 +365,8 @@ if __name__ == "__main__":
 #            | - Fixed out_path unbound variable bug in main script
 #            | - Fixed SQLite data duplication (implemented DROP TABLE on re-run)
 #            | - Removed duplicate import subprocess
+#
+# 2026-03-13 | v1.1.1 — Concurrency Optimization
+#            | - Implemented asyncio.Semaphore(10) to limit concurrent API connections,
+#            |   preventing network timeouts and CPU overloading on older PCs.
+

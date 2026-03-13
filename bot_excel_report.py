@@ -247,10 +247,15 @@ async def fetch_all_data(start_date, end_date):
     holidays = {}
     rates = {}
     async with aiohttp.ClientSession() as session:
+        sem = asyncio.Semaphore(10) # Prevent overloading old PCs
+        async def fetch_bounded(url: str, token: str) -> Optional[Dict[str, Any]]:
+            async with sem:
+                return await bot_api_get_async(session, url, token)
+
         holiday_tasks = []
         for yr in range(start_date.year, end_date.year + 1):
             url = f"{GATEWAY}{HOL_PATH}?year={yr}"
-            holiday_tasks.append(bot_api_get_async(session, url, TOKEN_HOL))
+            holiday_tasks.append(fetch_bounded(url, TOKEN_HOL))
             
         rate_tasks = []
         cs = start_date
@@ -259,7 +264,7 @@ async def fetch_all_data(start_date, end_date):
             sp, ep = cs.strftime("%Y-%m-%d"), ce.strftime("%Y-%m-%d")
             for ccy in CURRENCIES:
                 url = f"{GATEWAY}{EXG_PATH}?start_period={sp}&end_period={ep}&currency={ccy}"
-                rate_tasks.append((ccy, bot_api_get_async(session, url, TOKEN_EXG)))
+                rate_tasks.append((ccy, fetch_bounded(url, TOKEN_EXG)))
             cs = ce + timedelta(days=1)
             
         log(f"\n  [1/3] Fetching data ({len(holiday_tasks)} holiday years, {len(rate_tasks)} rate chunks concurrently)...")
@@ -1160,3 +1165,7 @@ log("=" * 60)
 #            | - Standardized aiohttp.ClientTimeout for stable network fetching
 #            | - Made Cover Sheet subtitle dynamic (shows all selected currencies)
 #            | - Refactored FX Calculator to scale background/styling for any currency count
+#
+# 2026-03-13 | v1.1.1 — Concurrency Optimization
+#            | - Implemented asyncio.Semaphore(10) to limit concurrent API connections,
+#            |   preventing network timeouts and CPU overloading on older PCs.
