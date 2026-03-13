@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Internal web portal for auto-filling exchange rates in accountant spreadsheets using Bank of Thailand data.">
+  <title>BOT Exchange Rate Filler</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏦</text></svg>">
+</head>
+<body>
+
+  <div class="container">
+
+    <!-- Header -->
+    <header class="header">
+      <span class="header__icon">🏦</span>
+      <h1 class="header__title">Exchange Rate Filler</h1>
+      <p class="header__subtitle">Auto-fill BOT exchange rates in your accountant spreadsheets</p>
+      <span class="header__badge">v1.0.0 · INTERNAL USE</span>
+    </header>
+
+    <!-- Drop Zone -->
+    <div class="dropzone" id="dropzone">
+      <span class="dropzone__icon">📂</span>
+      <p class="dropzone__title">Drop your Excel file here</p>
+      <p class="dropzone__hint">or click to browse · .xlsx files only · max 50 MB</p>
+      <div class="file-info" id="fileInfo">
+        <span id="fileName"></span> · <span id="fileSize"></span>
+      </div>
+      <input type="file" id="fileInput" accept=".xlsx">
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="actions">
+      <button class="btn btn--primary" id="fillBtn" disabled>
+        <span class="btn__text">▶ &nbsp;Fill Rates</span>
+      </button>
+      <button class="btn btn--secondary" id="resetBtn">
+        ↺ &nbsp;Reset
+      </button>
+      <a class="btn btn--secondary" id="revertBtn" style="display: none; background-color: #fee2e2; color: #991b1b; border-color: #f87171; text-decoration: none; text-align: center;">
+        📥 &nbsp;Download Original (Revert)
+      </a>
+    </div>
+
+    <!-- Progress -->
+    <div class="progress-section" id="progressSection">
+      <div class="progress-bar">
+        <div class="progress-bar__fill"></div>
+      </div>
+      <p class="status-text" id="statusText">Initializing...</p>
+    </div>
+
+    <!-- Error -->
+    <div class="error-box" id="errorBox"></div>
+
+    <!-- Results -->
+    <div class="results" id="resultsSection">
+      <div class="results__header">
+        <span class="results__icon">✅</span>
+        <div>
+          <p class="results__title">Processing Complete</p>
+          <p class="results__subtitle">File downloaded: <strong id="resultFilename"></strong></p>
+        </div>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat stat--sheets">
+          <div class="stat__value" id="statSheets">0</div>
+          <div class="stat__label">Sheets Processed</div>
+        </div>
+        <div class="stat stat--filled">
+          <div class="stat__value" id="statFilled">0</div>
+          <div class="stat__label">Rows Filled</div>
+        </div>
+        <div class="stat stat--skipped">
+          <div class="stat__value" id="statSkipped">0</div>
+          <div class="stat__label">Rows Skipped</div>
+        </div>
+        <div class="stat stat--errors">
+          <div class="stat__value" id="statErrors">0</div>
+          <div class="stat__label">Errors</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <p>BOT Exchange Rate Filler v1.0.0 · Powered by <a href="https://www.bot.or.th" target="_blank">Bank of Thailand API</a></p>
+      <p style="margin-top: 4px;">Built for internal finance team use</p>
+    </footer>
+
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

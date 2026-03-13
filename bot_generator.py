@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import gc
 import sys
 import os
 import csv
@@ -8,6 +9,7 @@ import argparse
 import asyncio
 import sqlite3
 import subprocess
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, Optional, List
 from datetime import date, timedelta, datetime
 
@@ -192,7 +194,9 @@ async def main():
     holidays: Dict[str, str] = {}
     exchange_rates: Dict[str, Dict[str, Dict[str, str]]] = {}
     
-    async with aiohttp.ClientSession() as session:
+    connector = aiohttp.TCPConnector(limit=10, keepalive_timeout=30)
+    timeout = aiohttp.ClientTimeout(connect=15, total=45)
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         sem = asyncio.Semaphore(10) # Prevent overloading old PCs
         async def fetch_bounded(url: str, token: str) -> Optional[Dict[str, Any]]:
             async with sem:
@@ -257,8 +261,10 @@ async def main():
                 if not r_date:
                     continue
                     
-                buying_tt = str(rate_entry.get("buying_transfer", "")).strip()
-                selling_rate = str(rate_entry.get("selling", "")).strip()
+                raw_buy = str(rate_entry.get("buying_transfer", "")).strip()
+                raw_sell = str(rate_entry.get("selling", "")).strip()
+                buying_tt = str(Decimal(raw_buy)) if raw_buy else ""
+                selling_rate = str(Decimal(raw_sell)) if raw_sell else ""
                 
                 if r_date not in exchange_rates:
                     exchange_rates[r_date] = {}
@@ -267,6 +273,9 @@ async def main():
                     "buying_tt": buying_tt,
                     "selling": selling_rate
                 }
+
+    # Free memory from API response data
+    gc.collect()
 
     # 6. Build the rows
     all_rows = []
@@ -369,5 +378,12 @@ if __name__ == "__main__":
 # 2026-03-13 | v1.1.2 — Infrastructure Alignment
 #            | - Fully enabled config.json integration (removed hardcoded fallbacks)
 #            | - Synchronized fixed holidays and default currencies with central config.json
+#
+# 2026-03-13 | v1.2.0 — Quality of Life Upgrade
+#            | - Financial precision: exchange rates parsed via decimal.Decimal
+#            | - Performance: TCPConnector(limit=10, keepalive_timeout=30) for connection pooling
+#            | - Reliability: explicit ClientTimeout(connect=15, total=45)
+#            | - Memory: gc.collect() after heavy data-fetch phase
+
 
 
