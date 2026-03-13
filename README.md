@@ -18,17 +18,17 @@ A Python toolset designed for corporate finance departments to automatically fet
 
 ```mermaid
 graph TD
-    A[CLI Input: --currencies --format] --> B(Load config.json & .env)
-    B --> C{Async Request Manager}
-    C -->|Concurrent| D[BOT Holiday API]
-    C -->|Concurrent| E[BOT Exchange Rate API]
-    D --> F[Holiday Map]
-    E --> G[Currency Rate Map]
-    F & G --> H[Row Builder / Logic Engine]
-    H --> I{Exporter}
-    I -->|csv| J[BOT_Exchange_rates.csv]
-    I -->|json| K[BOT_Exchange_rates.json]
-    I -->|sqlite| L[BOT_Exchange_rates.db]
+    A["CLI Input: --currencies --format"] --> B["Load config.json & .env"]
+    B --> C{"Async Request Manager"}
+    C -->|Concurrent| D["BOT Holiday API"]
+    C -->|Concurrent| E["BOT Exchange Rate API"]
+    D --> F["Holiday Map"]
+    E --> G["Currency Rate Map"]
+    F & G --> H["Row Builder / Logic Engine"]
+    H --> I{"Exporter"}
+    I -->|csv| J["BOT_Exchange_rates.csv"]
+    I -->|json| K["BOT_Exchange_rates.json"]
+    I -->|sqlite| L["BOT_Exchange_rates.db"]
 ```
 
 ### 📈 `bot_excel_report.py` (Executive Reporter)
@@ -40,24 +40,24 @@ graph TD
 
 ```mermaid
 graph TD
-    A[CLI Input: --currencies --pdf] --> B(Async Data Fetching)
-    B --> C[Internal Data Store]
-    C --> D[Excel Workbook Engine - openpyxl]
-    
-    subgraph WorkbookLayers [Workbook Layers]
-    D --> E[Tab 1: Cover Sheet]
-    D --> F[Tab 2-N: Dynamic Rate Sheets]
-    D --> G[Tab N+1: Summary Dashboard]
-    D --> H[Tab N+2: FX Calculator]
+    A["CLI Input: --currencies --pdf"] --> B["Async Data Fetching"]
+    B --> C["Internal Data Store"]
+    C --> D["Excel Workbook Engine - openpyxl"]
+
+    subgraph WorkbookLayers ["Workbook Layers"]
+    D --> E["Tab 1: Cover Sheet"]
+    D --> F["Tab 2-N: Dynamic Rate Sheets"]
+    D --> G["Tab N+1: Summary Dashboard"]
+    D --> H["Tab N+2: FX Calculator"]
     end
-    
-    G --> G1[MoM / YoY Calculation Engine]
-    H --> H1[Interactive Formula Linking]
-    
-    WorkbookLayers --> I[Save .xlsx]
-    I --> J{Post-Process}
-    J -->|--pdf| K[PDF Conversion - soffice]
-    J -->|--email| L[SMTP Email Dispatch]
+
+    G --> G1["MoM / YoY Calculation Engine"]
+    H --> H1["Interactive Formula Linking"]
+
+    WorkbookLayers --> I["Save .xlsx"]
+    I --> J{"Post-Process"}
+    J -->|--pdf| K["PDF Conversion"]
+    J -->|--email| L["SMTP Email Dispatch"]
 ```
 
 ## Prerequisites
@@ -144,4 +144,3 @@ Both scripts support the following parameters:
 | `bot_generator.py` | Raw CSV generator |
 | `config.json` | Centralized API, currency, and holiday configuration |
 | `.env` | API token configuration |
-
