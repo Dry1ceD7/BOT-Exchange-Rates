@@ -366,7 +366,8 @@ if __name__ == "__main__":
 #            | - Fixed SQLite data duplication (implemented DROP TABLE on re-run)
 #            | - Removed duplicate import subprocess
 #
-# 2026-03-13 | v1.1.1 — Concurrency Optimization
-#            | - Implemented asyncio.Semaphore(10) to limit concurrent API connections,
-#            |   preventing network timeouts and CPU overloading on older PCs.
+# 2026-03-13 | v1.1.2 — Infrastructure Alignment
+#            | - Fully enabled config.json integration (removed hardcoded fallbacks)
+#            | - Synchronized fixed holidays and default currencies with central config.json
+
 
