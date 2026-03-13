@@ -158,28 +158,46 @@ def write_sqlite(rows: List[Dict[str, Any]], output_path: str, currencies: List[
 
 def install_cron_job():
     script_path = os.path.abspath(__file__)
-    cron_command = f"0 18 * * 1-5 {sys.executable} {script_path} --format sqlite"
     
-    try:
-        # Get current crontab
-        current_cron = subprocess.check_output("crontab -l", shell=True, text=True, stderr=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
-        current_cron = ""
+    if os.name == "nt":
+        # Windows Schedule via schtasks
+        task_name = "BOT_Exchange_Rate_Generator"
+        python_exe = sys.executable
+        # run at 18:00 every Mon-Fri
+        cmd = f'schtasks /create /tn "{task_name}" /tr "\\"{python_exe}\\" \\"{script_path}\\" --format sqlite" /sc weekly /d MON,TUE,WED,THU,FRI /st 18:00 /f'
+        try:
+            subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print("\n✅ Scheduled Task Installed (Windows).")
+            print(f"   Name: {task_name}")
+            print("   This script will now run automatically every weekday at 6:00 PM.")
+            print("   To remove it, use the Windows Task Scheduler or run:")
+            print(f"   schtasks /delete /tn \"{task_name}\" /f\n")
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Failed to install scheduled task: {e}")
+    else:
+        # macOS / Linux Schedule via crontab
+        cron_command = f"0 18 * * 1-5 {sys.executable} {script_path} --format sqlite"
         
-    if script_path in current_cron:
-        print("Cron job is already installed.")
-        return
+        try:
+            # Get current crontab
+            current_cron = subprocess.check_output("crontab -l", shell=True, text=True, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            current_cron = ""
+            
+        if script_path in current_cron:
+            print("Cron job is already installed.")
+            return
+            
+        new_cron = current_cron.strip() + f"\n{cron_command}\n"
         
-    new_cron = current_cron.strip() + f"\n{cron_command}\n"
-    
-    # Install new crontab
-    process = subprocess.Popen("crontab -", stdin=subprocess.PIPE, shell=True)
-    process.communicate(new_cron.encode())
-    
-    print("\n✅ Scheduled Cron Job Installed.")
-    print(f"   Command: {cron_command}")
-    print("   This script will now run automatically every weekday at 6:00 PM.")
-    print("   To remove it, run `crontab -e` in your terminal.\n")
+        # Install new crontab
+        process = subprocess.Popen("crontab -", stdin=subprocess.PIPE, shell=True)
+        process.communicate(new_cron.encode())
+        
+        print("\n✅ Scheduled Cron Job Installed (macOS/Linux).")
+        print(f"   Command: {cron_command}")
+        print("   This script will now run automatically every weekday at 6:00 PM.")
+        print("   To remove it, run `crontab -e` in your terminal.\n")
 
 # ─── Async Main Execution ────────────────────────────────────
 async def main():
