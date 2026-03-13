@@ -10,6 +10,56 @@ A Python toolset designed for corporate finance departments to automatically fet
 - **Ultra-Fast Performance:** Re-engineered with an **asynchronous fetching engine** (`asyncio` + `aiohttp`), enabling concurrent API requests that reduce multi-year data downloads from minutes to seconds.
 - **Command-Line Flexibility:** Easily specify report start and end dates via CLI flags.
 
+### 📊 `bot_generator.py` (Data Engine)
+**Purpose**: An asynchronous data fetcher designed for high-speed retrieval of historical rates and holidays.
+*   **Async Engine**: Uses `aiohttp` and `asyncio` to fetch years of holiday data and 30-day rate chunks concurrently.
+*   **Multi-Format Export**: Dynamically writes results to **CSV**, **JSON**, or **SQLite** based on user CLI arguments.
+*   **Smart Rate Mapping**: Maps "Buying Transfer TT" and "Selling" rates to specific ISO date keys, handling weekend gaps with "Weekend" remarks.
+
+```mermaid
+graph TD
+    A[CLI Input: --currencies --format] --> B(Load config.json & .env)
+    B --> C{Async Request Manager}
+    C -->|Concurrent| D[BOT Holiday API]
+    C -->|Concurrent| E[BOT Exchange Rate API]
+    D --> F[Holiday Map]
+    E --> G[Currency Rate Map]
+    F & G --> H[Row Builder / Logic Engine]
+    H --> I{Exporter}
+    I -->|csv| J[BOT_Exchange_rates.csv]
+    I -->|json| K[BOT_Exchange_rates.json]
+    I -->|sqlite| L[BOT_Exchange_rates.db]
+```
+
+### 📈 `bot_excel_report.py` (Executive Reporter)
+**Purpose**: Generates a premium, analysis-ready Excel dashboard and PDF for financial stakeholders.
+*   **Dynamic Tab Generation**: Automatically creates a "Daily Rates" sheet for every currency requested (USD, EUR, JPY, etc.).
+*   **Executive Summary Dashboard**: Calculates MoM and YoY percentage changes with conditional formatting for trend visualization.
+*   **Monthly Analysis**: Aggregates daily data into monthly averages and volatility checks.
+*   **Interactive FX Calculator**: Inter-linked converter using Excel formulas with dynamic rate lookups.
+
+```mermaid
+graph TD
+    A[CLI Input: --currencies --pdf] --> B(Async Data Fetching)
+    B --> C[Internal Data Store]
+    C --> D[Excel Workbook Engine - openpyxl]
+    
+    subgraph WorkbookLayers [Workbook Layers]
+    D --> E[Tab 1: Cover Sheet]
+    D --> F[Tab 2-N: Dynamic Rate Sheets]
+    D --> G[Tab N+1: Summary Dashboard]
+    D --> H[Tab N+2: FX Calculator]
+    end
+    
+    G --> G1[MoM / YoY Calculation Engine]
+    H --> H1[Interactive Formula Linking]
+    
+    WorkbookLayers --> I[Save .xlsx]
+    I --> J{Post-Process}
+    J -->|--pdf| K[PDF Conversion - soffice]
+    J -->|--email| L[SMTP Email Dispatch]
+```
+
 ## Prerequisites
 
 - **Python 3.7+**  &nbsp; [![Download Python](https://img.shields.io/badge/Download-Python-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/downloads/)
@@ -82,3 +132,15 @@ Both scripts support the following parameters:
 | :--- | :--- | :--- | :--- |
 | `--start` | `YYYY-MM-DD` | The start date for the data fetch | `2025-01-01` |
 | `--end` | `YYYY-MM-DD` | The end date for the data fetch | `Today` |
+
+
+---
+
+### File Structure
+
+| File | Description |
+| :--- | :--- |
+| `bot_excel_report.py` | Executive Excel Report generator with charts and formatting |
+| `bot_generator.py` | Raw CSV generator |
+| `.env` | API token configuration |
+

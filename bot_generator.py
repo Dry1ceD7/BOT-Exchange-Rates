@@ -6,6 +6,8 @@ import ssl
 import json
 import argparse
 import asyncio
+import sqlite3
+import subprocess
 from typing import Dict, Any, Optional, List
 from datetime import date, timedelta, datetime
 
@@ -24,7 +26,6 @@ try:
     import aiohttp
 except ImportError:
     print("Installing required package 'aiohttp' locally...")
-    import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "--target", _LIBS_DIR, "aiohttp"])
     import aiohttp
 
@@ -49,12 +50,18 @@ TOKEN_HOLIDAY = os.environ.get("BOT_TOKEN_HOL", "")
 if not TOKEN_EXCHANGE_RATE or not TOKEN_HOLIDAY:
     sys.exit("Error: Missing BOT API tokens in .env file.")
 
-# ─── Configuration ───────────────────────────────────────────
-GATEWAY_URL = "https://gateway.api.bot.or.th"
-EXCHANGE_RATE_PATH = "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
-HOLIDAY_PATH = "/financial-institutions-holidays/"
+# ─── Load Centralized Config ───────────────────────────────────
+CONFIG_FILE = os.path.join(PARENT_DIR, "config.json")
+if not os.path.exists(CONFIG_FILE):
+    CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
+    
+with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+    config = json.load(f)
 
-MAX_DAYS_PER_REQUEST = 30
+GATEWAY_URL = config["api"]["gateway_url"]
+EXCHANGE_RATE_PATH = config["api"]["exchange_rate_path"]
+HOLIDAY_PATH = config["api"]["holiday_path"]
+MAX_DAYS_PER_REQUEST = config["api"]["max_days_per_request"]
 
 DATA_OUTPUT_DIR = os.path.join(PARENT_DIR, "data", "output")
 if os.path.exists(DATA_OUTPUT_DIR):
@@ -64,22 +71,11 @@ else:
 
 ssl_context = ssl.create_default_context()
 
-FIXED_THAI_HOLIDAYS = {
-    (1, 1):   "New Year's Day",
-    (4, 6):   "Chakri Memorial Day",
-    (4, 13):  "Songkran Festival",
-    (4, 14):  "Songkran Festival",
-    (4, 15):  "Songkran Festival",
-    (5, 1):   "National Labour Day",
-    (6, 3):   "H.M. Queen Suthida's Birthday",
-    (7, 28):  "H.M. King Vajiralongkorn's Birthday",
-    (8, 12):  "H.M. Queen Sirikit's Birthday / Mother's Day",
-    (10, 13): "King Bhumibol Memorial Day",
-    (10, 23): "Chulalongkorn Memorial Day",
-    (12, 5):  "King Bhumibol's Birthday / Father's Day",
-    (12, 10): "Constitution Day",
-    (12, 31): "New Year's Eve",
-}
+# Parse fixed holidays from config (convert MM-DD string to integer tuple key)
+FIXED_THAI_HOLIDAYS = {}
+for date_str, holiday_name in config["fixed_holidays"].items():
+    month, day = map(int, date_str.split("-"))
+    FIXED_THAI_HOLIDAYS[(month, day)] = holiday_name
 
 # ─── Async API Client with Retries ───────────────────────────
 async def bot_api_get_async(session: aiohttp.ClientSession, full_url: str, auth_token: str, retries: int = 3) -> Optional[Dict[str, Any]]:
@@ -88,7 +84,7 @@ async def bot_api_get_async(session: aiohttp.ClientSession, full_url: str, auth_
     
     for attempt in range(1, retries + 1):
         try:
-            async with session.get(full_url, headers=headers, ssl=ssl_context, timeout=30) as response:
+            async with session.get(full_url, headers=headers, ssl=ssl_context, timeout=aiohttp.ClientTimeout(total=30)) as response:
                 if response.status == 200:
                     return await response.json()
                 else:
@@ -103,9 +99,12 @@ async def bot_api_get_async(session: aiohttp.ClientSession, full_url: str, auth_
     return None
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Bank of Thailand Exchange Rate CSV Generator")
+    parser = argparse.ArgumentParser(description="Bank of Thailand Exchange Rate Data Generator")
     parser.add_argument("--start", type=str, default="2025-01-01", help="Start date in YYYY-MM-DD format")
     parser.add_argument("--end", type=str, default=datetime.now().strftime("%Y-%m-%d"), help="End date in YYYY-MM-DD format")
+    parser.add_argument("--currencies", nargs="+", default=config["currencies"], help="List of currency codes to fetch (e.g. USD EUR JPY)")
+    parser.add_argument("--format", type=str, choices=["csv", "json", "sqlite"], default="csv", help="Output export format")
+    parser.add_argument("--install-cron", action="store_true", help="Install a background schedule on your Mac")
     args = parser.parse_args()
     
     try:
@@ -117,20 +116,78 @@ def parse_args():
     if start_date > end_date:
         sys.exit("Error: Start date cannot be after end date.")
         
-    return start_date, end_date
+    return start_date, end_date, args.currencies, args.format, args.install_cron
 
-def write_csv(rows: List[Dict[str, Any]], output_path: str):
-    columns = ["Year", "Date", "USD_Buying_TT", "USD_Selling",
-               "EUR_Buying_TT", "EUR_Selling", "Remark"]
+def write_csv(rows: List[Dict[str, Any]], output_path: str, currencies: List[str]):
+    columns = ["Year", "Date"]
+    for ccy in currencies:
+        columns.extend([f"{ccy}_Buying_TT", f"{ccy}_Selling"])
+    columns.append("Remark")
+    
     with open(output_path, "w", newline="", encoding="utf-8") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=columns)
         writer.writeheader()
         writer.writerows(rows)
 
+def write_json(rows: List[Dict[str, Any]], output_path: str):
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, indent=4, ensure_ascii=False)
+
+def write_sqlite(rows: List[Dict[str, Any]], output_path: str, currencies: List[str]):
+    conn = sqlite3.connect(output_path)
+    cursor = conn.cursor()
+    
+    cols = ["Year INTEGER", "Date TEXT", "Remark TEXT"]
+    for ccy in currencies:
+        cols.extend([f"{ccy}_Buying_TT TEXT", f"{ccy}_Selling TEXT"])
+        
+    cursor.execute("DROP TABLE IF EXISTS exchange_rates")
+    cursor.execute(f"CREATE TABLE exchange_rates (id INTEGER PRIMARY KEY AUTOINCREMENT, {', '.join(cols)})")
+    
+    # Insert new data
+    for row in rows:
+        placeholders = ", ".join(["?"] * (len(row)))
+        keys = list(row.keys())
+        values = [row[k] for k in keys]
+        cursor.execute(f"INSERT INTO exchange_rates ({', '.join(keys)}) VALUES ({placeholders})", values)
+        
+    conn.commit()
+    conn.close()
+
+def install_cron_job():
+    script_path = os.path.abspath(__file__)
+    cron_command = f"0 18 * * 1-5 {sys.executable} {script_path} --format sqlite"
+    
+    try:
+        # Get current crontab
+        current_cron = subprocess.check_output("crontab -l", shell=True, text=True, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        current_cron = ""
+        
+    if script_path in current_cron:
+        print("Cron job is already installed.")
+        return
+        
+    new_cron = current_cron.strip() + f"\n{cron_command}\n"
+    
+    # Install new crontab
+    process = subprocess.Popen("crontab -", stdin=subprocess.PIPE, shell=True)
+    process.communicate(new_cron.encode())
+    
+    print("\n✅ Scheduled Cron Job Installed.")
+    print(f"   Command: {cron_command}")
+    print("   This script will now run automatically every weekday at 6:00 PM.")
+    print("   To remove it, run `crontab -e` in your terminal.\n")
+
 # ─── Async Main Execution ────────────────────────────────────
 async def main():
-    start_date, end_date = parse_args()
+    start_date, end_date, currencies, export_format, install_cron = parse_args()
+    
+    if install_cron:
+        install_cron_job()
+        
     print(f"Starting BOT Generator (Async) from {start_date} to {end_date}...")
+    print(f"Currencies: {', '.join(currencies)}  |  Format: {export_format.upper()}")
     
     holidays: Dict[str, str] = {}
     exchange_rates: Dict[str, Dict[str, Dict[str, str]]] = {}
@@ -152,7 +209,7 @@ async def main():
             start_str = chunk_start.strftime("%Y-%m-%d")
             end_str = chunk_end.strftime("%Y-%m-%d")
             
-            for currency_code in ("USD", "EUR"):
+            for currency_code in currencies:
                 url = (f"{GATEWAY_URL}{EXCHANGE_RATE_PATH}?start_period={start_str}"
                        f"&end_period={end_str}&currency={currency_code}")
                 # We attach the currency code so we know how to parse the result later
@@ -230,24 +287,37 @@ async def main():
         remark = remark.replace(",", ";")
 
         day_rates = exchange_rates.get(iso_date, {})
-        all_rows.append({
-            "Year":          current_date.year,
-            "Date":          date_string,
-            "USD_Buying_TT": day_rates.get("USD", {}).get("buying_tt", ""),
-            "USD_Selling":   day_rates.get("USD", {}).get("selling", ""),
-            "EUR_Buying_TT": day_rates.get("EUR", {}).get("buying_tt", ""),
-            "EUR_Selling":   day_rates.get("EUR", {}).get("selling", ""),
-            "Remark":        remark,
-        })
+        row = {
+            "Year": current_date.year,
+            "Date": date_string,
+        }
+        
+        for ccy in currencies:
+            row[f"{ccy}_Buying_TT"] = day_rates.get(ccy, {}).get("buying_tt", "")
+            row[f"{ccy}_Selling"]   = day_rates.get(ccy, {}).get("selling", "")
+            
+        row["Remark"] = remark
+        all_rows.append(row)
         current_date += timedelta(days=1)
 
-    # 7. Write to CSV
-    write_csv(all_rows, OUTPUT_FILE)
+    # 7. Write to File
+    base_name = os.path.splitext(OUTPUT_FILE)[0]
+    out_path = f"{base_name}.csv"  # default fallback
+    if export_format == "csv":
+        out_path = f"{base_name}.csv"
+        write_csv(all_rows, out_path, currencies)
+    elif export_format == "json":
+        out_path = f"{base_name}.json"
+        write_json(all_rows, out_path)
+    elif export_format == "sqlite":
+        out_path = f"{base_name}.db"
+        write_sqlite(all_rows, out_path, currencies)
+        
     print("=" * 60)
     print("  DONE!")
     print(f"  Rows written: {len(all_rows)}")
     print(f"  Trading days: {len(exchange_rates)}")
-    print(f"  Output saved: {os.path.basename(OUTPUT_FILE)}")
+    print(f"  Output saved: {os.path.basename(out_path)}")
     print("=" * 60)
 
 if __name__ == "__main__":
@@ -284,3 +354,9 @@ if __name__ == "__main__":
 #            | - Switched to asyncio and aiohttp for massive download speedup
 #            | - Implemented exponential backoff and retries for network resilience
 #            | - Resolved Pyre warnings by adding strict types and .get() safety checks
+#
+# 2026-03-13 | v1.1.0 — Reliability Update
+#            | - Standardized aiohttp.ClientTimeout across all API calls
+#            | - Fixed out_path unbound variable bug in main script
+#            | - Fixed SQLite data duplication (implemented DROP TABLE on re-run)
+#            | - Removed duplicate import subprocess
