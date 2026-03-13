@@ -7,7 +7,7 @@ A Python toolset designed for corporate finance departments to automatically fet
 - **Authoritative Data Integration:** Synchronizes directly with the official Bank of Thailand (BOT) API to ensure precise, authoritative Weighted-Average Interbank Exchange Rates.
 - **Corporate Formatting:** Generates a presentation-ready Excel workbook with multiple tabs, conditional formatting, and performance line charts.
 - **Precision Financial Compliance:** Supports high-precision calculations (4+ decimal places) and incorporates a comprehensive Thai fiscal holiday calendar to ensure accurate reporting for weekend-adjusted bank settlements.
-- **Ultra-Fast Performance:** Re-engineered with an **asynchronous fetching engine** (`asyncio` + `aiohttp`), enabling concurrent API requests that reduce multi-year data downloads from minutes to seconds.
+- **Ultra-Fast & Stable Performance:** Re-engineered with an **asynchronous fetching engine** (`asyncio` + `aiohttp`) and **concurrency throttling** (`asyncio.Semaphore`). This ensures massive data downloads complete in seconds while remaining 100% stable on older office PCs and legacy network hardware by preventing connection overloads.
 - **Command-Line Flexibility:** Easily specify report start and end dates via CLI flags.
 
 ### 📊 `bot_generator.py` (Data Engine)
@@ -142,5 +142,6 @@ Both scripts support the following parameters:
 | :--- | :--- |
 | `bot_excel_report.py` | Executive Excel Report generator with charts and formatting |
 | `bot_generator.py` | Raw CSV generator |
+| `config.json` | Centralized API, currency, and holiday configuration |
 | `.env` | API token configuration |
 
