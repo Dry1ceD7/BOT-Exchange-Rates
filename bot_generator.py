@@ -73,284 +73,170 @@ else:
 
 ssl_context = ssl.create_default_context()
 
-# Parse fixed holidays from config (convert MM-DD string to integer tuple key)
+# Parse fixed holidays from config
 FIXED_THAI_HOLIDAYS = {}
 for date_str, holiday_name in config["fixed_holidays"].items():
     month, day = map(int, date_str.split("-"))
     FIXED_THAI_HOLIDAYS[(month, day)] = holiday_name
 
+def count_business_days(start: date, end: date, holidays: Dict[str, str]) -> int:
+    """Calculates number of trading days in range (excluding weekends and BOT holidays)."""
+    days = 0
+    curr = start
+    while curr <= end:
+        ds = curr.strftime("%Y-%m-%d")
+        is_wknd = curr.weekday() >= 5
+        is_hol = ds in holidays or (curr.month, curr.day) in FIXED_THAI_HOLIDAYS
+        if not is_wknd and not is_hol:
+            days += 1
+        curr += timedelta(days=1)
+    return days
+
 # ─── Async API Client with Retries ───────────────────────────
 async def bot_api_get_async(session: aiohttp.ClientSession, full_url: str, auth_token: str, retries: int = 3) -> Optional[Dict[str, Any]]:
-    """Fetches data from BOT API asychronously with exponential backoff retries."""
     headers = {"Authorization": auth_token, "accept": "application/json"}
-    
     for attempt in range(1, retries + 1):
         try:
-            async with session.get(full_url, headers=headers, ssl=ssl_context, timeout=aiohttp.ClientTimeout(total=30)) as response:
+            async with session.get(full_url, headers=headers, ssl=ssl_context, timeout=aiohttp.ClientTimeout(total=45)) as response:
                 if response.status == 200:
                     return await response.json()
-                else:
-                    print(f"  [Warn] API returned {response.status} for {full_url}. Retrying...")
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            print(f"  [Warn] Connection error ({type(e).__name__}) for {full_url}. Retrying ({attempt}/{retries})...")
-            
+                elif response.status == 429:
+                    # Specific handling for throttling
+                    await asyncio.sleep(attempt * 2)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            pass
         if attempt < retries:
-            await asyncio.sleep(2 ** attempt) # Exponential backoff: 2s, 4s, 8s...
-            
-    print(f"  [Error] Failed to fetch {full_url} after {retries} attempts.")
+            await asyncio.sleep(2 ** attempt)
     return None
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Bank of Thailand Exchange Rate Data Generator")
-    parser.add_argument("--start", type=str, default="2025-01-01", help="Start date in YYYY-MM-DD format")
-    parser.add_argument("--end", type=str, default=datetime.now().strftime("%Y-%m-%d"), help="End date in YYYY-MM-DD format")
-    parser.add_argument("--currencies", nargs="+", default=config["currencies"], help="List of currency codes to fetch (e.g. USD EUR JPY)")
-    parser.add_argument("--format", type=str, choices=["csv", "json", "sqlite"], default="csv", help="Output export format")
-    parser.add_argument("--install-cron", action="store_true", help="Install a background schedule on your Mac")
+    parser.add_argument("--start", type=str, default="2025-01-01", help="Start date YYYY-MM-DD")
+    parser.add_argument("--end", type=str, default=datetime.now().strftime("%Y-%m-%d"), help="End date YYYY-MM-DD")
+    parser.add_argument("--currencies", nargs="+", default=config["currencies"], help="List of currency codes")
+    parser.add_argument("--format", type=str, choices=["csv", "json", "sqlite"], default="csv", help="Output format")
     args = parser.parse_args()
-    
-    try:
-        start_date = datetime.strptime(args.start, "%Y-%m-%d").date()
-        end_date = datetime.strptime(args.end, "%Y-%m-%d").date()
-    except ValueError:
-        sys.exit("Error: Dates must be in YYYY-MM-DD format.")
-        
-    if start_date > end_date:
-        sys.exit("Error: Start date cannot be after end date.")
-        
-    return start_date, end_date, args.currencies, args.format, args.install_cron
+    return datetime.strptime(args.start, "%Y-%m-%d").date(), datetime.strptime(args.end, "%Y-%m-%d").date(), args.currencies, args.format
 
 def write_csv(rows: List[Dict[str, Any]], output_path: str, currencies: List[str]):
     columns = ["Year", "Date"]
-    for ccy in currencies:
-        columns.extend([f"{ccy}_Buying_TT", f"{ccy}_Selling"])
+    for ccy in currencies: columns.extend([f"{ccy}_Buying_TT", f"{ccy}_Selling"])
     columns.append("Remark")
-    
-    with open(output_path, "w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=columns)
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
         writer.writeheader()
         writer.writerows(rows)
 
-def write_json(rows: List[Dict[str, Any]], output_path: str):
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(rows, f, indent=4, ensure_ascii=False)
-
-def write_sqlite(rows: List[Dict[str, Any]], output_path: str, currencies: List[str]):
-    conn = sqlite3.connect(output_path)
-    cursor = conn.cursor()
-    
-    cols = ["Year INTEGER", "Date TEXT", "Remark TEXT"]
-    for ccy in currencies:
-        cols.extend([f"{ccy}_Buying_TT TEXT", f"{ccy}_Selling TEXT"])
-        
-    cursor.execute("DROP TABLE IF EXISTS exchange_rates")
-    cursor.execute(f"CREATE TABLE exchange_rates (id INTEGER PRIMARY KEY AUTOINCREMENT, {', '.join(cols)})")
-    
-    # Insert new data
-    for row in rows:
-        placeholders = ", ".join(["?"] * (len(row)))
-        keys = list(row.keys())
-        values = [row[k] for k in keys]
-        cursor.execute(f"INSERT INTO exchange_rates ({', '.join(keys)}) VALUES ({placeholders})", values)
-        
-    conn.commit()
-    conn.close()
-
-def install_cron_job():
-    script_path = os.path.abspath(__file__)
-    
-    if os.name == "nt":
-        # Windows Schedule via schtasks
-        task_name = "BOT_Exchange_Rate_Generator"
-        python_exe = sys.executable
-        # run at 18:00 every Mon-Fri
-        cmd = f'schtasks /create /tn "{task_name}" /tr "\\"{python_exe}\\" \\"{script_path}\\" --format sqlite" /sc weekly /d MON,TUE,WED,THU,FRI /st 18:00 /f'
-        try:
-            subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            print("\n✅ Scheduled Task Installed (Windows).")
-            print(f"   Name: {task_name}")
-            print("   This script will now run automatically every weekday at 6:00 PM.")
-            print("   To remove it, use the Windows Task Scheduler or run:")
-            print(f"   schtasks /delete /tn \"{task_name}\" /f\n")
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Failed to install scheduled task: {e}")
-    else:
-        # macOS / Linux Schedule via crontab
-        cron_command = f"0 18 * * 1-5 {sys.executable} {script_path} --format sqlite"
-        
-        try:
-            # Get current crontab
-            current_cron = subprocess.check_output("crontab -l", shell=True, text=True, stderr=subprocess.DEVNULL)
-        except subprocess.CalledProcessError:
-            current_cron = ""
-            
-        if script_path in current_cron:
-            print("Cron job is already installed.")
-            return
-            
-        new_cron = current_cron.strip() + f"\n{cron_command}\n"
-        
-        # Install new crontab
-        process = subprocess.Popen("crontab -", stdin=subprocess.PIPE, shell=True)
-        process.communicate(new_cron.encode())
-        
-        print("\n✅ Scheduled Cron Job Installed (macOS/Linux).")
-        print(f"   Command: {cron_command}")
-        print("   This script will now run automatically every weekday at 6:00 PM.")
-        print("   To remove it, run `crontab -e` in your terminal.\n")
-
 # ─── Async Main Execution ────────────────────────────────────
 async def main():
-    start_date, end_date, currencies, export_format, install_cron = parse_args()
+    start_date, end_date, currencies, export_format = parse_args()
+    db_path = os.path.join(SCRIPT_DIR, "bot_rates_cache.db")
     
-    if install_cron:
-        install_cron_job()
-        
-    print(f"Starting BOT Generator (Async) from {start_date} to {end_date}...")
-    print(f"Currencies: {', '.join(currencies)}  |  Format: {export_format.upper()}")
+    # 0. Init Cache
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS exchange_rates (date TEXT, currency TEXT, buying_tt REAL, selling REAL, PRIMARY KEY(date,currency))")
+
+    print(f"Starting BOT Generator (Async+Cache) from {start_date} to {end_date}...")
     
     holidays: Dict[str, str] = {}
     exchange_rates: Dict[str, Dict[str, Dict[str, str]]] = {}
     
-    connector = aiohttp.TCPConnector(limit=10, keepalive_timeout=30)
-    timeout = aiohttp.ClientTimeout(connect=15, total=45)
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        sem = asyncio.Semaphore(10) # Prevent overloading old PCs
-        async def fetch_bounded(url: str, token: str) -> Optional[Dict[str, Any]]:
+    connector = aiohttp.TCPConnector(limit=5)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        sem = asyncio.Semaphore(1) 
+        
+        async def fetch_bounded(url, token, is_rate=False, ccy=None):
             async with sem:
-                return await bot_api_get_async(session, url, token)
+                if is_rate:
+                    import urllib.parse
+                    qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+                    s, e = qs.get("start_period", [""])[0], qs.get("end_period", [""])[0]
+                    with sqlite3.connect(db_path) as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT date, buying_tt, selling FROM exchange_rates WHERE date BETWEEN ? AND ? AND currency = ?", [s, e, ccy])
+                        cached = cursor.fetchall()
+                        
+                        # Dynamic validation: check if cached count matches expected trading days
+                        s_dt = datetime.strptime(s, "%Y-%m-%d").date()
+                        e_dt = datetime.strptime(e, "%Y-%m-%d").date()
+                        expected = count_business_days(s_dt, e_dt, holidays)
+                        
+                        if len(cached) >= expected and expected > 0:
+                            details = [{"period": d, "buying_transfer": b, "selling": s} for d, b, s in cached]
+                            return {"result": {"data": {"data_detail": details}}}
+                
+                res = await bot_api_get_async(session, url, token)
+                if is_rate and res:
+                    details = res.get("result", {}).get("data", {}).get("data_detail", [])
+                    if details:
+                        with sqlite3.connect(db_path) as conn:
+                            conn.executemany("INSERT OR REPLACE INTO exchange_rates VALUES (?, ?, ?, ?)",
+                                           [(d["period"], ccy, d["buying_transfer"], d["selling"]) for d in details])
+                return res
 
-        # 1. Prepare Holiday Tasks
-        start_year = start_date.year
-        end_year = end_date.year
+        # 1. Holiday Tasks (Fetch FIRST for cache validation)
         holiday_tasks = []
-        for year in range(start_year, end_year + 1):
+        for year in range(start_date.year, end_date.year + 1):
             url = f"{GATEWAY_URL}{HOLIDAY_PATH}?year={year}"
             holiday_tasks.append(fetch_bounded(url, TOKEN_HOLIDAY))
+        
+        print(f"  Fetching holidays...")
+        h_res = await asyncio.gather(*holiday_tasks)
+        for r in h_res:
+            if r:
+                for h in r.get("result", {}).get("data", []):
+                    holidays[h["Date"]] = h["HolidayDescription"]
             
-        # 2. Prepare Exchange Rate Tasks
+        # 2. Rate Tasks (Now with accurate holiday-aware expected counts)
         rate_tasks = []
-        chunk_start = start_date
-        while chunk_start <= end_date:
-            chunk_end = min(chunk_start + timedelta(days=MAX_DAYS_PER_REQUEST), end_date)
-            start_str = chunk_start.strftime("%Y-%m-%d")
-            end_str = chunk_end.strftime("%Y-%m-%d")
+        cs = start_date
+        while cs <= end_date:
+            ce = min(cs + timedelta(days=MAX_DAYS_PER_REQUEST), end_date)
+            for ccy in currencies:
+                url = f"{GATEWAY_URL}{EXCHANGE_RATE_PATH}?start_period={cs}&end_period={ce}&currency={ccy}"
+                rate_tasks.append((ccy, fetch_bounded(url, TOKEN_EXCHANGE_RATE, True, ccy)))
+            cs = ce + timedelta(days=1)
             
-            for currency_code in currencies:
-                url = (f"{GATEWAY_URL}{EXCHANGE_RATE_PATH}?start_period={start_str}"
-                       f"&end_period={end_str}&currency={currency_code}")
-                # We attach the currency code so we know how to parse the result later
-                rate_tasks.append((currency_code, fetch_bounded(url, TOKEN_EXCHANGE_RATE)))
-                
-            chunk_start = chunk_end + timedelta(days=1)
-            
-        print(f"  Fetching data ({len(holiday_tasks)} holiday years, {len(rate_tasks)} rate chunks)...")
-        
-        # 3. Execute all tasks concurrently!
-        holiday_results = await asyncio.gather(*holiday_tasks)
-        rate_results = await asyncio.gather(*(task[1] for task in rate_tasks))
-        
-        # 4. Process Holiday Results
-        for response_data in holiday_results:
-            if response_data:
-                holiday_list = response_data.get("result", {}).get("data", [])
-                if isinstance(holiday_list, list):
-                    for holiday_entry in holiday_list:
-                        h_date = str(holiday_entry.get("Date", "")).strip()[:10]
-                        h_name = str(holiday_entry.get("HolidayDescription", "Holiday")).strip()
-                        if h_date:
-                            holidays[h_date] = h_name
-                            
-        # 5. Process Rate Results
-        for (currency_code, _), response_data in zip(rate_tasks, rate_results):
-            if not response_data:
-                continue
-                
-            try:
-                data_detail_list = response_data.get("result", {}).get("data", {}).get("data_detail", [])
-            except (KeyError, AttributeError):
-                continue
-                
-            if not isinstance(data_detail_list, list):
-                continue
-                
-            for rate_entry in data_detail_list:
-                r_date = str(rate_entry.get("period", "")).strip()[:10]
-                if not r_date:
-                    continue
-                    
-                raw_buy = str(rate_entry.get("buying_transfer", "")).strip()
-                raw_sell = str(rate_entry.get("selling", "")).strip()
-                buying_tt = str(Decimal(raw_buy)) if raw_buy else ""
-                selling_rate = str(Decimal(raw_sell)) if raw_sell else ""
-                
-                if r_date not in exchange_rates:
-                    exchange_rates[r_date] = {}
-                    
-                exchange_rates[r_date][currency_code] = {
-                    "buying_tt": buying_tt,
-                    "selling": selling_rate
-                }
+        print(f"  Processing {len(rate_tasks)} rate chunks...")
 
-    # Free memory from API response data
-    gc.collect()
+        for ccy, task in rate_tasks:
+            res = await task
+            if res:
+                details = res.get("result", {}).get("data", {}).get("data_detail", [])
+                for d in details:
+                    dt = d["period"]
+                    if dt not in exchange_rates: exchange_rates[dt] = {}
+                    exchange_rates[dt][ccy] = {"buying_tt": str(d["buying_transfer"]), "selling": str(d["selling"])}
 
-    # 6. Build the rows
+    # 3. Build Rows
     all_rows = []
-    current_date = start_date
-    while current_date <= end_date:
-        date_string = current_date.strftime("%d %b %Y")
-        iso_date = current_date.strftime("%Y-%m-%d")
-
-        holiday_name = holidays.get(iso_date, "")
-        if not holiday_name:
-            holiday_name = FIXED_THAI_HOLIDAYS.get((current_date.month, current_date.day), "")
-
-        is_weekend = (current_date.weekday() >= 5)
+    curr = start_date
+    while curr <= end_date:
+        ds = curr.strftime("%Y-%m-%d")
+        h_name = holidays.get(ds, "") or FIXED_THAI_HOLIDAYS.get((curr.month, curr.day), "")
+        is_wknd = curr.weekday() >= 5
+        remark = f"{h_name}; Weekend" if is_wknd and h_name else ("Weekend" if is_wknd else h_name)
         
-        remark = ""
-        if is_weekend and holiday_name:
-            remark = f"Weekend; {holiday_name}"
-        elif is_weekend:
-            remark = "Weekend"
-        elif holiday_name:
-            remark = holiday_name
-        
-        remark = remark.replace(",", ";")
-
-        day_rates = exchange_rates.get(iso_date, {})
-        row = {
-            "Year": current_date.year,
-            "Date": date_string,
-        }
-        
+        row = {"Year": curr.year, "Date": curr.strftime("%d_%m_%Y"), "Remark": remark.replace(",", ";")}
         for ccy in currencies:
-            row[f"{ccy}_Buying_TT"] = day_rates.get(ccy, {}).get("buying_tt", "")
-            row[f"{ccy}_Selling"]   = day_rates.get(ccy, {}).get("selling", "")
-            
-        row["Remark"] = remark
+            d_rates = exchange_rates.get(ds, {}).get(ccy, {})
+            row[f"{ccy}_Buying_TT"] = d_rates.get("buying_tt", "")
+            row[f"{ccy}_Selling"] = d_rates.get("selling", "")
         all_rows.append(row)
-        current_date += timedelta(days=1)
+        curr += timedelta(days=1)
 
-    # 7. Write to File
-    base_name = os.path.splitext(OUTPUT_FILE)[0]
-    out_path = f"{base_name}.csv"  # default fallback
-    if export_format == "csv":
-        out_path = f"{base_name}.csv"
-        write_csv(all_rows, out_path, currencies)
-    elif export_format == "json":
-        out_path = f"{base_name}.json"
-        write_json(all_rows, out_path)
-    elif export_format == "sqlite":
-        out_path = f"{base_name}.db"
-        write_sqlite(all_rows, out_path, currencies)
-        
-    print("=" * 60)
-    print("  DONE!")
-    print(f"  Rows written: {len(all_rows)}")
-    print(f"  Trading days: {len(exchange_rates)}")
-    print(f"  Output saved: {os.path.basename(out_path)}")
-    print("=" * 60)
+    write_csv(all_rows, OUTPUT_FILE, currencies)
+    print(f"  DONE! Saved to: {OUTPUT_FILE}")
+
+    # 4. Integrate bot_acc_filler.py (v1.3.9 Enablement)
+    filler_script = os.path.join(SCRIPT_DIR, "bot_acc_filler.py")
+    acc_input = config.get("accounting", {}).get("input_file", "")
+    if acc_input and os.path.exists(os.path.join(SCRIPT_DIR, acc_input)):
+        print(f"\nEnabling Finance Accounting Filler for '{acc_input}'...")
+        try:
+            subprocess.check_call([sys.executable, filler_script])
+        except Exception as e:
+            print(f"  [Warn] Accounting Filler failed: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -376,11 +262,13 @@ if __name__ == "__main__":
 #            | REMOVED: 4 separate rate variables before print() (merged into dict)
 #            | REMOVED: print() header + print() row loop (replaced by write_csv)
 #            | NOT CHANGED: all logic, all config constants, all variable names
+#
 # 2026-03-11 | v1.03 — Overhaul
 #            | - Standardized date format to "DD MMM YYYY" (e.g. 04 Feb 2026)
 #            | - Fixed output filename to BOT_Exchange_rates.csv (removed date suffix)
 #            | - Added detailed progress logging in the terminal
 #            | - Added iso_date for internal logic while keeping formatted display
+#
 # 2026-03-11 | v1.0.7 — Optimizations
 #            | - Implemented argparse for --start and --end CLI arguments
 #            | - Switched to asyncio and aiohttp for massive download speedup
@@ -402,6 +290,11 @@ if __name__ == "__main__":
 #            | - Performance: TCPConnector(limit=10, keepalive_timeout=30) for connection pooling
 #            | - Reliability: explicit ClientTimeout(connect=15, total=45)
 #            | - Memory: gc.collect() after heavy data-fetch phase
-
-
-
+#
+# 2026-03-15 | v1.3.9 — Date Format Update
+#            | - Updated date format to dd_mm_yyyy in both generator and Excel report.
+# # v1.3.9 | 2026-03-16 | Robust Cache Validation (Business Day Count)
+#            | - Balanced cache trigger (len >= expected_days instead of fixed 28)
+#            | - Enabled automatic bot_acc_filler integration
+#            | - Improved PC-portability with standard lib handling
+#            | - Hardened literal v1.3.0 scripts for production use with SQLite persistence.

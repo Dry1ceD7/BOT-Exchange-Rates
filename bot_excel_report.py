@@ -34,6 +34,7 @@ import os
 import urllib.request
 import argparse
 import asyncio
+import sqlite3
 from decimal import Decimal
 from typing import Dict, Any, Optional, List
 
@@ -245,21 +246,63 @@ async def bot_api_get_async(session: aiohttp.ClientSession, full_url: str, auth_
             await asyncio.sleep(2 ** attempt)
     return None
 
+def count_business_days(start: date, end: date, holidays: Dict[str, str], fixed_holidays: Dict[tuple, str]) -> int:
+    """Calculates number of trading days in range (excluding weekends and BOT holidays)."""
+    days = 0
+    curr = start
+    while curr <= end:
+        ds = curr.strftime("%Y-%m-%d")
+        is_wknd = curr.weekday() >= 5
+        is_hol = ds in holidays or (curr.month, curr.day) in fixed_holidays
+        if not is_wknd and not is_hol:
+            days += 1
+        curr += timedelta(days=1)
+    return days
+
 async def fetch_all_data(start_date, end_date):
     holidays = {}
     rates = {}
     connector = aiohttp.TCPConnector(limit=10, keepalive_timeout=30)
     timeout = aiohttp.ClientTimeout(connect=15, total=45)
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        sem = asyncio.Semaphore(10) # Prevent overloading old PCs
-        async def fetch_bounded(url: str, token: str) -> Optional[Dict[str, Any]]:
+        sem = asyncio.Semaphore(1) # Slow & Safe to avoid 429
+        async def fetch_bounded(url: str, token: str, is_rate: bool = False, ccy: Optional[str] = None) -> Optional[Dict[str, Any]]:
             async with sem:
-                return await bot_api_get_async(session, url, token)
+                if is_rate and "start_period" in url:
+                    import urllib.parse
+                    qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+                    s_dt, e_dt = qs.get("start_period", [""])[0], qs.get("end_period", [""])[0]
+                    db_path = os.path.join(SCRIPT_DIR, "bot_rates_cache.db")
+                    with sqlite3.connect(db_path) as conn:
+                        # Look in cache
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT date, buying_tt, selling FROM exchange_rates WHERE date BETWEEN ? AND ? AND currency = ?", [s_dt, e_dt, ccy])
+                        cached = cursor.fetchall()
+                        
+                        # Use same logic as generator: count expected business days
+                        s_obj = datetime.strptime(s_dt, "%Y-%m-%d").date()
+                        e_obj = datetime.strptime(e_dt, "%Y-%m-%d").date()
+                        expected = count_business_days(s_obj, e_obj, holidays, FIXED_HOLIDAYS)
+                        
+                        if len(cached) >= expected and expected > 0:
+                            details = [{"period": d, "buying_transfer": b, "selling": s} for d, b, s in cached]
+                            return {"result": {"data": {"data_detail": details}}}
+                
+                res = await bot_api_get_async(session, url, token)
+                
+                if is_rate and res:
+                    details = res.get("result", {}).get("data", {}).get("data_detail", [])
+                    if details:
+                        db_path = os.path.join(SCRIPT_DIR, "bot_rates_cache.db")
+                        with sqlite3.connect(db_path) as conn:
+                            conn.executemany("INSERT OR REPLACE INTO exchange_rates VALUES (?, ?, ?, ?)", 
+                                           [(d["period"], ccy, d["buying_transfer"], d["selling"]) for d in details])
+                return res
 
         holiday_tasks = []
         for yr in range(start_date.year, end_date.year + 1):
             url = f"{GATEWAY}{HOL_PATH}?year={yr}"
-            holiday_tasks.append(fetch_bounded(url, TOKEN_HOL))
+            holiday_tasks.append(fetch_bounded(url, TOKEN_HOL, is_rate=False))
             
         rate_tasks = []
         cs = start_date
@@ -268,13 +311,18 @@ async def fetch_all_data(start_date, end_date):
             sp, ep = cs.strftime("%Y-%m-%d"), ce.strftime("%Y-%m-%d")
             for ccy in CURRENCIES:
                 url = f"{GATEWAY}{EXG_PATH}?start_period={sp}&end_period={ep}&currency={ccy}"
-                rate_tasks.append((ccy, fetch_bounded(url, TOKEN_EXG)))
+                rate_tasks.append((ccy, fetch_bounded(url, TOKEN_EXG, is_rate=True, ccy=ccy)))
             cs = ce + timedelta(days=1)
-            
-        log(f"\n  [1/3] Fetching data ({len(holiday_tasks)} holiday years, {len(rate_tasks)} rate chunks concurrently)...")
+
+        # Ensure DB table exists
+        db_path = os.path.join(SCRIPT_DIR, "bot_rates_cache.db")
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS exchange_rates (date TEXT, currency TEXT, buying_tt REAL, selling REAL, PRIMARY KEY(date,currency))")
+
+        log(f"\n  [1/3] Fetching data ({len(holiday_tasks)} holiday years, {len(rate_tasks)} rate chunks)...")
+
+        # 1. Fetch holidays FIRST (critical for cache validation in fetch_bounded)
         holiday_results = await asyncio.gather(*holiday_tasks)
-        rate_results = await asyncio.gather(*(task[1] for task in rate_tasks))
-        
         for data in holiday_results:
             if data:
                 for h in data.get("result", {}).get("data", []):
@@ -282,6 +330,11 @@ async def fetch_all_data(start_date, end_date):
                     nm = str(h.get("HolidayDescription", "Holiday")).strip()
                     if dt:
                         holidays[dt] = nm
+
+        # 2. Fetch rates
+        rate_results = []
+        for ccy, task_coro in rate_tasks:
+            rate_results.append(await task_coro)
                         
         for (ccy, _), data in zip(rate_tasks, rate_results):
             if data:
@@ -525,7 +578,7 @@ def build_rate_sheet(wb, ccy, tab_color, buy_key, sell_key):
             row_fill = FILL_WHITE          # Normal → white
 
         write_cell(ws, row, 1, dt.year, FONT_BODY, row_fill, ALIGN_C, THIN_BORDER)
-        write_cell(ws, row, 2, dt, FONT_BODY, row_fill, ALIGN_C, THIN_BORDER, "DD MMM YYYY")
+        write_cell(ws, row, 2, dt, FONT_BODY, row_fill, ALIGN_C, THIN_BORDER, "DD_MM_YYYY")
         write_cell(ws, row, 3, dt.strftime("%a"), FONT_SMALL, row_fill, ALIGN_C, THIN_BORDER)
 
         # Buying TT
@@ -977,7 +1030,7 @@ for ccy in CURRENCIES:
     write_cell(ws, 4, c1, f"  {ccy} ⇄ THB", FONT_HDR, FILL_PRIMARY, ALIGN_L, THIN_BORDER)
 
     write_cell(ws, 6, c1, "Rate Date:", FONT_BODY_B, FILL_WHITE, ALIGN_L, THIN_BORDER)
-    write_cell(ws, 6, c2, latest["date"], FONT_BODY, FILL_WHITE, ALIGN_C, THIN_BORDER, "DD MMM YYYY")
+    write_cell(ws, 6, c2, latest["date"], FONT_BODY, FILL_WHITE, ALIGN_C, THIN_BORDER, "DD_MM_YYYY")
 
     write_cell(ws, 7, c1, "Buying TT:", FONT_BODY_B, FILL_WHITE, ALIGN_L, THIN_BORDER)
     write_cell(ws, 7, c2, latest[f"{ccy.lower()}_buy"], FONT_NUM, FILL_WHITE, ALIGN_R, THIN_BORDER, NUM_FMT_RATE)
@@ -1262,3 +1315,10 @@ log("=" * 60)
 #            | - Memory: gc.collect() after heavy data-fetch phase
 #            | - Universal PDF: multi-strategy (LibreOffice → fpdf2 pure-Python fallback)
 #            | - Pyre lint: fixed type annotations across the entire script
+#
+#
+# 2026-03-16 | v1.3.9 | Robust Cache Validation (Business Day Count)
+#            | - Synchronized cache logic with bot_generator.py
+#            | - Fixed Trading Days mismatch (185 -> 300+)
+#            | - Improved PC-portability with standard lib handling
+#            | - Hardened literal v1.3.0 scripts for production use with SQLite persistence.

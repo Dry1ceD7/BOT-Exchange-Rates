@@ -6,6 +6,16 @@
         "max_days_per_request": 30
     },
     "currencies": ["USD", "EUR"],
+    "accounting": {
+        "excel_version": "auto",
+        "backtrack_limit": 5,
+        "input_file": "exchange_rate_file_sample_updated-4.xlsx",
+        "output_file": "exchange_rate_file_sample_updated-4_Filled.xlsx",
+        "date_col": "วันที่ใบขน",
+        "ccy_col": "Cur",
+        "target_date_col": "วันที่ดึง Exchange rate date",
+        "rate_col": "EX Rate"
+    },
     "fixed_holidays": {
         "01-01": "New Year's Day",
         "04-06": "Chakri Memorial Day",
