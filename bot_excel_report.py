@@ -116,25 +116,26 @@ GATEWAY   = config["api"]["gateway_url"]
 EXG_PATH  = config["api"]["exchange_rate_path"]
 HOL_PATH  = config["api"]["holiday_path"]
 
-# CLI Arguments
-parser = argparse.ArgumentParser(description="Bank of Thailand Executive Excel Report")
-parser.add_argument("--start", type=str, default="2025-01-01", help="Start date YYYY-MM-DD")
-parser.add_argument("--end", type=str, default=datetime.now().strftime("%Y-%m-%d"), help="End date YYYY-MM-DD")
-parser.add_argument("--currencies", nargs="+", default=config["currencies"], help="Currencies to include")
-parser.add_argument("--pdf", action="store_true", help="Generate PDF version")
-parser.add_argument("--email", type=str, help="Email address to send the report to")
-args = parser.parse_args()
+def parse_date(d_str: str) -> date:
+    for fmt in ("%Y-%m-%d", "%d %m %Y", "%d_%m_%Y"):
+        try:
+            return datetime.strptime(d_str, fmt).date()
+        except ValueError:
+            continue
+    sys.exit(f"Error: Invalid date format '{d_str}'. Use 'dd mm yyyy' or 'YYYY-MM-DD'.")
 
-CURRENCIES = args.currencies
-GENERATE_PDF = args.pdf
-EMAIL_TO = args.email
+def parse_args():
+    parser = argparse.ArgumentParser(description="Bank of Thailand Executive Excel Report Generator")
+    parser.add_argument("--start", type=str, default="2025-01-01", help="Start date (dd mm yyyy or YYYY-MM-DD)")
+    parser.add_argument("--end", type=str, default=datetime.now().strftime("%Y-%m-%d"), help="End date")
+    parser.add_argument("--currencies", nargs="+", default=config["currencies"], help="List of currency codes")
+    parser.add_argument("--pdf", action="store_true", help="Generate PDF export (Requires 'libreoffice')")
+    parser.add_argument("--email", action="store_true", help="Email the report after generation")
+    args = parser.parse_args()
+    return parse_date(args.start), parse_date(args.end), args.currencies, args.pdf, args.email
 
-try:
-    START = datetime.strptime(args.start, "%Y-%m-%d").date()
-    END = datetime.strptime(args.end, "%Y-%m-%d").date()
-except ValueError:
-    sys.exit("Error: Dates must be in YYYY-MM-DD format.")
-    
+START, END, CURRENCIES, GENERATE_PDF, EMAIL_TO = parse_args()
+
 if START > END:
     sys.exit("Error: Start date cannot be after end date.")
 
@@ -531,31 +532,31 @@ def build_rate_sheet(wb, ccy, tab_color, buy_key, sell_key):
     ws.sheet_properties.tabColor = tab_color
 
     set_col_widths(ws, {
-        "A": 8, "B": 14, "C": 5,
-        "D": 17, "E": 17,
-        "F": 14, "G": 14,
-        "H": 35,
+        "A": 16, "B": 5,
+        "C": 17, "D": 17,
+        "E": 14, "F": 14,
+        "G": 35,
     })
 
     # Title row — light blue band
-    ws.merge_cells("A1:H1")
+    ws.merge_cells("A1:G1")
     write_cell(ws, 1, 1, f"  {ccy}/THB — Daily Weighted-Average Interbank Exchange Rates",
                Font(name="Calibri", size=14, bold=True, color=C_PRIMARY),
                FILL_ACCENT_LT, ALIGN_L, NO_BORDER)
     ws.row_dimensions[1].height = 35
 
     # Sub-title
-    ws.merge_cells("A2:H2")
+    ws.merge_cells("A2:G2")
     write_cell(ws, 2, 1, f"  Source: Bank of Thailand  |  Period: {START} to {END}  |  Generated: {TODAY_STR}",
                FONT_SMALL, FILL_ACCENT_LT, ALIGN_L, NO_BORDER)
     ws.row_dimensions[2].height = 20
 
     # Header row
-    headers = ["Year", "Date", "Day", "Buying TT", "Selling", "Daily Δ", "Δ %", "Remark"]
+    headers = ["Date", "Day", "Buying TT", "Selling", "Daily Δ", "Δ %", "Remark"]
     for i, h in enumerate(headers, 1):
         write_cell(ws, 4, i, h, FONT_HDR, FILL_PRIMARY, ALIGN_C, THIN_BORDER)
     ws.row_dimensions[4].height = 28
-    ws.auto_filter.ref = "A4:H4"
+    ws.auto_filter.ref = "A4:G4"
     ws.freeze_panes = "A5"
 
     # Data rows
@@ -577,21 +578,20 @@ def build_rate_sheet(wb, ccy, tab_color, buy_key, sell_key):
         else:
             row_fill = FILL_WHITE          # Normal → white
 
-        write_cell(ws, row, 1, dt.year, FONT_BODY, row_fill, ALIGN_C, THIN_BORDER)
-        write_cell(ws, row, 2, dt, FONT_BODY, row_fill, ALIGN_C, THIN_BORDER, "DD_MM_YYYY")
-        write_cell(ws, row, 3, dt.strftime("%a"), FONT_SMALL, row_fill, ALIGN_C, THIN_BORDER)
+        write_cell(ws, row, 1, dt, FONT_BODY, row_fill, ALIGN_C, THIN_BORDER, "DD MM YYYY")
+        write_cell(ws, row, 2, dt.strftime("%a"), FONT_SMALL, row_fill, ALIGN_C, THIN_BORDER)
 
         # Buying TT
         if buy is not None:
-            write_cell(ws, row, 4, buy, FONT_NUM, row_fill, ALIGN_R, THIN_BORDER, NUM_FMT_RATE)
+            write_cell(ws, row, 3, buy, FONT_NUM, row_fill, ALIGN_R, THIN_BORDER, NUM_FMT_RATE)
         else:
-            write_cell(ws, row, 4, "", FONT_NUM, row_fill, ALIGN_R, THIN_BORDER)
+            write_cell(ws, row, 3, "", FONT_NUM, row_fill, ALIGN_R, THIN_BORDER)
 
         # Selling
         if sell is not None:
-            write_cell(ws, row, 5, sell, FONT_NUM, row_fill, ALIGN_R, THIN_BORDER, NUM_FMT_RATE)
+            write_cell(ws, row, 4, sell, FONT_NUM, row_fill, ALIGN_R, THIN_BORDER, NUM_FMT_RATE)
         else:
-            write_cell(ws, row, 5, "", FONT_NUM, row_fill, ALIGN_R, THIN_BORDER)
+            write_cell(ws, row, 4, "", FONT_NUM, row_fill, ALIGN_R, THIN_BORDER)
 
         # Daily change & percentage (based on selling rate)
         if sell is not None and prev_sell is not None:
@@ -1316,6 +1316,12 @@ log("=" * 60)
 #            | - Universal PDF: multi-strategy (LibreOffice → fpdf2 pure-Python fallback)
 #            | - Pyre lint: fixed type annotations across the entire script
 #
+#
+# 2026-03-16 | v1.4.0 | Visual Refinements
+#            | - Removed Year column from Excel report.
+#            | - Shifted columns left and updated indices.
+#            | - Standardized date format to "dd mm yyyy" in Excel and CSV.
+#            | - Ported to v1.4.0.
 #
 # 2026-03-16 | v1.3.9 | Robust Cache Validation (Business Day Count)
 #            | - Synchronized cache logic with bot_generator.py

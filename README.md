@@ -132,8 +132,11 @@ Both scripts support the following parameters:
 
 | Argument | Format | Description | Default |
 | :--- | :--- | :--- | :--- |
-| `--start` | `YYYY-MM-DD` | The start date for the data fetch | `2025-01-01` |
-| `--end` | `YYYY-MM-DD` | The end date for the data fetch | `Today` |
+| `--start` | `dd mm yyyy` | The start date for the data fetch | `01 01 2025` |
+| `--end` | `dd mmm yyyy` | The end date for the data fetch | `Today` |
+
+> [!NOTE]
+> **Date Output Format:** All generated reports (CSV and Excel) now use the `dd mm yyyy` format for maximum readability.
 
 
 ---

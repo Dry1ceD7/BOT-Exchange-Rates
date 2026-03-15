@@ -109,17 +109,25 @@ async def bot_api_get_async(session: aiohttp.ClientSession, full_url: str, auth_
             await asyncio.sleep(2 ** attempt)
     return None
 
+def parse_date(d_str: str) -> date:
+    for fmt in ("%Y-%m-%d", "%d %m %Y", "%d_%m_%Y"):
+        try:
+            return datetime.strptime(d_str, fmt).date()
+        except ValueError:
+            continue
+    sys.exit(f"Error: Invalid date format '{d_str}'. Use 'dd mm yyyy' or 'YYYY-MM-DD'.")
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Bank of Thailand Exchange Rate Data Generator")
-    parser.add_argument("--start", type=str, default="2025-01-01", help="Start date YYYY-MM-DD")
-    parser.add_argument("--end", type=str, default=datetime.now().strftime("%Y-%m-%d"), help="End date YYYY-MM-DD")
+    parser.add_argument("--start", type=str, default="2025-01-01", help="Start date (dd mm yyyy or YYYY-MM-DD)")
+    parser.add_argument("--end", type=str, default=datetime.now().strftime("%Y-%m-%d"), help="End date")
     parser.add_argument("--currencies", nargs="+", default=config["currencies"], help="List of currency codes")
     parser.add_argument("--format", type=str, choices=["csv", "json", "sqlite"], default="csv", help="Output format")
     args = parser.parse_args()
-    return datetime.strptime(args.start, "%Y-%m-%d").date(), datetime.strptime(args.end, "%Y-%m-%d").date(), args.currencies, args.format
+    return parse_date(args.start), parse_date(args.end), args.currencies, args.format
 
 def write_csv(rows: List[Dict[str, Any]], output_path: str, currencies: List[str]):
-    columns = ["Year", "Date"]
+    columns = ["Date"]
     for ccy in currencies: columns.extend([f"{ccy}_Buying_TT", f"{ccy}_Selling"])
     columns.append("Remark")
     with open(output_path, "w", newline="", encoding="utf-8") as f:
@@ -217,7 +225,7 @@ async def main():
         is_wknd = curr.weekday() >= 5
         remark = f"{h_name}; Weekend" if is_wknd and h_name else ("Weekend" if is_wknd else h_name)
         
-        row = {"Year": curr.year, "Date": curr.strftime("%d_%m_%Y"), "Remark": remark.replace(",", ";")}
+        row = {"Date": curr.strftime("%d %m %Y"), "Remark": remark.replace(",", ";")}
         for ccy in currencies:
             d_rates = exchange_rates.get(ds, {}).get(ccy, {})
             row[f"{ccy}_Buying_TT"] = d_rates.get("buying_tt", "")
@@ -290,10 +298,11 @@ if __name__ == "__main__":
 #            | - Performance: TCPConnector(limit=10, keepalive_timeout=30) for connection pooling
 #            | - Reliability: explicit ClientTimeout(connect=15, total=45)
 #            | - Memory: gc.collect() after heavy data-fetch phase
+# v1.4.0 | 2026-03-16 | Visual Refinements
+#            | - Standardized date format to dd mm yyyy (spaces).
+#            | - Simplified Excel reporting by removing redundant Year column.
 #
-# 2026-03-15 | v1.3.9 — Date Format Update
-#            | - Updated date format to dd_mm_yyyy in both generator and Excel report.
-# # v1.3.9 | 2026-03-16 | Robust Cache Validation (Business Day Count)
+# v1.3.9 | 2026-03-16 | Robust Cache Validation (Business Day Count)
 #            | - Balanced cache trigger (len >= expected_days instead of fixed 28)
 #            | - Enabled automatic bot_acc_filler integration
 #            | - Improved PC-portability with standard lib handling
