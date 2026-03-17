@@ -5,7 +5,8 @@ main.py
 BOT Exchange Rate Processor (v2.3.1) - Fail-Safe Enterprise
 ---------------------------------------------------------------------------
 Entry point. Loads .env, validates API tokens BEFORE GUI init,
-and exits with a clear error popup if tokens are missing.
+ensures required directories exist, and exits with a clear error
+popup if tokens are missing.
 """
 
 import sys
@@ -20,7 +21,21 @@ from dotenv import load_dotenv
 env_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path=env_path)
 
-# ── FIX 1: Early Token Validation ────────────────────────────────────────
+
+# ── Cold-Start: Ensure required directories exist ────────────────────────
+def _ensure_directories():
+    """
+    Git does not track empty folders. On a fresh clone, data/input/
+    and data/backups/ will not exist. Create them proactively.
+    (data/ and data/backups/ are also created by database.py and
+    backup_manager.py singletons, but data/input/ is NOT.)
+    """
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    for subdir in ["data", "data/input", "data/backups"]:
+        os.makedirs(os.path.join(project_root, subdir), exist_ok=True)
+
+
+# ── Early Token Validation ───────────────────────────────────────────────
 def _validate_tokens():
     """
     Checks for required BOT API tokens BEFORE the GUI loads.
@@ -42,15 +57,16 @@ def _validate_tokens():
             "CRITICAL: API Tokens Missing",
             f"The following required tokens are not set in your .env file:\n\n"
             f"  • {chr(10).join(missing)}\n\n"
-            f"Please add them to:\n{env_path}\n\n"
-            f"The application cannot start without valid BOT API credentials."
+            f"Please copy .env.example to .env and add your credentials.\n\n"
+            f"Register at: https://apiportal.bot.or.th/"
         )
         root.destroy()
         sys.exit(1)
 
 
 def main():
-    """Validates tokens, then starts the CustomTkinter application."""
+    """Ensures directories, validates tokens, then starts the application."""
+    _ensure_directories()
     _validate_tokens()
 
     from gui.app import BOTExrateApp

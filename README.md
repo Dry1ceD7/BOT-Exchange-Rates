@@ -84,41 +84,46 @@ It replaces a fragmented, error-prone 3-script workflow with a single, mathemati
 - Python 3.10+
 - Bank of Thailand API credentials ([Register here](https://apiportal.bot.or.th/))
 
-### Installation
+### Quick Start (Cold-Start Commands)
 
 ```bash
-# Clone the repository
+# 1. Clone the repository
 git clone https://github.com/Dry1ceD7/BOT-Exchange-Rates.git
 cd BOT-Exchange-Rates
 
-# Create virtual environment
+# 2. Create and activate virtual environment
 python -m venv venv
 source venv/bin/activate        # macOS/Linux
 # venv\Scripts\activate         # Windows
 
-# Install dependencies
-pip install customtkinter openpyxl httpx tenacity pydantic python-dotenv
-pip install tkinterdnd2          # Optional: enables drag-and-drop
+# 3. Install all dependencies from manifest
+pip install -r requirements.txt
+
+# 4. Copy the secrets template and add your API keys
+cp .env.example .env
+# Edit .env with your actual BOT API credentials
+
+# 5. Launch the application
+python main.py
 ```
 
 ### Configuration
 
-> **⚠ IMPORTANT:** You must supply your own `.env` file with valid BOT API credentials. This file is **not included** in the repository for security reasons.
+> **⚠ IMPORTANT:** You must supply your own `.env` file with valid BOT API credentials. This file is **not included** in the repository for security reasons. A `.env.example` template is provided.
 
-Create a `.env` file in the project root:
+Register for API access at [apiportal.bot.or.th](https://apiportal.bot.or.th/), then edit your `.env`:
 
 ```env
 BOT_TOKEN_EXG=your_exchange_rate_api_key_here
 BOT_TOKEN_HOL=your_holiday_api_key_here
 ```
 
-### Running
+### What Happens on First Run
 
-```bash
-python main.py
-```
-
-The application will validate your API tokens on startup. If they are missing, a native error dialog will appear before the GUI loads.
+The application automatically:
+1. Creates `data/`, `data/input/`, and `data/backups/` directories (Git does not track empty folders)
+2. Validates your API tokens — shows a native error popup if missing
+3. Initializes the SQLite cache at `data/cache.db`
 
 ---
 
