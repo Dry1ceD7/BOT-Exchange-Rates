@@ -1,0 +1,540 @@
+#!/usr/bin/env python3
+"""
+gui/app.py
+---------------------------------------------------------------------------
+BOT Exchange Rate Processor (v2.3.1) - Enterprise Edition
+---------------------------------------------------------------------------
+Zero-emoji, typography-driven corporate UI.
+
+Features:
+ - Smart Date Toggle (CTkSwitch, defaults to today)
+ - Universal Drop Zone (tkinterdnd2 with click-browse fallback)
+ - File/Folder routing, batch queue with per-file progress
+ - Dynamic "Show in Folder" button
+ - Revert button — restores corrupted files from automatic backups
+ - Professional centered financial accounting theme
+"""
+
+import os
+import re
+import asyncio
+import threading
+import subprocess
+import platform
+import customtkinter as ctk
+from tkinter import filedialog, messagebox
+from datetime import date, datetime
+from typing import List
+import httpx
+
+from core.api_client import BOTClient, BOTAPIError
+from core.engine import LedgerEngine, FileSizeLimitError, MissingColumnError
+from core.backup_manager import BackupManager, BackupError
+
+ctk.set_appearance_mode("light")
+
+# ── Color Palette ────────────────────────────────────────────────────────
+COLOR_BG_DARK       = "#0B1A33"
+COLOR_HEADER_BG     = "#1A365D"
+COLOR_HEADER_TEXT    = "#FFFFFF"
+COLOR_HEADER_SUB    = "#94A3B8"
+COLOR_CARD_BG       = "#FFFFFF"
+COLOR_CARD_BORDER   = "#E2E8F0"
+COLOR_DIVIDER       = "#E2E8F0"
+COLOR_SECTION_BG    = "#F8FAFC"
+
+COLOR_TEXT_PRIMARY   = "#1E293B"
+COLOR_TEXT_SECONDARY = "#64748B"
+COLOR_TEXT_MUTED     = "#94A3B8"
+
+COLOR_TRUST_BLUE    = "#2563EB"
+COLOR_BLUE_HOVER    = "#1D4ED8"
+COLOR_SUCCESS       = "#16A34A"
+COLOR_SUCCESS_HOVER = "#15803D"
+COLOR_WARNING       = "#D97706"
+COLOR_WARNING_HOVER = "#B45309"
+COLOR_REVERT_BG     = "#C2410C"
+COLOR_REVERT_HOVER  = "#9A3412"
+COLOR_ERROR_TEXT     = "#DC2626"
+COLOR_PROCESS_TEXT   = "#2563EB"
+
+# ── Attempt tkinterdnd2 ──────────────────────────────────────────────────
+HAS_DND = False
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    HAS_DND = True
+except Exception:
+    pass
+
+
+def parse_drop_data(raw: str) -> List[str]:
+    results = []
+    for match in re.finditer(r'\{([^}]+)\}|(\S+)', raw):
+        path = match.group(1) or match.group(2)
+        if path:
+            results.append(path.strip())
+    return results
+
+
+def resolve_xlsx_files(paths: List[str]) -> List[str]:
+    queue = []
+    for p in paths:
+        if os.path.isfile(p):
+            if p.lower().endswith(".xlsx") and not os.path.basename(p).startswith("."):
+                queue.append(p)
+        elif os.path.isdir(p):
+            for fname in sorted(os.listdir(p)):
+                if fname.startswith("."):
+                    continue
+                if fname.lower().endswith(".xlsx"):
+                    queue.append(os.path.join(p, fname))
+    seen = set()
+    unique = []
+    for f in queue:
+        norm = os.path.normpath(f)
+        if norm not in seen:
+            seen.add(norm)
+            unique.append(f)
+    return unique
+
+
+class BOTExrateApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("BOT Exchange Rate Processor  |  V2.3.1")
+        self.geometry("740x780")
+        self.resizable(False, False)
+        self.configure(fg_color=COLOR_BG_DARK)
+
+        self.file_queue: List[str] = []
+        self.last_processed_path: str = None
+        self.backup_mgr = BackupManager()
+
+        # Center window
+        self.update_idletasks()
+        w, h = 740, 780
+        sx = (self.winfo_screenwidth() - w) // 2
+        sy = (self.winfo_screenheight() - h) // 2
+        self.geometry(f"{w}x{h}+{sx}+{sy}")
+
+        # DnD injection
+        self.dnd_enabled = False
+        if HAS_DND:
+            try:
+                TkinterDnD._require(self)
+                self.dnd_enabled = True
+            except Exception:
+                pass
+
+        self._build_header()
+        self._build_card()
+
+    # ================================================================== #
+    #  HEADER
+    # ================================================================== #
+    def _build_header(self):
+        hdr = ctk.CTkFrame(self, fg_color=COLOR_HEADER_BG, corner_radius=0, height=80)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+
+        inner = ctk.CTkFrame(hdr, fg_color="transparent")
+        inner.place(relx=0.5, rely=0.5, anchor="center")
+
+        ctk.CTkLabel(
+            inner, text="Bank of Thailand  —  Ledger Processor",
+            font=ctk.CTkFont(size=22, weight="bold"), text_color=COLOR_HEADER_TEXT
+        ).pack()
+        ctk.CTkLabel(
+            inner, text="Enterprise Accounting Suite  |  V2.3.1",
+            font=ctk.CTkFont(size=11), text_color=COLOR_HEADER_SUB
+        ).pack(pady=(2, 0))
+
+    # ================================================================== #
+    #  CARD
+    # ================================================================== #
+    def _build_card(self):
+        self.card = ctk.CTkFrame(
+            self, fg_color=COLOR_CARD_BG, corner_radius=16,
+            border_width=1, border_color=COLOR_CARD_BORDER
+        )
+        self.card.pack(pady=22, padx=36, fill="both", expand=True)
+
+        # ── 1. DATE SECTION ──────────────────────────────────────────────
+        ctk.CTkLabel(
+            self.card, text="RATE EXTRACTION DATE",
+            font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_TEXT_SECONDARY
+        ).pack(pady=(20, 0))
+
+        # Smart Date Toggle
+        toggle_row = ctk.CTkFrame(self.card, fg_color="transparent")
+        toggle_row.pack(pady=(8, 0))
+
+        self.use_today_var = ctk.StringVar(value="on")
+        self.toggle_today = ctk.CTkSwitch(
+            toggle_row, text="  Use Today's Date",
+            variable=self.use_today_var, onvalue="on", offvalue="off",
+            command=self._on_toggle_changed,
+            font=ctk.CTkFont(size=13, weight="bold"), text_color=COLOR_TEXT_PRIMARY,
+            progress_color=COLOR_SUCCESS, button_color=COLOR_CARD_BG,
+            button_hover_color="#F0FFF4", fg_color="#CBD5E1"
+        )
+        self.toggle_today.pack()
+
+        self.lbl_toggle_hint = ctk.CTkLabel(
+            self.card,
+            text=f"Rates will be extracted up to: {date.today().strftime('%d %b %Y')}",
+            font=ctk.CTkFont(size=11), text_color=COLOR_SUCCESS
+        )
+        self.lbl_toggle_hint.pack(pady=(4, 8))
+
+        # Date dropdowns
+        date_row = ctk.CTkFrame(self.card, fg_color="transparent")
+        date_row.pack()
+        current_year = date.today().year
+        self._combo_widgets = []
+
+        for label_text, width, values, default, attr in [
+            ("Year",  100, [str(y) for y in range(2020, current_year + 1)], "2025", "combo_year"),
+            ("Month",  80, [f"{m:02d}" for m in range(1, 13)],              "01",   "combo_month"),
+            ("Day",    80, [f"{d:02d}" for d in range(1, 32)],              "01",   "combo_day"),
+        ]:
+            grp = ctk.CTkFrame(date_row, fg_color="transparent")
+            grp.pack(side="left", padx=8)
+            ctk.CTkLabel(grp, text=label_text.upper(),
+                         font=ctk.CTkFont(size=10, weight="bold"),
+                         text_color=COLOR_TEXT_SECONDARY).pack()
+            combo = ctk.CTkComboBox(
+                grp, values=values, width=width, height=36,
+                fg_color=COLOR_SECTION_BG, border_color="#CBD5E1",
+                button_color=COLOR_TRUST_BLUE, button_hover_color=COLOR_BLUE_HOVER,
+                dropdown_fg_color=COLOR_CARD_BG, text_color=COLOR_TEXT_PRIMARY,
+                font=ctk.CTkFont(size=13), justify="center"
+            )
+            combo.set(default)
+            combo.pack(pady=(4, 0))
+            setattr(self, attr, combo)
+            self._combo_widgets.append(combo)
+
+        self._lock_date_dropdowns(locked=True)
+
+        # ── Divider ──────────────────────────────────────────────────────
+        ctk.CTkFrame(self.card, fg_color=COLOR_DIVIDER, height=1).pack(fill="x", padx=50, pady=(16, 0))
+
+        # ── 2. DROP ZONE ─────────────────────────────────────────────────
+        ctk.CTkLabel(
+            self.card, text="LEDGER INPUT",
+            font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_TEXT_SECONDARY
+        ).pack(pady=(14, 0))
+
+        self.drop_zone = ctk.CTkFrame(
+            self.card, fg_color=COLOR_SECTION_BG, corner_radius=12,
+            border_width=2, border_color="#CBD5E1", height=80
+        )
+        self.drop_zone.pack(pady=(8, 0), padx=50, fill="x")
+        self.drop_zone.pack_propagate(False)
+
+        dz_inner = ctk.CTkFrame(self.drop_zone, fg_color="transparent")
+        dz_inner.place(relx=0.5, rely=0.5, anchor="center")
+
+        dnd_hint = "Drop .xlsx files or folders here" if self.dnd_enabled else "Click to select files"
+        self.dz_text = ctk.CTkLabel(
+            dz_inner, text=dnd_hint,
+            font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT_SECONDARY
+        )
+        self.dz_text.pack()
+        self.dz_sub = ctk.CTkLabel(dz_inner, text="or click to browse",
+                                    font=ctk.CTkFont(size=11), text_color=COLOR_TEXT_MUTED)
+        self.dz_sub.pack(pady=(2, 0))
+
+        for widget in [self.drop_zone, dz_inner, self.dz_text, self.dz_sub]:
+            widget.bind("<Button-1>", lambda e: self._browse_files())
+
+        if self.dnd_enabled:
+            try:
+                self.drop_zone.drop_target_register(DND_FILES)
+                self.drop_zone.dnd_bind("<<Drop>>", self._on_drop)
+            except Exception:
+                pass
+
+        self.lbl_queue = ctk.CTkLabel(
+            self.card, text="", font=ctk.CTkFont(size=12), text_color=COLOR_TEXT_SECONDARY
+        )
+        self.lbl_queue.pack(pady=(4, 0))
+
+        # ── Divider ──────────────────────────────────────────────────────
+        ctk.CTkFrame(self.card, fg_color=COLOR_DIVIDER, height=1).pack(fill="x", padx=50, pady=(12, 0))
+
+        # ── 3. ACTION BUTTONS ────────────────────────────────────────────
+        btn_row = ctk.CTkFrame(self.card, fg_color="transparent")
+        btn_row.pack(pady=(16, 0))
+
+        self.btn_process = ctk.CTkButton(
+            btn_row, text="Process Batch",
+            height=48, width=240,
+            fg_color=COLOR_TRUST_BLUE, hover_color=COLOR_BLUE_HOVER,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            corner_radius=10, command=self._on_process_click, state="disabled"
+        )
+        self.btn_process.pack(side="left", padx=(0, 12))
+
+        self.btn_revert = ctk.CTkButton(
+            btn_row, text="Revert Previous Edit",
+            height=48, width=200,
+            fg_color=COLOR_REVERT_BG, hover_color=COLOR_REVERT_HOVER,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            corner_radius=10, command=self._on_revert_click
+        )
+        self.btn_revert.pack(side="left")
+
+        # ── 4. STATUS BOX ────────────────────────────────────────────────
+        status_box = ctk.CTkFrame(
+            self.card, fg_color=COLOR_SECTION_BG, corner_radius=10,
+            border_width=1, border_color=COLOR_CARD_BORDER
+        )
+        status_box.pack(pady=(16, 0), padx=50, fill="x", ipady=8)
+
+        self.lbl_status = ctk.CTkLabel(
+            status_box, text="Status:  Ready  —  Backups enabled",
+            font=ctk.CTkFont(size=13), text_color=COLOR_TEXT_SECONDARY
+        )
+        self.lbl_status.pack(pady=(8, 4))
+
+        self.progressbar = ctk.CTkProgressBar(
+            status_box, width=440, height=8,
+            progress_color=COLOR_TRUST_BLUE, corner_radius=4
+        )
+        self.progressbar.pack(pady=(0, 10))
+        self.progressbar.set(0)
+
+        # ── 5. REVEAL BUTTON (hidden by default) ────────────────────────
+        self.btn_reveal = ctk.CTkButton(
+            self.card, text="Show File in Folder",
+            height=40, width=220,
+            fg_color=COLOR_WARNING, hover_color=COLOR_WARNING_HOVER,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            corner_radius=8, command=self._reveal_file
+        )
+
+    # ================================================================== #
+    #  SMART DATE TOGGLE
+    # ================================================================== #
+    def _on_toggle_changed(self):
+        is_today = self.use_today_var.get() == "on"
+        self._lock_date_dropdowns(locked=is_today)
+        if is_today:
+            self.lbl_toggle_hint.configure(
+                text=f"Rates will be extracted up to: {date.today().strftime('%d %b %Y')}",
+                text_color=COLOR_SUCCESS
+            )
+        else:
+            self.lbl_toggle_hint.configure(
+                text="Select a custom historical start date below.",
+                text_color=COLOR_TRUST_BLUE
+            )
+
+    def _lock_date_dropdowns(self, locked: bool):
+        for combo in self._combo_widgets:
+            combo.configure(state="disabled" if locked else "normal")
+
+    def _assemble_start_date(self) -> str:
+        if self.use_today_var.get() == "on":
+            return datetime.today().strftime("%Y-%m-%d")
+        return f"{self.combo_year.get()}-{self.combo_month.get()}-{self.combo_day.get()}"
+
+    # ================================================================== #
+    #  DROP / BROWSE
+    # ================================================================== #
+    def _on_drop(self, event):
+        paths = parse_drop_data(event.data)
+        xlsx_files = resolve_xlsx_files(paths)
+        if xlsx_files:
+            self._set_queue(xlsx_files)
+        else:
+            messagebox.showwarning("No Valid Files",
+                                   "No .xlsx files found in the dropped items.")
+
+    def _browse_files(self):
+        paths = filedialog.askopenfilenames(
+            title="Select Excel Ledgers",
+            filetypes=[("Excel workbooks", "*.xlsx")]
+        )
+        if paths:
+            self._set_queue(list(paths))
+
+    def _set_queue(self, files: List[str]):
+        self.file_queue = files
+        self.last_processed_path = None
+        count = len(files)
+        if count == 1:
+            self.dz_text.configure(text=os.path.basename(files[0]), text_color=COLOR_TRUST_BLUE)
+        else:
+            self.dz_text.configure(text=f"{count} ledgers loaded", text_color=COLOR_TRUST_BLUE)
+        self.dz_sub.configure(text="Click to change selection")
+        self.lbl_queue.configure(
+            text=f"Ready to process {count} ledger{'s' if count != 1 else ''}.",
+            text_color=COLOR_SUCCESS
+        )
+        self.btn_process.configure(state="normal")
+        self.btn_reveal.pack_forget()
+
+    # ================================================================== #
+    #  PROCESSING
+    # ================================================================== #
+    def _on_process_click(self):
+        if not self.file_queue:
+            return
+        self.btn_process.configure(state="disabled")
+        self.btn_revert.configure(state="disabled")
+        self.btn_reveal.pack_forget()
+        total = len(self.file_queue)
+        self.lbl_status.configure(
+            text=f"Connecting to BOT API...  (0 of {total})",
+            text_color=COLOR_PROCESS_TEXT
+        )
+        self.progressbar.configure(mode="determinate")
+        self.progressbar.set(0)
+        start_date_str = self._assemble_start_date()
+        threading.Thread(
+            target=self._batch_thread, args=(start_date_str,), daemon=True
+        ).start()
+
+    def _batch_thread(self, start_date: str):
+        try:
+            asyncio.run(self._run_batch(start_date))
+        except Exception as e:
+            msg = str(e)
+            if "ConnectError" in msg or "TimeoutException" in msg:
+                msg = "Network error — please check your internet connection."
+            self.after(0, self._show_error, msg)
+
+    async def _run_batch(self, start_date: str):
+        async with httpx.AsyncClient() as client:
+            api = BOTClient(client)
+            engine = LedgerEngine(api)
+
+            def progress_cb(idx, total, fname, error):
+                self.after(0, self._update_progress, idx, total, fname, error)
+
+            success, fail, errors = await engine.process_batch(
+                self.file_queue, start_date=start_date, progress_cb=progress_cb
+            )
+            self.after(0, self._show_batch_complete, success, fail, errors)
+
+    def _update_progress(self, idx: int, total: int, fname: str, error):
+        self.progressbar.set(idx / total)
+        if error:
+            self.lbl_status.configure(
+                text=f"Warning:  {idx} of {total}  |  {fname} — skipped",
+                text_color=COLOR_WARNING
+            )
+        else:
+            self.lbl_status.configure(
+                text=f"Processing:  {idx} of {total}  |  {fname}",
+                text_color=COLOR_PROCESS_TEXT
+            )
+
+    def _show_batch_complete(self, success: int, fail: int, errors: List[str]):
+        self.progressbar.set(1)
+        self.btn_process.configure(state="normal")
+        self.btn_revert.configure(state="normal")
+        if fail == 0:
+            self.lbl_status.configure(
+                text=f"Complete:  All {success} ledger{'s' if success != 1 else ''} processed successfully.",
+                text_color=COLOR_SUCCESS
+            )
+        else:
+            self.lbl_status.configure(
+                text=f"Complete:  {success} succeeded, {fail} failed.",
+                text_color=COLOR_WARNING
+            )
+        if self.file_queue:
+            self.last_processed_path = self.file_queue[-1]
+            self.btn_reveal.pack(pady=(12, 14))
+
+    def _show_error(self, msg: str):
+        self.progressbar.set(0)
+        self.lbl_status.configure(text=f"Error:  {msg}", text_color=COLOR_ERROR_TEXT)
+        self.btn_process.configure(state="normal")
+        self.btn_revert.configure(state="normal")
+
+    # ================================================================== #
+    #  REVERT
+    # ================================================================== #
+    def _on_revert_click(self):
+        """Opens a file dialog to select the file to revert, then restores it."""
+        path = filedialog.askopenfilename(
+            title="Select the file to revert",
+            filetypes=[("Excel workbooks", "*.xlsx")]
+        )
+        if not path:
+            return
+
+        self.btn_revert.configure(state="disabled")
+        self.btn_process.configure(state="disabled")
+        self.lbl_status.configure(
+            text=f"Restoring:  {os.path.basename(path)}...",
+            text_color=COLOR_WARNING
+        )
+        self.progressbar.configure(mode="indeterminate")
+        self.progressbar.start()
+
+        threading.Thread(
+            target=self._revert_thread, args=(path,), daemon=True
+        ).start()
+
+    def _revert_thread(self, filepath: str):
+        try:
+            backup_used = self.backup_mgr.restore_latest(filepath)
+            backup_name = os.path.basename(backup_used)
+            self.after(0, self._show_revert_success, filepath, backup_name)
+        except BackupError as e:
+            self.after(0, self._show_revert_error, str(e))
+        except Exception as e:
+            self.after(0, self._show_revert_error, str(e))
+
+    def _show_revert_success(self, filepath: str, backup_name: str):
+        self.progressbar.stop()
+        self.progressbar.configure(mode="determinate")
+        self.progressbar.set(1)
+        self.lbl_status.configure(
+            text=f"Reverted successfully from backup:  {backup_name}",
+            text_color=COLOR_SUCCESS
+        )
+        self.btn_revert.configure(state="normal")
+        self.btn_process.configure(state="normal")
+        self.last_processed_path = filepath
+        self.btn_reveal.pack(pady=(12, 14))
+
+    def _show_revert_error(self, msg: str):
+        self.progressbar.stop()
+        self.progressbar.configure(mode="determinate")
+        self.progressbar.set(0)
+        self.lbl_status.configure(text=f"Error:  {msg}", text_color=COLOR_ERROR_TEXT)
+        self.btn_revert.configure(state="normal")
+        self.btn_process.configure(state="normal")
+
+    # ================================================================== #
+    #  FILE REVEAL
+    # ================================================================== #
+    def _reveal_file(self):
+        fp = self.last_processed_path
+        if not fp or not os.path.exists(fp):
+            return
+        try:
+            system = platform.system()
+            if system == "Darwin":
+                subprocess.Popen(["open", "-R", fp])
+            elif system == "Windows":
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(fp)])
+            else:
+                subprocess.Popen(["xdg-open", os.path.dirname(fp)])
+        except Exception:
+            self.lbl_status.configure(
+                text="Could not open file manager.", text_color=COLOR_WARNING
+            )
+
+
+if __name__ == "__main__":
+    app = BOTExrateApp()
+    app.mainloop()

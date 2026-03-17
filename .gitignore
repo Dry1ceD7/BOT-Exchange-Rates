@@ -1,0 +1,24 @@
+# ---- Secrets ----
+.env
+
+# ---- Runtime Data ----
+data/cache.db
+data/cache.db-wal
+data/cache.db-shm
+data/backups/
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# ---- Build Artifacts ----
+dist/
+build/
+*.spec
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
