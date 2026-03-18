@@ -1,7 +1,7 @@
-# BOT Exchange Rate Processor (v2.3.2) - Agent Memory (L1 Context)
+# BOT Exchange Rate Processor (v2.4.0) - Agent Memory (L1 Context)
 
 ## 🏛️ The Mission
-This project is a V2.3.2 standalone, enterprise-grade Bank of Thailand (BOT) Exchange Rate Processor built for legacy financial accounting systems. It replaces a fragmented 3-script process with a single, mathematically rigorous GUI that supports batch processing, automatic backups, and zero-latency caching.
+This project is a V2.4.0 standalone, enterprise-grade Bank of Thailand (BOT) Exchange Rate Processor built for legacy financial accounting systems. It replaces a fragmented 3-script process with a single, mathematically rigorous GUI that supports batch processing, automatic backups, and zero-latency caching.
 
 ## ⚖️ The "Featherweight" Constraints
 Strict zero-tolerance hardware limits:
@@ -17,7 +17,7 @@ Strict zero-tolerance hardware limits:
 - **Cache**: Built-in `sqlite3` (WAL mode) — `data/cache.db`.
 - **Backup**: `shutil` + `os` — timestamped copies in `data/backups/`.
 
-## 🗂️ Architecture (V2.3.2)
+## 🗂️ Architecture (V2.4.0)
 ```
 main.py              → Token validation → GUI launch
 core/api_client.py   → Async BOT API client (Pydantic schemas)

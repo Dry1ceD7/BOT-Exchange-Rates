@@ -2,7 +2,7 @@
 """
 core/logic.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.3.2) - Featherweight Architecture
+BOT Exchange Rate Processor (v2.4.0) - Featherweight Architecture
 ---------------------------------------------------------------------------
 The "Zero-Guess" decision engine. Handles exact date-matching, weekend,
 and holiday backtracking to ensure absolute financial accuracy. No Excel

@@ -2,7 +2,7 @@
 """
 gui/app.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.3.2) - Enterprise Edition
+BOT Exchange Rate Processor (v2.4.0) - Enterprise Edition
 ---------------------------------------------------------------------------
 Zero-emoji, typography-driven corporate UI.
 
@@ -102,7 +102,7 @@ class BOTExrateApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("BOT Exchange Rate Processor  |  V2.3.2")
+        self.title("BOT Exchange Rate Processor  |  V2.4.0")
         self.geometry("740x780")
         self.resizable(False, True)
         self.configure(fg_color=COLOR_BG_DARK)
@@ -146,7 +146,7 @@ class BOTExrateApp(ctk.CTk):
             font=ctk.CTkFont(size=22, weight="bold"), text_color=COLOR_HEADER_TEXT
         ).pack()
         ctk.CTkLabel(
-            inner, text="Enterprise Accounting Suite  |  V2.3.2",
+            inner, text="Enterprise Accounting Suite  |  V2.4.0",
             font=ctk.CTkFont(size=11), text_color=COLOR_HEADER_SUB
         ).pack(pady=(2, 0))
 
@@ -166,30 +166,56 @@ class BOTExrateApp(ctk.CTk):
             font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_TEXT_SECONDARY
         ).pack(pady=(20, 0))
 
-        # Smart Date Toggle
-        toggle_row = ctk.CTkFrame(self.card, fg_color="transparent")
-        toggle_row.pack(pady=(8, 0))
+        # ── V2.4: Auto-Detect Toggle (primary) ───────────────────────────
+        auto_row = ctk.CTkFrame(self.card, fg_color="transparent")
+        auto_row.pack(pady=(8, 0))
+
+        self.auto_detect_var = ctk.StringVar(value="on")
+        self.toggle_auto = ctk.CTkSwitch(
+            auto_row, text="  Auto-Detect Date Range from Ledger",
+            variable=self.auto_detect_var, onvalue="on", offvalue="off",
+            command=self._on_auto_detect_changed,
+            font=ctk.CTkFont(size=13, weight="bold"), text_color=COLOR_TEXT_PRIMARY,
+            progress_color=COLOR_TRUST_BLUE, button_color=COLOR_CARD_BG,
+            button_hover_color="#E0E7FF", fg_color="#CBD5E1"
+        )
+        self.toggle_auto.pack()
+
+        self.lbl_auto_hint = ctk.CTkLabel(
+            self.card,
+            text="Start date will be read from your Excel files automatically.",
+            font=ctk.CTkFont(size=11), text_color=COLOR_TRUST_BLUE
+        )
+        self.lbl_auto_hint.pack(pady=(4, 4))
+
+        # ── Manual Override Section (hidden when auto-detect is ON) ──────
+        self.manual_date_frame = ctk.CTkFrame(self.card, fg_color="transparent")
+        # (starts hidden — auto-detect is ON by default)
+
+        # "Use Today's Date" sub-toggle (inside manual section)
+        toggle_row = ctk.CTkFrame(self.manual_date_frame, fg_color="transparent")
+        toggle_row.pack(pady=(4, 0))
 
         self.use_today_var = ctk.StringVar(value="on")
         self.toggle_today = ctk.CTkSwitch(
             toggle_row, text="  Use Today's Date",
             variable=self.use_today_var, onvalue="on", offvalue="off",
             command=self._on_toggle_changed,
-            font=ctk.CTkFont(size=13, weight="bold"), text_color=COLOR_TEXT_PRIMARY,
+            font=ctk.CTkFont(size=12), text_color=COLOR_TEXT_SECONDARY,
             progress_color=COLOR_SUCCESS, button_color=COLOR_CARD_BG,
             button_hover_color="#F0FFF4", fg_color="#CBD5E1"
         )
         self.toggle_today.pack()
 
         self.lbl_toggle_hint = ctk.CTkLabel(
-            self.card,
+            self.manual_date_frame,
             text=f"Rates will be extracted up to: {date.today().strftime('%d %b %Y')}",
             font=ctk.CTkFont(size=11), text_color=COLOR_SUCCESS
         )
-        self.lbl_toggle_hint.pack(pady=(4, 8))
+        self.lbl_toggle_hint.pack(pady=(4, 4))
 
         # Date dropdowns
-        date_row = ctk.CTkFrame(self.card, fg_color="transparent")
+        date_row = ctk.CTkFrame(self.manual_date_frame, fg_color="transparent")
         date_row.pack()
         current_year = date.today().year
         self._combo_widgets = []
@@ -317,7 +343,28 @@ class BOTExrateApp(ctk.CTk):
         )
 
     # ================================================================== #
-    #  SMART DATE TOGGLE
+    #  V2.4: AUTO-DETECT TOGGLE
+    # ================================================================== #
+    def _on_auto_detect_changed(self):
+        """Toggle between auto-detect and manual date entry."""
+        is_auto = self.auto_detect_var.get() == "on"
+        if is_auto:
+            self.manual_date_frame.pack_forget()
+            self.lbl_auto_hint.configure(
+                text="Start date will be read from your Excel files automatically.",
+                text_color=COLOR_TRUST_BLUE
+            )
+        else:
+            self.lbl_auto_hint.configure(
+                text="Manual override — select a start date below.",
+                text_color=COLOR_WARNING
+            )
+            # Show the manual section right after the auto-hint label
+            self.manual_date_frame.pack(after=self.lbl_auto_hint, pady=(0, 4))
+            self._on_toggle_changed()  # Sync dropdown state with "Use Today" sub-toggle
+
+    # ================================================================== #
+    #  SMART DATE TOGGLE (manual sub-toggle)
     # ================================================================== #
     def _on_toggle_changed(self):
         is_today = self.use_today_var.get() == "on"
@@ -398,18 +445,53 @@ class BOTExrateApp(ctk.CTk):
         self.btn_revert.configure(state="disabled")
         self.btn_reveal.pack_forget()
         total = len(self.file_queue)
-        self.lbl_status.configure(
-            text=f"Connecting to BOT API...  (0 of {total})",
-            text_color=COLOR_PROCESS_TEXT
-        )
         self.progressbar.configure(mode="determinate")
         self.progressbar.set(0)
-        start_date_str = self._assemble_start_date()
-        if start_date_str is None:
-            # Invalid date was selected — re-enable buttons and halt
-            self.btn_process.configure(state="normal")
-            self.btn_revert.configure(state="normal")
-            return
+
+        is_auto = self.auto_detect_var.get() == "on"
+
+        if is_auto:
+            # ── V2.4: Smart Date Auto-Detection ──────────────────────────
+            self.lbl_status.configure(
+                text=f"Scanning {total} ledger{'s' if total != 1 else ''} for date range...",
+                text_color=COLOR_PROCESS_TEXT
+            )
+            self.update_idletasks()  # Force UI refresh before blocking scan
+
+            from core.engine import LedgerEngine
+            oldest_date, was_detected = LedgerEngine.prescan_oldest_date(self.file_queue)
+            start_date_str = oldest_date.strftime("%Y-%m-%d")
+
+            if was_detected:
+                self.lbl_auto_hint.configure(
+                    text=f"Detected: {oldest_date.strftime('%d %b %Y')} → {date.today().strftime('%d %b %Y')}",
+                    text_color=COLOR_SUCCESS
+                )
+                self.lbl_status.configure(
+                    text=f"Connecting to BOT API...  range: {oldest_date.strftime('%d %b %Y')} → today  (0 of {total})",
+                    text_color=COLOR_PROCESS_TEXT
+                )
+            else:
+                self.lbl_auto_hint.configure(
+                    text=f"No dates found — using fallback: {oldest_date.strftime('%d %b %Y')}",
+                    text_color=COLOR_WARNING
+                )
+                self.lbl_status.configure(
+                    text=f"Connecting to BOT API...  fallback range  (0 of {total})",
+                    text_color=COLOR_WARNING
+                )
+        else:
+            # ── Manual mode ──────────────────────────────────────────────
+            start_date_str = self._assemble_start_date()
+            if start_date_str is None:
+                self.btn_process.configure(state="normal")
+                self.btn_revert.configure(state="normal")
+                return
+            self.lbl_status.configure(
+                text=f"Connecting to BOT API...  (0 of {total})",
+                text_color=COLOR_PROCESS_TEXT
+            )
+
         threading.Thread(
             target=self._batch_thread, args=(start_date_str,), daemon=True
         ).start()

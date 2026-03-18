@@ -2,7 +2,7 @@
 """
 core/database.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.3.2) - Zero-Latency Local Cache
+BOT Exchange Rate Processor (v2.4.0) - Zero-Latency Local Cache
 ---------------------------------------------------------------------------
 Ultra-lightweight SQLite cache using only Python's built-in sqlite3.
 Thread-safe via check_same_thread=False + threading.Lock() on all operations.

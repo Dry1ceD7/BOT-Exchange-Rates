@@ -2,7 +2,7 @@
 """
 core/api_client.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.3.2) - Featherweight Architecture
+BOT Exchange Rate Processor (v2.4.0) - Featherweight Architecture
 ---------------------------------------------------------------------------
 Handles asynchronous communication with the Bank of Thailand (BOT) API.
 Enforces strict JSON schema validation via Pydantic v2.

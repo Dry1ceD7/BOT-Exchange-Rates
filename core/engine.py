@@ -2,9 +2,9 @@
 """
 core/engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.3.2) - Cache-First + Singleton Architecture
+BOT Exchange Rate Processor (v2.4.0) - Cache-First + Singleton Architecture
 ---------------------------------------------------------------------------
-V2.3.2 Fixes:
+V2.4.0 Fixes:
   - BOTRateDetail import moved to top level
   - Cache uses today's rate if already stored (BOT publishes once/day)
   - CacheDB & BackupManager are module-level singletons
@@ -95,18 +95,104 @@ class LedgerEngine:
         return None
 
     # ================================================================== #
-    #  CACHE-FIRST DATA LOADING (v2.3.2 — fixed cache heuristic)
+    #  SMART DATE PRE-SCAN (V2.4 — Auto-Detection)
+    # ================================================================== #
+    @staticmethod
+    def prescan_oldest_date(
+        filepaths: List[str],
+        target_col_name: str = "วันที่ใบขน",
+    ) -> Tuple[date, bool]:
+        """
+        Pre-scans queued .xlsx files in read-only mode to find the absolute
+        oldest date in the source column. This eliminates manual date entry.
+
+        Args:
+            filepaths: List of absolute paths to .xlsx files.
+            target_col_name: The header name of the invoice date column.
+
+        Returns:
+            Tuple of (oldest_date, was_detected).
+            - If dates are found: (oldest_date, True)
+            - Fallback: (today - 30 days, False)
+
+        Memory Guardrail: Workbooks are opened in read_only mode and
+        strictly closed on every code path (including exceptions).
+        """
+        oldest: Optional[date] = None
+        date_formats = ["%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d %b %Y", "%d %B %Y", "%Y%m%d"]
+
+        for fp in filepaths:
+            if not os.path.exists(fp):
+                continue
+            wb = None
+            try:
+                wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
+                for ws in wb.worksheets:
+                    # Locate the header row (scan first 10 rows)
+                    target_col_idx = None
+                    header_row_idx = None
+                    for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True), 1):
+                        row_strs = [str(c).strip() if c is not None else "" for c in row]
+                        if target_col_name in row_strs:
+                            target_col_idx = row_strs.index(target_col_name) + 1
+                            header_row_idx = row_idx
+                            break
+
+                    if target_col_idx is None or header_row_idx is None:
+                        continue
+
+                    # Scan the date column for the oldest value
+                    for row in ws.iter_rows(
+                        min_row=header_row_idx + 1,
+                        min_col=target_col_idx, max_col=target_col_idx,
+                        values_only=True
+                    ):
+                        cell_val = row[0]
+                        parsed = None
+                        if isinstance(cell_val, datetime):
+                            parsed = cell_val.date()
+                        elif isinstance(cell_val, date):
+                            parsed = cell_val
+                        elif isinstance(cell_val, str):
+                            val = cell_val.strip()
+                            if val and val.lower() not in ("nan", "null"):
+                                for fmt in date_formats:
+                                    try:
+                                        parsed = datetime.strptime(val, fmt).date()
+                                        break
+                                    except ValueError:
+                                        continue
+
+                        if parsed is not None:
+                            if oldest is None or parsed < oldest:
+                                oldest = parsed
+            except (ValueError, TypeError, KeyError, openpyxl.utils.exceptions.InvalidFileException):
+                # Corrupted or unreadable file — skip and continue
+                continue
+            finally:
+                if wb is not None:
+                    wb.close()
+
+        if oldest is not None:
+            return oldest, True
+
+        # Fallback: today minus 30 days
+        fallback = date.today() - timedelta(days=30)
+        return fallback, False
+
+    # ================================================================== #
+    #  CACHE-FIRST DATA LOADING (v2.4.0 — fixed cache heuristic)
     # ================================================================== #
     async def _preload_api_data(
         self, dates: Set[date], start_date: str = "2025-01-01"
     ) -> Tuple[BOTLogicEngine, Dict[date, Decimal], Dict[date, Decimal], List, List]:
         """
-        Cache-First Architecture (v2.3.2):
+        Cache-First Architecture (v2.4.0):
         1. Check SQLite for holidays & rates
         2. Only call BOT API for MISSING data
         3. Store API results in SQLite immediately
         
-        v2.3.2 Fix: Today's rate IS cached. BOT publishes once per day,
+        v2.4.0 Fix: Today's rate IS cached. BOT publishes once per day,
         so a cached rate for today is valid until midnight.
         """
         try:
@@ -148,7 +234,7 @@ class LedgerEngine:
 
         logic_engine = BOTLogicEngine(holidays=holidays_list, max_rollback_days=5)
 
-        # ── RATES: Cache-first (v2.3.2 FIX) ─────────────────────────────
+        # ── RATES: Cache-first (v2.4.0 FIX) ─────────────────────────────
         cached_rates = self.cache.get_rates_bulk(min_date, max_date)
 
         usd_rates: Dict[date, Decimal] = {}
@@ -160,7 +246,7 @@ class LedgerEngine:
             if eur is not None:
                 eur_rates[d] = eur
 
-        # v2.3.2 FIX: Determine which dates are actually MISSING from cache.
+        # v2.4.0 FIX: Determine which dates are actually MISSING from cache.
         # BOT publishes rates once per day — cached today's rate is valid.
         # Only fetch from API if there are gaps in the date range.
         all_needed_dates = set()
