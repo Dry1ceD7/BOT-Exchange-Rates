@@ -82,108 +82,150 @@ It replaces a fragmented, error-prone 3-script workflow with a single, mathemati
 
 ### Prerequisites
 
-- **Python 3.10+** — [Download](https://www.python.org/downloads/) · macOS: `brew install python` · Windows: check **"Add Python to PATH"** during install
-- **Git** — [Download](https://git-scm.com/downloads) · macOS: `brew install git`
-- **BOT API Keys** — [Register here](https://apiportal.bot.or.th/) for Exchange Rate + Holiday keys
+Before you begin, make sure these two programs are installed on your computer:
+
+| # | Software | Download | What is it? |
+|:-:|----------|----------|-------------|
+| 1 | ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white) | [⬇ Download Python](https://www.python.org/downloads/) | The programming language this app runs on. **Windows users:** during installation, make sure to check the box that says ✅ **"Add Python to PATH"** — this is required. |
+| 2 | ![Git](https://img.shields.io/badge/Git-Latest-F05032?logo=git&logoColor=white) | [⬇ Download Git](https://git-scm.com/downloads) | A tool used to download this project from GitHub. Just install with the default options. |
+
+> **💡 How do I know if I already have them?**
+> Open **Terminal** (macOS) or **Command Prompt** (Windows) and type:
+> ```
+> python3 --version
+> git --version
+> ```
+> If you see version numbers (e.g., `Python 3.14.3`), you're good. If you see an error, install them using the links above.
 
 ---
 
-### macOS / Linux — Single-Command Setup
+### Step 1 — Download This Project
 
-Copy and paste this entire block into your terminal:
+Open **Terminal** (macOS) or **Command Prompt** (Windows) and run:
 
 ```bash
-# ── Clone & Enter ─────────────────────────────────────────────────────
 git clone https://github.com/Dry1ceD7/BOT-Exchange-Rates.git
 cd BOT-Exchange-Rates
-
-# ── Dependency Check ──────────────────────────────────────────────────
-python3 --version || { echo "❌ Python 3 is NOT installed. Download: https://www.python.org/downloads/"; exit 1; }
-git --version     || { echo "❌ Git is NOT installed. Download: https://git-scm.com/downloads"; exit 1; }
-
-# ── Virtual Environment & Dependencies ────────────────────────────────
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip -q
-pip install -r requirements.txt -q
-
-# ── API Credential Setup ─────────────────────────────────────────────
-cp .env.example .env
-echo ""
-echo "🔑 Enter your Bank of Thailand API keys:"
-read -rp "   Exchange Rate API key (BOT_TOKEN_EXG): " EXG_KEY
-read -rp "   Holiday API key      (BOT_TOKEN_HOL): " HOL_KEY
-sed -i '' "s/your_exchange_rate_api_key_here/$EXG_KEY/" .env
-sed -i '' "s/your_holiday_api_key_here/$HOL_KEY/" .env
-echo "✅ .env file configured."
-
-# ── Launch ────────────────────────────────────────────────────────────
-echo ""
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║  ✅ Setup Complete! Launching application...            ║"
-echo "╚══════════════════════════════════════════════════════════╝"
-open .
-python3 main.py
 ```
+
+This creates a folder called `BOT-Exchange-Rates` on your computer and enters it.
 
 ---
 
-### Windows — Single-Command Setup
+### Step 2 — Get Your BOT API Keys
 
-Copy and paste this entire block into **Command Prompt**:
+You need **two free API keys** from the Bank of Thailand. Here's how:
 
-```bat
-REM ── Clone & Enter ───────────────────────────────────────────────────
-git clone https://github.com/Dry1ceD7/BOT-Exchange-Rates.git
-cd BOT-Exchange-Rates
+1. Go to the BOT API Portal: **https://apiportal.bot.or.th/**
+2. Click **"Sign Up"** or **"Register"** to create a free account
+3. Verify your email address and log in
+4. Once logged in, go to **"My Subscriptions"** or **"API Products"**
+5. Subscribe to these two APIs:
 
-REM ── Dependency Check ────────────────────────────────────────────────
-python --version || (echo ❌ Python 3 is NOT installed. Download: https://www.python.org/downloads/ & exit /b 1)
-git --version    || (echo ❌ Git is NOT installed. Download: https://git-scm.com/downloads & exit /b 1)
+| API Name | What it does |
+|----------|-------------|
+| ![API](https://img.shields.io/badge/Exchange_Rate-API-2EA44F?logo=bank&logoColor=white) **Daily Weighted-average Exchange Rate** | Provides official USD and EUR exchange rates |
+| ![API](https://img.shields.io/badge/Holiday-API-E4405F?logo=calendar&logoColor=white) **Financial Institution Holidays** | Tells the app which days the market is closed |
 
-REM ── Virtual Environment & Dependencies ──────────────────────────────
-python -m venv venv
-venv\Scripts\activate
-pip install --upgrade pip -q
-pip install -r requirements.txt -q
+6. After subscribing, find your **API Keys** on the portal (usually under "My Subscriptions" → "Show Key")
+7. Copy each key — you'll need them in the next step
 
-REM ── API Credential Setup ────────────────────────────────────────────
-copy .env.example .env
-echo.
-echo 🔑 Enter your Bank of Thailand API keys:
-set /p EXG_KEY="   Exchange Rate API key (BOT_TOKEN_EXG): "
-set /p HOL_KEY="   Holiday API key      (BOT_TOKEN_HOL): "
-powershell -Command "(Get-Content .env) -replace 'your_exchange_rate_api_key_here','%EXG_KEY%' | Set-Content .env"
-powershell -Command "(Get-Content .env) -replace 'your_holiday_api_key_here','%HOL_KEY%' | Set-Content .env"
-echo ✅ .env file configured.
-
-REM ── Launch ──────────────────────────────────────────────────────────
-echo.
-echo ╔══════════════════════════════════════════════════════════╗
-echo ║  ✅ Setup Complete! Launching application...            ║
-echo ╚══════════════════════════════════════════════════════════╝
-explorer .
-python main.py
-```
+> **⚠️ Keep your API keys private.** They are like passwords. Never share them or post them online.
 
 ---
 
-### Configuration
+### Step 3 — Set Up Your API Keys
 
-> **⚠ IMPORTANT:** The `.env` file contains your API secrets and is **never pushed to GitHub**. If you need to reconfigure, edit `.env` directly or delete it and re-run the setup commands above.
+This app reads your API keys from a small text file called `.env`. Here's how to set it up:
+
+#### 3a. Rename the template file
+
+In the `BOT-Exchange-Rates` folder, you'll find a file called:
+
+```
+.env.example
+```
+
+**Rename it** to just:
+
+```
+.env
+```
+
+> **💡 macOS tip:** Files starting with a dot (`.`) are hidden by default. Press `Cmd + Shift + .` in Finder to show hidden files.
+>
+> **💡 Windows tip:** In File Explorer, click **View** → check **"Hidden items"** to see the file.
+
+#### 3b. Open the `.env` file and paste your keys
+
+Open the `.env` file with any text editor (Notepad, TextEdit, etc.). You'll see:
 
 ```env
 BOT_TOKEN_EXG=your_exchange_rate_api_key_here
 BOT_TOKEN_HOL=your_holiday_api_key_here
 ```
 
+Replace the placeholder text with your **actual API keys** from Step 2. For example:
+
+```env
+BOT_TOKEN_EXG=a1B2c3D4e5F6g7H8i9J0kLmNoPqRsTuV
+BOT_TOKEN_HOL=xY9z8W7v6U5t4S3r2Q1pOnMlKjIhGfEd
+```
+
+**Save and close the file.** That's it — your credentials are configured!
+
+---
+
+### Step 4 — Install & Run
+
+Go back to your **Terminal** / **Command Prompt** (make sure you're still inside the `BOT-Exchange-Rates` folder) and run these commands one by one:
+
+**macOS / Linux:**
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python3 main.py
+```
+
+**Windows:**
+
+```bat
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+python main.py
+```
+
+> **💡 What do these commands do?**
+> - `python3 -m venv venv` — Creates a private workspace so the app's libraries don't interfere with your computer
+> - `source venv/bin/activate` — Enters that workspace
+> - `pip install -r requirements.txt` — Downloads all the libraries the app needs (one-time only)
+> - `python3 main.py` — Starts the application!
+
+---
+
+### Step 5 — Open Your Project Folder
+
+To quickly find your project folder in your file manager:
+
+- **macOS:** `open .`  (type this in Terminal)
+- **Windows:** `explorer .`  (type this in Command Prompt)
+
+This pops open the folder so you can easily drag-and-drop your `.xlsx` ledger files into the app later.
+
+---
+
 ### What Happens on First Run
 
-The application automatically:
+When the app starts for the first time, it automatically:
 
-1. Creates `data/`, `data/input/`, and `data/backups/` directories
-2. Validates your API tokens — shows a native error popup if missing
-3. Initializes the SQLite cache at `data/cache.db`
+1. ✅ Creates the `data/`, `data/input/`, and `data/backups/` folders
+2. ✅ Checks your API keys — if they're missing or invalid, a popup will tell you exactly what's wrong
+3. ✅ Sets up the local database at `data/cache.db` (this stores exchange rates so repeated runs are instant)
+
+> **🎉 You're all set!** Drop your `.xlsx` ledger files into the app and click **"Process Batch"**.
 
 ---
 
