@@ -2,17 +2,22 @@
 """
 core/engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.4.0) - Cache-First + Singleton Architecture
+BOT Exchange Rate Processor (v2.5.0) - Cache-First + Singleton Architecture
 ---------------------------------------------------------------------------
-V2.4.0 Fixes:
-  - BOTRateDetail import moved to top level
-  - Cache uses today's rate if already stored (BOT publishes once/day)
-  - CacheDB & BackupManager are module-level singletons
+V2.5.0 Changes:
+  - T-1 retraction via resolve_rate_for_currency()
+  - Source column changed to "วันที่ดึง Exchange rate date"
+  - THB rows → write 1 (no API lookup)
+  - Unified "ExRate" master tab with "Merge, Don't Purge" resilience
+  - Legacy "Exrate USD" / "Exrate EUR" tabs no longer updated
+  - Smart year-end start date extraction (Dec 30 rollback)
 """
 
 import os
 import gc
+import logging
 import openpyxl
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from datetime import date, datetime, timedelta
 from typing import Dict, Tuple, Set, List, Callable, Optional
 from decimal import Decimal
@@ -21,6 +26,8 @@ from core.api_client import BOTClient, BOTRateDetail
 from core.logic import BOTLogicEngine, RateNotFoundError, safe_to_decimal
 from core.backup_manager import BackupManager, BackupError
 from core.database import CacheDB
+
+logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------------
 # EXCEPTIONS
@@ -56,6 +63,13 @@ def _get_cache() -> CacheDB:
 
 
 # -------------------------------------------------------------------------
+# CONSTANTS
+# -------------------------------------------------------------------------
+# Sheets that are reference/master and should NOT be processed as ledgers
+SKIP_SHEET_NAMES = {"ExRate", "Exrate USD", "Exrate EUR"}
+
+
+# -------------------------------------------------------------------------
 # ENGINE
 # -------------------------------------------------------------------------
 
@@ -68,7 +82,7 @@ class LedgerEngine:
         self.backup = _get_backup()
         self.cache = _get_cache()
         self.target_cols = {
-            "source_date": "วันที่ใบขน",
+            "source_date": "วันที่ดึง Exchange rate date",
             "out_date": "วันที่ดึง Exchange rate date",
             "currency": "Cur",
             "out_rate": "EX Rate"
@@ -95,28 +109,21 @@ class LedgerEngine:
         return None
 
     # ================================================================== #
-    #  SMART DATE PRE-SCAN (V2.4 — Auto-Detection)
+    #  SMART DATE PRE-SCAN (V2.5 — reads from new column)
     # ================================================================== #
     @staticmethod
     def prescan_oldest_date(
         filepaths: List[str],
-        target_col_name: str = "วันที่ใบขน",
+        target_col_name: str = "วันที่ดึง Exchange rate date",
     ) -> Tuple[date, bool]:
         """
         Pre-scans queued .xlsx files in read-only mode to find the absolute
         oldest date in the source column. This eliminates manual date entry.
 
-        Args:
-            filepaths: List of absolute paths to .xlsx files.
-            target_col_name: The header name of the invoice date column.
+        V2.5: Now reads from "วันที่ดึง Exchange rate date" column.
 
         Returns:
             Tuple of (oldest_date, was_detected).
-            - If dates are found: (oldest_date, True)
-            - Fallback: (today - 30 days, False)
-
-        Memory Guardrail: Workbooks are opened in read_only mode and
-        strictly closed on every code path (including exceptions).
         """
         oldest: Optional[date] = None
         date_formats = ["%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d %b %Y", "%d %B %Y", "%Y%m%d"]
@@ -128,7 +135,6 @@ class LedgerEngine:
             try:
                 wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
                 for ws in wb.worksheets:
-                    # Locate the header row (scan first 10 rows)
                     target_col_idx = None
                     header_row_idx = None
                     for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True), 1):
@@ -141,7 +147,6 @@ class LedgerEngine:
                     if target_col_idx is None or header_row_idx is None:
                         continue
 
-                    # Scan the date column for the oldest value
                     for row in ws.iter_rows(
                         min_row=header_row_idx + 1,
                         min_col=target_col_idx, max_col=target_col_idx,
@@ -167,7 +172,6 @@ class LedgerEngine:
                             if oldest is None or parsed < oldest:
                                 oldest = parsed
             except (ValueError, TypeError, KeyError, openpyxl.utils.exceptions.InvalidFileException):
-                # Corrupted or unreadable file — skip and continue
                 continue
             finally:
                 if wb is not None:
@@ -176,24 +180,56 @@ class LedgerEngine:
         if oldest is not None:
             return oldest, True
 
-        # Fallback: today minus 30 days
         fallback = date.today() - timedelta(days=30)
         return fallback, False
 
     # ================================================================== #
-    #  CACHE-FIRST DATA LOADING (v2.4.0 — fixed cache heuristic)
+    #  SMART YEAR-END START DATE (V2.5)
+    # ================================================================== #
+    @staticmethod
+    def compute_year_start_date(
+        target_year: int,
+        holidays: List[date],
+    ) -> date:
+        """
+        Computes the last valid trading day of the PREVIOUS calendar year.
+        
+        Rules:
+          - Dec 31 is always an office day-off (company policy), skip it.
+          - Start from Dec 30 of (target_year - 1).
+          - Roll back if Dec 30 is a weekend or a BOT/company holiday.
+          - Returns the first valid weekday non-holiday date found.
+        
+        Example for target_year=2026:
+          - Start check from 2025-12-30
+          - If Dec 30 is a holiday/weekend, check Dec 29, Dec 28, etc.
+        """
+        holidays_set = set(holidays)
+        prev_year = target_year - 1
+        
+        # Dec 31 is always office day-off — start from Dec 30
+        check_date = date(prev_year, 12, 30)
+        
+        # Roll back up to 10 days to handle edge cases
+        for _ in range(10):
+            if check_date.weekday() < 5 and check_date not in holidays_set:
+                return check_date
+            check_date -= timedelta(days=1)
+        
+        # Absolute fallback: Dec 20 of previous year
+        return date(prev_year, 12, 20)
+
+    # ================================================================== #
+    #  CACHE-FIRST DATA LOADING (v2.5.0)
     # ================================================================== #
     async def _preload_api_data(
         self, dates: Set[date], start_date: str = "2025-01-01"
     ) -> Tuple[BOTLogicEngine, Dict[date, Decimal], Dict[date, Decimal], List, List]:
         """
-        Cache-First Architecture (v2.4.0):
+        Cache-First Architecture (v2.5.0):
         1. Check SQLite for holidays & rates
         2. Only call BOT API for MISSING data
         3. Store API results in SQLite immediately
-        
-        v2.4.0 Fix: Today's rate IS cached. BOT publishes once per day,
-        so a cached rate for today is valid until midnight.
         """
         try:
             force_start = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -234,7 +270,7 @@ class LedgerEngine:
 
         logic_engine = BOTLogicEngine(holidays=holidays_list, max_rollback_days=5)
 
-        # ── RATES: Cache-first (v2.4.0 FIX) ─────────────────────────────
+        # ── RATES: Cache-first ───────────────────────────────────────────
         cached_rates = self.cache.get_rates_bulk(min_date, max_date)
 
         usd_rates: Dict[date, Decimal] = {}
@@ -246,13 +282,9 @@ class LedgerEngine:
             if eur is not None:
                 eur_rates[d] = eur
 
-        # v2.4.0 FIX: Determine which dates are actually MISSING from cache.
-        # BOT publishes rates once per day — cached today's rate is valid.
-        # Only fetch from API if there are gaps in the date range.
         all_needed_dates = set()
         check_date = min_date
         while check_date <= max_date:
-            # Only consider weekdays (Mon-Fri) — weekends never have rates
             if check_date.weekday() < 5:
                 all_needed_dates.add(check_date)
             check_date += timedelta(days=1)
@@ -264,8 +296,6 @@ class LedgerEngine:
         eur_data = []
 
         if missing_dates:
-            # Fetch the FULL range from API (BOT API doesn't support
-            # individual date queries efficiently)
             usd_data = await self.api.get_exchange_rates(min_date, max_date, "USD")
             eur_data = await self.api.get_exchange_rates(min_date, max_date, "EUR")
 
@@ -288,7 +318,6 @@ class LedgerEngine:
             bulk = [(d_str, vals[0], vals[1]) for d_str, vals in rate_cache_entries.items()]
             self.cache.insert_rates_bulk(bulk)
         else:
-            # FULL CACHE HIT — build BOTRateDetail objects for reference sheets
             for d, (usd, eur) in cached_rates.items():
                 d_str = d.strftime("%Y-%m-%d")
                 if usd is not None:
@@ -304,51 +333,183 @@ class LedgerEngine:
 
         return logic_engine, usd_rates, eur_rates, usd_data, eur_data
 
-    async def _update_reference_sheets(
-        self, wb: openpyxl.Workbook, usd_data: List, eur_data: List,
-        start_date: str = "2025-01-01"
+    # ================================================================== #
+    #  UNIFIED "ExRate" MASTER SHEET — Merge, Don't Purge (V2.5)
+    # ================================================================== #
+    def _update_master_exrate_sheet(
+        self, wb: openpyxl.Workbook,
+        usd_rates: Dict[date, Decimal],
+        eur_rates: Dict[date, Decimal],
+        holidays_list: List[date],
+        holidays_names: Dict[date, str],
+        start_date: date,
     ):
-        try:
-            min_cutoff = datetime.strptime(start_date, "%Y-%m-%d").date()
-        except (ValueError, TypeError):
-            min_cutoff = date(2025, 1, 1)
-
-        for sheet_name in wb.sheetnames:
-            if not sheet_name.startswith("Exrate "): continue
-            ws = wb[sheet_name]
-            currency = "USD" if "USD" in sheet_name else "EUR"
-            raw_data = usd_data if currency == "USD" else eur_data
-
-            date_col_idx = None
-            start_row = 1
-            for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True), 1):
-                row_strs = [str(c).strip() if c is not None else "" for c in row]
-                if "Date" in row_strs or "Date " in row_strs:
-                    date_col_idx = row_strs.index("Date") + 1 if "Date" in row_strs else row_strs.index("Date ") + 1
-                    start_row = row_idx + 2
-                    break
-
-            if not date_col_idx: continue
-            if ws.max_row >= start_row:
-                ws.delete_rows(start_row, ws.max_row - start_row + 1)
-
-            sorted_data = sorted(raw_data, key=lambda x: x.period)
-            current_row = start_row
-            for item in sorted_data:
-                d_obj = datetime.strptime(item.period, "%Y-%m-%d").date()
-                if d_obj >= min_cutoff:
-                    ws.cell(row=current_row, column=date_col_idx).value = d_obj.strftime("%d %b %Y")
-                    if item.buying_transfer is not None:
-                        ws.cell(row=current_row, column=date_col_idx + 2).value = float(item.buying_transfer)
-                    if item.selling is not None:
-                        ws.cell(row=current_row, column=date_col_idx + 3).value = float(item.selling)
-                    current_row += 1
-
-    async def process_ledger(self, filepath: str, start_date: str = "2025-01-01") -> str:
         """
-        Process a single ledger with:
+        Creates or updates a unified "ExRate" master tab.
+        
+        Merge, Don't Purge Rules:
+          - Read existing data from the sheet first.
+          - If existing data is incorrect vs API, overwrite to correct it.
+          - If data is missing locally, backfill from API.
+          - If API returned no data for a date, PRESERVE existing local data.
+        
+        Columns: Date | USD Rate | EUR Rate | Holiday | Holiday Name
+        """
+        SHEET_NAME = "ExRate"
+        HEADER_ROW = 1
+        DATA_START_ROW = 2
+        HEADERS = ["Date", "USD Rate", "EUR Rate", "Holiday", "Holiday Name"]
+        
+        # ── Get or create the sheet ──────────────────────────────────────
+        if SHEET_NAME in wb.sheetnames:
+            ws = wb[SHEET_NAME]
+        else:
+            ws = wb.create_sheet(SHEET_NAME)
+            # Write headers with enterprise styling
+            header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+            header_fill = PatternFill(start_color="1A365D", end_color="1A365D", fill_type="solid")
+            header_align = Alignment(horizontal="center", vertical="center")
+            thin_border = Border(
+                left=Side(style="thin"), right=Side(style="thin"),
+                top=Side(style="thin"), bottom=Side(style="thin")
+            )
+            for col_idx, header in enumerate(HEADERS, 1):
+                cell = ws.cell(row=HEADER_ROW, column=col_idx, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_align
+                cell.border = thin_border
+            
+            # Set column widths
+            ws.column_dimensions["A"].width = 14
+            ws.column_dimensions["B"].width = 12
+            ws.column_dimensions["C"].width = 12
+            ws.column_dimensions["D"].width = 10
+            ws.column_dimensions["E"].width = 40
+        
+        # ── Read existing data from the sheet (Merge, Don't Purge) ──────
+        existing_data: Dict[date, dict] = {}
+        if ws.max_row and ws.max_row >= DATA_START_ROW:
+            for row_idx in range(DATA_START_ROW, ws.max_row + 1):
+                cell_val = ws.cell(row=row_idx, column=1).value
+                row_date = None
+                if isinstance(cell_val, datetime):
+                    row_date = cell_val.date()
+                elif isinstance(cell_val, date):
+                    row_date = cell_val
+                elif isinstance(cell_val, str):
+                    try:
+                        row_date = datetime.strptime(cell_val.strip(), "%Y-%m-%d").date()
+                    except ValueError:
+                        try:
+                            row_date = datetime.strptime(cell_val.strip(), "%d %b %Y").date()
+                        except ValueError:
+                            continue
+                
+                if row_date:
+                    existing_data[row_date] = {
+                        "usd": ws.cell(row=row_idx, column=2).value,
+                        "eur": ws.cell(row=row_idx, column=3).value,
+                        "is_holiday": ws.cell(row=row_idx, column=4).value,
+                        "holiday_name": ws.cell(row=row_idx, column=5).value,
+                    }
+        
+        # ── Build the merged dataset ────────────────────────────────────
+        holidays_set = set(holidays_list)
+        all_dates = set(usd_rates.keys()) | set(eur_rates.keys()) | set(existing_data.keys())
+        all_dates = {d for d in all_dates if d >= start_date}
+
+        merged: Dict[date, dict] = {}
+        for d in sorted(all_dates):
+            existing = existing_data.get(d, {})
+            
+            # API data takes priority for corrections, 
+            # but MISSING API data preserves existing local data
+            usd_api = float(usd_rates[d]) if d in usd_rates and usd_rates[d] is not None else None
+            eur_api = float(eur_rates[d]) if d in eur_rates and eur_rates[d] is not None else None
+            
+            merged_usd = usd_api if usd_api is not None else existing.get("usd")
+            merged_eur = eur_api if eur_api is not None else existing.get("eur")
+            
+            is_holiday = "Yes" if d in holidays_set else ""
+            holiday_name = holidays_names.get(d, existing.get("holiday_name", ""))
+            
+            merged[d] = {
+                "usd": merged_usd,
+                "eur": merged_eur,
+                "is_holiday": is_holiday,
+                "holiday_name": holiday_name if is_holiday else "",
+            }
+        
+        # ── Write the merged data ───────────────────────────────────────
+        # Clear existing data rows
+        if ws.max_row and ws.max_row >= DATA_START_ROW:
+            ws.delete_rows(DATA_START_ROW, ws.max_row - DATA_START_ROW + 1)
+        
+        data_font = Font(name="Calibri", size=10)
+        date_align = Alignment(horizontal="center")
+        num_align = Alignment(horizontal="right")
+        thin_border = Border(
+            left=Side(style="thin"), right=Side(style="thin"),
+            top=Side(style="thin"), bottom=Side(style="thin")
+        )
+        holiday_fill = PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid")
+        
+        current_row = DATA_START_ROW
+        for d in sorted(merged.keys()):
+            entry = merged[d]
+            is_hol = entry["is_holiday"] == "Yes"
+            
+            # Date
+            cell_date = ws.cell(row=current_row, column=1, value=d)
+            cell_date.number_format = "DD MMM YYYY"
+            cell_date.font = data_font
+            cell_date.alignment = date_align
+            cell_date.border = thin_border
+            
+            # USD Rate
+            cell_usd = ws.cell(row=current_row, column=2, value=entry["usd"])
+            if entry["usd"] is not None:
+                cell_usd.number_format = "0.0000"
+            cell_usd.font = data_font
+            cell_usd.alignment = num_align
+            cell_usd.border = thin_border
+            
+            # EUR Rate
+            cell_eur = ws.cell(row=current_row, column=3, value=entry["eur"])
+            if entry["eur"] is not None:
+                cell_eur.number_format = "0.0000"
+            cell_eur.font = data_font
+            cell_eur.alignment = num_align
+            cell_eur.border = thin_border
+            
+            # Holiday flag
+            cell_hol = ws.cell(row=current_row, column=4, value=entry["is_holiday"])
+            cell_hol.font = data_font
+            cell_hol.alignment = date_align
+            cell_hol.border = thin_border
+            
+            # Holiday name
+            cell_name = ws.cell(row=current_row, column=5, value=entry["holiday_name"])
+            cell_name.font = data_font
+            cell_name.border = thin_border
+            
+            # Highlight holiday rows
+            if is_hol:
+                for col in range(1, 6):
+                    ws.cell(row=current_row, column=col).fill = holiday_fill
+            
+            current_row += 1
+
+    # ================================================================== #
+    #  PROCESS SINGLE LEDGER (V2.5)
+    # ================================================================== #
+    async def process_ledger(self, filepath: str, start_date: str = None) -> str:
+        """
+        Process a single ledger with V2.5 T-1 logic:
         1. Memory guardrail → 2. Backup → 3. Load → 4. Cache-first API
-        5. Write → 6. Save in-place → 7. Close + gc.collect()
+        5. T-1 resolve per row, currency-aware → 6. Update ExRate master
+        7. Save in-place → 8. Close + gc.collect()
         """
         self._check_memory_guardrail(filepath)
         self.backup.create_backup(filepath)
@@ -358,6 +519,10 @@ class LedgerEngine:
         sheet_maps = {}
 
         for sheet_name in wb.sheetnames:
+            # Skip reference/master sheets
+            if sheet_name in SKIP_SHEET_NAMES:
+                continue
+
             ws = wb[sheet_name]
             header_row_idx = None
             col_indices = {}
@@ -367,59 +532,97 @@ class LedgerEngine:
                     header_row_idx = row_idx
                     for col_idx, val in enumerate(row_strs):
                         if val == self.target_cols["source_date"]: col_indices["source"] = col_idx
-                        elif val == self.target_cols["out_date"]: col_indices["out_date"] = col_idx
                         elif val == self.target_cols["currency"]: col_indices["currency"] = col_idx
                         elif val == self.target_cols["out_rate"]: col_indices["out_rate"] = col_idx
                     break
 
-            if header_row_idx and "source" in col_indices:
-                sheet_maps[sheet_name] = {"header_row": header_row_idx, "columns": col_indices}
-                src_idx = col_indices["source"] + 1
-                for row_idx in range(header_row_idx + 1, ws.max_row + 1):
-                    parsed_date = self._parse_date(ws.cell(row=row_idx, column=src_idx).value)
-                    if parsed_date: all_target_dates.add(parsed_date)
+            # MISSING COLUMN FAILSAFE: If the new date column is missing,
+            # silently skip this sheet (do not crash, do not overwrite).
+            if header_row_idx is None or "source" not in col_indices:
+                logger.info(f"Sheet '{sheet_name}' missing source date column — skipped.")
+                continue
 
-        if not sheet_maps:
-            wb.close()
-            gc.collect()
-            raise MissingColumnError(f"Headers not found in: {os.path.basename(filepath)}")
-        if not all_target_dates:
-            wb.close()
-            gc.collect()
-            return filepath
+            sheet_maps[sheet_name] = {"header_row": header_row_idx, "columns": col_indices}
+            src_idx = col_indices["source"] + 1
+            for row_idx in range(header_row_idx + 1, ws.max_row + 1):
+                parsed_date = self._parse_date(ws.cell(row=row_idx, column=src_idx).value)
+                if parsed_date: all_target_dates.add(parsed_date)
 
+        # Even if no monthly sheets matched, we still fetch API data
+        # for the master ExRate sheet update.
+        
+        # ── Compute dynamic start date (V2.5 year-end logic) ────────────
+        if start_date is None:
+            if all_target_dates:
+                target_year = min(all_target_dates).year
+            else:
+                target_year = date.today().year
+            # We need holidays to compute year start, but we don't have them yet.
+            # Use a preliminary start date; the _preload will extend as needed.
+            start_date = f"{target_year - 1}-12-20"
+        
         logic_engine, usd_rates, eur_rates, usd_data, eur_data = await self._preload_api_data(
             all_target_dates, start_date=start_date
         )
+        
+        # ── Recompute start date with actual holiday data ────────────────
+        if all_target_dates:
+            target_year = min(all_target_dates).year
+        else:
+            target_year = date.today().year
+        
+        computed_start = self.compute_year_start_date(
+            target_year, logic_engine.holidays
+        )
 
+        # ── Process monthly tabs with T-1 + currency routing ────────────
         for sheet_name, mapping in sheet_maps.items():
             ws = wb[sheet_name]
             cols = mapping["columns"]
             src_idx = cols["source"] + 1
-            out_date_idx = cols.get("out_date")
             cur_idx = cols.get("currency")
             out_rate_idx = cols.get("out_rate")
 
             for row_idx in range(mapping["header_row"] + 1, ws.max_row + 1):
                 inv_date = self._parse_date(ws.cell(row=row_idx, column=src_idx).value)
                 if inv_date:
-                    try:
-                        trade_date, usd_rt, eur_rt = logic_engine.resolve_rate(inv_date, usd_rates, eur_rates)
-                        if out_date_idx is not None:
-                            ws.cell(row=row_idx, column=out_date_idx + 1).value = trade_date.strftime("%d %b %Y")
-                        if cur_idx is not None and out_rate_idx is not None:
-                            ccy = str(ws.cell(row=row_idx, column=cur_idx + 1).value).strip().upper()
-                            if ccy == "USD" and usd_rt:
-                                ws.cell(row=row_idx, column=out_rate_idx + 1).value = float(usd_rt)
-                            elif ccy == "EUR" and eur_rt:
-                                ws.cell(row=row_idx, column=out_rate_idx + 1).value = float(eur_rt)
-                    except RateNotFoundError:
-                        if out_date_idx is not None:
-                            ws.cell(row=row_idx, column=out_date_idx + 1).value = "<ERROR: No Rate>"
-                        if out_rate_idx is not None:
-                            ws.cell(row=row_idx, column=out_rate_idx + 1).value = "<ERROR>"
+                    # Read currency from the "Cur" column
+                    ccy = ""
+                    if cur_idx is not None:
+                        raw_ccy = ws.cell(row=row_idx, column=cur_idx + 1).value
+                        ccy = str(raw_ccy).strip().upper() if raw_ccy else ""
 
-        await self._update_reference_sheets(wb, usd_data, eur_data, start_date=start_date)
+                    try:
+                        trade_date, rate = logic_engine.resolve_rate_for_currency(
+                            inv_date, ccy, usd_rates, eur_rates
+                        )
+
+                        # Write rate to the output column
+                        if out_rate_idx is not None and rate is not None:
+                            ws.cell(row=row_idx, column=out_rate_idx + 1).value = float(rate)
+
+                    except RateNotFoundError:
+                        if out_rate_idx is not None:
+                            ws.cell(row=row_idx, column=out_rate_idx + 1).value = "<ERROR: No Rate>"
+
+        # ── Update unified ExRate master sheet ───────────────────────────
+        # Build holiday names dict for the master sheet
+        holidays_names: Dict[date, str] = {}
+        for year in set(d.year for d in (all_target_dates | {computed_start, date.today()})):
+            cached_hols = self.cache.get_holidays(year)
+            for h_date_str, h_name in cached_hols:
+                try:
+                    h_date_obj = datetime.strptime(h_date_str, "%Y-%m-%d").date()
+                    holidays_names[h_date_obj] = h_name
+                except (ValueError, TypeError):
+                    pass
+
+        self._update_master_exrate_sheet(
+            wb, usd_rates, eur_rates,
+            list(logic_engine.holidays),
+            holidays_names,
+            computed_start
+        )
 
         wb.save(filepath)
         wb.close()
@@ -427,10 +630,13 @@ class LedgerEngine:
 
         return filepath
 
+    # ================================================================== #
+    #  BATCH PROCESSING
+    # ================================================================== #
     async def process_batch(
         self,
         filepaths: List[str],
-        start_date: str = "2025-01-01",
+        start_date: str = None,
         progress_cb: Optional[Callable[[int, int, str, Optional[str]], None]] = None
     ) -> Tuple[int, int, List[str]]:
         """Batch processing with pre-edit backup, cache, and auto-cleanup."""

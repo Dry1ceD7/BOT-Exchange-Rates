@@ -2,7 +2,7 @@
 """
 gui/app.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.4.0) - Enterprise Edition
+BOT Exchange Rate Processor (v2.5.0) - Enterprise Edition
 ---------------------------------------------------------------------------
 Zero-emoji, typography-driven corporate UI.
 

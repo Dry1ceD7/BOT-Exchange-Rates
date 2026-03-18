@@ -2,11 +2,12 @@
 """
 core/logic.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.4.0) - Featherweight Architecture
+BOT Exchange Rate Processor (v2.5.0) - Featherweight Architecture
 ---------------------------------------------------------------------------
-The "Zero-Guess" decision engine. Handles exact date-matching, weekend,
-and holiday backtracking to ensure absolute financial accuracy. No Excel
-formulas are used; outputs are guaranteed Python Decimal objects.
+The T-1 Financial Accounting Engine. Enforces strict "previous valid
+trading day" retraction per Thai accounting standards. Handles weekend
+and BOT holiday backtracking. No Excel formulas are used; outputs are
+guaranteed Python Decimal objects.
 """
 
 from datetime import date, timedelta
@@ -58,11 +59,20 @@ class BOTLogicEngine:
 
     def resolve_rate(self, invoice_date: date, usd_rates: Dict[date, Decimal], eur_rates: Dict[date, Decimal]) -> Tuple[date, Optional[Decimal], Optional[Decimal]]:
         """
-        The Core Backtrack Loop.
-        Finds the exact, valid BOT trading date and returns the hard-coded Decimals.
+        T-1 Financial Accounting Engine (V2.5).
+        
+        Always returns the rate from the PREVIOUS valid trading day (T-1).
+        If the previous day is a weekend or BOT holiday, continues retracting
+        day-by-day until it finds the first valid historical trading day.
+        
+        Examples:
+            - Invoice on Tuesday  → returns Monday's rate
+            - Invoice on Monday   → T-1 is Sunday → rolls back to Friday
+            - Invoice on Thursday (day after a holiday Wed) → T-1 is Wed
+              (holiday) → rolls back to Tuesday
         
         Args:
-            invoice_date: The date from the "วันที่ใบขน" column.
+            invoice_date: The date from the "วันที่ดึง Exchange rate date" column.
             usd_rates: Dictionary mapping dates to USD Decimal rates.
             eur_rates: Dictionary mapping dates to EUR Decimal rates.
             
@@ -73,7 +83,8 @@ class BOTLogicEngine:
             RateNotFoundError: If the backtrack limit is triggered or
                                a required rate is missing on a valid trading day.
         """
-        current_date = invoice_date
+        # T-1 RETRACTION: Always start from the day BEFORE the invoice date
+        current_date = invoice_date - timedelta(days=1)
         days_rolled_back = 0
         
         # Guardrail Loop
@@ -98,6 +109,35 @@ class BOTLogicEngine:
             f"<ERROR: No Rate Found> Backtracked {self.max_rollback_days} days "
             f"from {invoice_date.strftime('%Y-%m-%d')} without hitting valid BOT data."
         )
+
+    def resolve_rate_for_currency(
+        self, invoice_date: date, currency: str,
+        usd_rates: Dict[date, Decimal], eur_rates: Dict[date, Decimal]
+    ) -> Tuple[date, Optional[Decimal]]:
+        """
+        Currency-aware T-1 resolver.
+        
+        - THB: Returns (invoice_date, Decimal("1.0000")) immediately.
+        - USD: Returns (trade_date, usd_rate) via T-1 resolve.
+        - EUR: Returns (trade_date, eur_rate) via T-1 resolve.
+        - Other: Returns (invoice_date, None) — no rate available.
+        """
+        ccy = currency.strip().upper() if currency else ""
+        
+        if ccy == "THB":
+            return invoice_date, Decimal("1.0000")
+        
+        if ccy in ("USD", "EUR"):
+            trade_date, usd_rt, eur_rt = self.resolve_rate(
+                invoice_date, usd_rates, eur_rates
+            )
+            if ccy == "USD":
+                return trade_date, usd_rt
+            else:
+                return trade_date, eur_rt
+        
+        # Unsupported currency — skip silently
+        return invoice_date, None
 
 # -------------------------------------------------------------------------
 # UTILITIES
