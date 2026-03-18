@@ -144,8 +144,8 @@ BOT_Exrate/
 │   ├── cache.db            SQLite rate/holiday cache (auto-created)
 │   └── backups/            Timestamped file backups (auto-managed)
 ├── .env                    API credentials (user-supplied, gitignored)
-├── .gitignore              Excludes secrets, cache, and build artifacts
-└── CLAUDE.md               Architecture specification
+├── .env.example            Credential template
+└── .gitignore              Excludes secrets, cache, and build artifacts
 ```
 
 ---

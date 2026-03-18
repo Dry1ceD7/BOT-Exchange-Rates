@@ -1,5 +1,9 @@
 # ---- Secrets ----
 .env
+.env_hindsight
+
+# ---- Developer Notes (local only) ----
+CLAUDE.md
 
 # ---- Runtime Data ----
 data/cache.db
