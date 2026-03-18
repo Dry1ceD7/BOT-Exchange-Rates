@@ -4,7 +4,7 @@
 
 **Enterprise-Grade Bank of Thailand Exchange Rate Automation**
 
-Version 2.3.1  ·  Modular SFFB Architecture  ·  Zero-Latency Cache
+Version 2.3.2  ·  Modular SFFB Architecture  ·  Zero-Latency Cache
 
 ---
 
