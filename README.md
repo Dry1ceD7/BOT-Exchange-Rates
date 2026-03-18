@@ -274,6 +274,6 @@ This project is developed for internal enterprise use. All rights reserved.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V2.4.0*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V2.5.0*
 
 </div>
