@@ -2,7 +2,7 @@
 """
 core/api_client.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.3.1) - Featherweight Architecture
+BOT Exchange Rate Processor (v2.3.2) - Featherweight Architecture
 ---------------------------------------------------------------------------
 Handles asynchronous communication with the Bank of Thailand (BOT) API.
 Enforces strict JSON schema validation via Pydantic v2.
@@ -80,9 +80,12 @@ class BOTClient:
         retry=retry_if_exception_type((httpx.RequestError, httpx.ConnectError, httpx.TimeoutException))
     )
     async def _fetch_json(self, url: str, token: str) -> dict:
+        # Normalize token: strip any existing "Bearer " prefix to prevent
+        # sending "Bearer Bearer <token>" from copy-paste .env errors
+        clean_token = token.removeprefix("Bearer ").strip()
         headers = {
-            "X-IBM-Client-Id": token,
-            "Authorization": token if token.startswith("Bearer") else f"Bearer {token}",
+            "X-IBM-Client-Id": clean_token,
+            "Authorization": f"Bearer {clean_token}",
             "accept": "application/json"
         }
         response = await self.client.get(url, headers=headers, timeout=30.0)

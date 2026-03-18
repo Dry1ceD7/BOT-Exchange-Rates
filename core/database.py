@@ -2,10 +2,10 @@
 """
 core/database.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.3.1) - Zero-Latency Local Cache
+BOT Exchange Rate Processor (v2.3.2) - Zero-Latency Local Cache
 ---------------------------------------------------------------------------
 Ultra-lightweight SQLite cache using only Python's built-in sqlite3.
-Thread-safe via check_same_thread=False + threading.Lock() on writes.
+Thread-safe via check_same_thread=False + threading.Lock() on all operations.
 Zero external dependencies.
 """
 
@@ -64,9 +64,10 @@ class CacheDB:
             (usd_rate, eur_rate) as Decimals, or None if not cached.
         """
         date_str = target_date.strftime("%Y-%m-%d")
-        row = self._conn.execute(
-            "SELECT usd_rate, eur_rate FROM rates WHERE date = ?", (date_str,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT usd_rate, eur_rate FROM rates WHERE date = ?", (date_str,)
+            ).fetchone()
 
         if row is None:
             return None
@@ -81,10 +82,11 @@ class CacheDB:
         """
         s_str = start.strftime("%Y-%m-%d")
         e_str = end.strftime("%Y-%m-%d")
-        rows = self._conn.execute(
-            "SELECT date, usd_rate, eur_rate FROM rates WHERE date BETWEEN ? AND ?",
-            (s_str, e_str)
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT date, usd_rate, eur_rate FROM rates WHERE date BETWEEN ? AND ?",
+                (s_str, e_str)
+            ).fetchall()
 
         result = {}
         for r in rows:
@@ -125,25 +127,27 @@ class CacheDB:
         Returns cached holidays as [(date_str, name), ...].
         If year is specified, filters to that year.
         """
-        if year:
-            prefix = f"{year}-"
-            rows = self._conn.execute(
-                "SELECT date, holiday_name FROM holidays WHERE date LIKE ?",
-                (prefix + "%",)
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT date, holiday_name FROM holidays"
-            ).fetchall()
+        with self._lock:
+            if year:
+                prefix = f"{year}-"
+                rows = self._conn.execute(
+                    "SELECT date, holiday_name FROM holidays WHERE date LIKE ?",
+                    (prefix + "%",)
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT date, holiday_name FROM holidays"
+                ).fetchall()
         return rows
 
     def has_holidays_for_year(self, year: int) -> bool:
         """Quick check if holidays for a year are already cached."""
         prefix = f"{year}-"
-        row = self._conn.execute(
-            "SELECT COUNT(*) FROM holidays WHERE date LIKE ?",
-            (prefix + "%",)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM holidays WHERE date LIKE ?",
+                (prefix + "%",)
+            ).fetchone()
         return row[0] > 0
 
     def insert_holidays(self, holidays: List[Tuple[str, str]]):
@@ -169,8 +173,9 @@ class CacheDB:
 
     def get_stats(self) -> dict:
         """Returns cache statistics for UI display."""
-        rates_count = self._conn.execute("SELECT COUNT(*) FROM rates").fetchone()[0]
-        hol_count = self._conn.execute("SELECT COUNT(*) FROM holidays").fetchone()[0]
+        with self._lock:
+            rates_count = self._conn.execute("SELECT COUNT(*) FROM rates").fetchone()[0]
+            hol_count = self._conn.execute("SELECT COUNT(*) FROM holidays").fetchone()[0]
         size_bytes = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
         return {
             "rates": rates_count,

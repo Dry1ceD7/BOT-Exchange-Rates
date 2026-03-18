@@ -2,7 +2,7 @@
 """
 core/logic.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.3.1) - Featherweight Architecture
+BOT Exchange Rate Processor (v2.3.2) - Featherweight Architecture
 ---------------------------------------------------------------------------
 The "Zero-Guess" decision engine. Handles exact date-matching, weekend,
 and holiday backtracking to ensure absolute financial accuracy. No Excel
@@ -11,7 +11,7 @@ formulas are used; outputs are guaranteed Python Decimal objects.
 
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 
 # -------------------------------------------------------------------------
 # EXCEPTIONS
@@ -70,7 +70,8 @@ class BOTLogicEngine:
             Tuple containing: (Confirmed Trading Date, USD Rate, EUR Rate)
             
         Raises:
-            RateNotFoundError: If the backtrack limit is triggered.
+            RateNotFoundError: If the backtrack limit is triggered or
+                               a required rate is missing on a valid trading day.
         """
         current_date = invoice_date
         days_rolled_back = 0
@@ -82,8 +83,8 @@ class BOTLogicEngine:
                 usd_val = self._get_rate_for_date(current_date, usd_rates)
                 eur_val = self._get_rate_for_date(current_date, eur_rates)
                 
-                # Double-check: Even if it's a trading day, did the BOT publish data?
-                if usd_val is not None:
+                # Both USD and EUR must be present for a valid trading day
+                if usd_val is not None and eur_val is not None:
                     return current_date, usd_val, eur_val
                 
                 # If BOT data is mysteriously missing on a valid trading day, 
@@ -102,7 +103,7 @@ class BOTLogicEngine:
 # UTILITIES
 # -------------------------------------------------------------------------
 
-def safe_to_decimal(value: any) -> Optional[Decimal]:
+def safe_to_decimal(value: Any) -> Optional[Decimal]:
     """Strictly converts a float/string payload to a highly precise Decimal."""
     if value is None or value == "":
         return None

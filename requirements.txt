@@ -1,4 +1,4 @@
-# BOT Exchange Rate Processor V2.3.1 — Dependencies
+# BOT Exchange Rate Processor V2.3.2 — Dependencies
 # Install: pip install -r requirements.txt
 
 customtkinter==5.2.2

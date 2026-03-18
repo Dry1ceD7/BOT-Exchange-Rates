@@ -2,7 +2,7 @@
 """
 main.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.3.1) - Fail-Safe Enterprise
+BOT Exchange Rate Processor (v2.3.2) - Fail-Safe Enterprise
 ---------------------------------------------------------------------------
 Entry point. Loads .env, validates API tokens BEFORE GUI init,
 ensures required directories exist, and exits with a clear error
@@ -15,6 +15,8 @@ import os
 # Explicitly insert current directory to Python Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import tkinter as tk
+from tkinter import messagebox
 from dotenv import load_dotenv
 
 # Securely load API Keys to os.environ BEFORE anything else
@@ -48,9 +50,6 @@ def _validate_tokens():
         missing.append("BOT_TOKEN_HOL")
 
     if missing:
-        import tkinter as tk
-        from tkinter import messagebox
-
         root = tk.Tk()
         root.withdraw()  # Hide the empty root window
         messagebox.showerror(

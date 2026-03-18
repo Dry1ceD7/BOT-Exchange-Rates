@@ -2,9 +2,9 @@
 """
 core/engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.3.1) - Cache-First + Singleton Architecture
+BOT Exchange Rate Processor (v2.3.2) - Cache-First + Singleton Architecture
 ---------------------------------------------------------------------------
-V2.3.1 Fixes:
+V2.3.2 Fixes:
   - BOTRateDetail import moved to top level
   - Cache uses today's rate if already stored (BOT publishes once/day)
   - CacheDB & BackupManager are module-level singletons
@@ -49,7 +49,9 @@ def _get_backup() -> BackupManager:
 def _get_cache() -> CacheDB:
     global _cache_singleton
     if _cache_singleton is None:
+        import atexit
         _cache_singleton = CacheDB()
+        atexit.register(_cache_singleton.close)
     return _cache_singleton
 
 
@@ -93,23 +95,23 @@ class LedgerEngine:
         return None
 
     # ================================================================== #
-    #  CACHE-FIRST DATA LOADING (v2.3.1 — fixed cache heuristic)
+    #  CACHE-FIRST DATA LOADING (v2.3.2 — fixed cache heuristic)
     # ================================================================== #
     async def _preload_api_data(
         self, dates: Set[date], start_date: str = "2025-01-01"
     ) -> Tuple[BOTLogicEngine, Dict[date, Decimal], Dict[date, Decimal], List, List]:
         """
-        Cache-First Architecture (v2.3.1):
+        Cache-First Architecture (v2.3.2):
         1. Check SQLite for holidays & rates
         2. Only call BOT API for MISSING data
         3. Store API results in SQLite immediately
         
-        v2.3.1 Fix: Today's rate IS cached. BOT publishes once per day,
+        v2.3.2 Fix: Today's rate IS cached. BOT publishes once per day,
         so a cached rate for today is valid until midnight.
         """
         try:
             force_start = datetime.strptime(start_date, "%Y-%m-%d").date()
-        except Exception:
+        except (ValueError, TypeError):
             force_start = date(2025, 1, 1)
 
         today = date.today()
@@ -127,7 +129,7 @@ class LedgerEngine:
                 for h_date, h_name in cached_hols:
                     try:
                         holidays_list.append(datetime.strptime(h_date, "%Y-%m-%d").date())
-                    except:
+                    except (ValueError, TypeError):
                         pass
             else:
                 years_to_fetch.append(year)
@@ -140,13 +142,13 @@ class LedgerEngine:
                     hol_date = datetime.strptime(h.date, "%Y-%m-%d").date()
                     holidays_list.append(hol_date)
                     hol_entries.append((h.date, h.description))
-                except:
+                except (ValueError, TypeError):
                     pass
             self.cache.insert_holidays(hol_entries)
 
         logic_engine = BOTLogicEngine(holidays=holidays_list, max_rollback_days=5)
 
-        # ── RATES: Cache-first (v2.3.1 FIX) ─────────────────────────────
+        # ── RATES: Cache-first (v2.3.2 FIX) ─────────────────────────────
         cached_rates = self.cache.get_rates_bulk(min_date, max_date)
 
         usd_rates: Dict[date, Decimal] = {}
@@ -158,7 +160,7 @@ class LedgerEngine:
             if eur is not None:
                 eur_rates[d] = eur
 
-        # v2.3.1 FIX: Determine which dates are actually MISSING from cache.
+        # v2.3.2 FIX: Determine which dates are actually MISSING from cache.
         # BOT publishes rates once per day — cached today's rate is valid.
         # Only fetch from API if there are gaps in the date range.
         all_needed_dates = set()
@@ -206,12 +208,12 @@ class LedgerEngine:
                 if usd is not None:
                     usd_data.append(BOTRateDetail(
                         period=d_str, currency_id="USD",
-                        buying_transfer=float(usd), selling=float(usd)
+                        buying_transfer=None, selling=float(usd)
                     ))
                 if eur is not None:
                     eur_data.append(BOTRateDetail(
                         period=d_str, currency_id="EUR",
-                        buying_transfer=float(eur), selling=float(eur)
+                        buying_transfer=None, selling=float(eur)
                     ))
 
         return logic_engine, usd_rates, eur_rates, usd_data, eur_data
@@ -222,7 +224,7 @@ class LedgerEngine:
     ):
         try:
             min_cutoff = datetime.strptime(start_date, "%Y-%m-%d").date()
-        except:
+        except (ValueError, TypeError):
             min_cutoff = date(2025, 1, 1)
 
         for sheet_name in wb.sheetnames:

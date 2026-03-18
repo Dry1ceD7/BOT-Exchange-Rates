@@ -2,7 +2,7 @@
 """
 gui/app.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.3.1) - Enterprise Edition
+BOT Exchange Rate Processor (v2.3.2) - Enterprise Edition
 ---------------------------------------------------------------------------
 Zero-emoji, typography-driven corporate UI.
 
@@ -24,7 +24,7 @@ import platform
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from datetime import date, datetime
-from typing import List
+from typing import List, Optional
 import httpx
 
 from core.api_client import BOTClient, BOTAPIError
@@ -102,13 +102,13 @@ class BOTExrateApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("BOT Exchange Rate Processor  |  V2.3.1")
+        self.title("BOT Exchange Rate Processor  |  V2.3.2")
         self.geometry("740x780")
-        self.resizable(False, False)
+        self.resizable(False, True)
         self.configure(fg_color=COLOR_BG_DARK)
 
         self.file_queue: List[str] = []
-        self.last_processed_path: str = None
+        self.last_processed_path: Optional[str] = None
         self.backup_mgr = BackupManager()
 
         # Center window
@@ -146,7 +146,7 @@ class BOTExrateApp(ctk.CTk):
             font=ctk.CTkFont(size=22, weight="bold"), text_color=COLOR_HEADER_TEXT
         ).pack()
         ctk.CTkLabel(
-            inner, text="Enterprise Accounting Suite  |  V2.3.1",
+            inner, text="Enterprise Accounting Suite  |  V2.3.2",
             font=ctk.CTkFont(size=11), text_color=COLOR_HEADER_SUB
         ).pack(pady=(2, 0))
 
@@ -337,10 +337,20 @@ class BOTExrateApp(ctk.CTk):
         for combo in self._combo_widgets:
             combo.configure(state="disabled" if locked else "normal")
 
-    def _assemble_start_date(self) -> str:
+    def _assemble_start_date(self) -> Optional[str]:
         if self.use_today_var.get() == "on":
             return datetime.today().strftime("%Y-%m-%d")
-        return f"{self.combo_year.get()}-{self.combo_month.get()}-{self.combo_day.get()}"
+        date_str = f"{self.combo_year.get()}-{self.combo_month.get()}-{self.combo_day.get()}"
+        try:
+            datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            messagebox.showerror(
+                "Invalid Date",
+                f"The selected date '{date_str}' is not valid.\n\n"
+                f"Please select a valid calendar date."
+            )
+            return None
+        return date_str
 
     # ================================================================== #
     #  DROP / BROWSE
@@ -395,6 +405,11 @@ class BOTExrateApp(ctk.CTk):
         self.progressbar.configure(mode="determinate")
         self.progressbar.set(0)
         start_date_str = self._assemble_start_date()
+        if start_date_str is None:
+            # Invalid date was selected — re-enable buttons and halt
+            self.btn_process.configure(state="normal")
+            self.btn_revert.configure(state="normal")
+            return
         threading.Thread(
             target=self._batch_thread, args=(start_date_str,), daemon=True
         ).start()
@@ -402,11 +417,11 @@ class BOTExrateApp(ctk.CTk):
     def _batch_thread(self, start_date: str):
         try:
             asyncio.run(self._run_batch(start_date))
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            self.after(0, self._show_error,
+                       "Network error — please check your internet connection.")
         except Exception as e:
-            msg = str(e)
-            if "ConnectError" in msg or "TimeoutException" in msg:
-                msg = "Network error — please check your internet connection."
-            self.after(0, self._show_error, msg)
+            self.after(0, self._show_error, str(e))
 
     async def _run_batch(self, start_date: str):
         async with httpx.AsyncClient() as client:

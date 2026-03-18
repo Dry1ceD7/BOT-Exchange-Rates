@@ -2,7 +2,7 @@
 """
 core/backup_manager.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.3.1) - Fail-Safe Backup & Revert
+BOT Exchange Rate Processor (v2.3.2) - Fail-Safe Backup & Revert
 ---------------------------------------------------------------------------
 Lightweight backup/restore layer using only Python stdlib (shutil, os, glob).
 Protects against file corruption during in-place editing with automatic
@@ -40,10 +40,10 @@ class BackupManager:
         os.makedirs(self.backup_dir, exist_ok=True)
 
     def _generate_backup_name(self, filepath: str) -> str:
-        """Generates a timestamped backup filename."""
+        """Generates a timestamped backup filename with unique separator."""
         basename = os.path.splitext(os.path.basename(filepath))[0]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"{basename}_{timestamp}.xlsx"
+        return f"{basename}__bak__{timestamp}.xlsx"
 
     def _get_backup_key(self, filepath: str) -> str:
         """Extracts the base name (without extension) used as a lookup key."""
@@ -90,7 +90,7 @@ class BackupManager:
             BackupError: If no matching backup is found.
         """
         key = self._get_backup_key(filepath)
-        pattern = os.path.join(self.backup_dir, f"{key}_*.xlsx")
+        pattern = os.path.join(self.backup_dir, f"{key}__bak__*.xlsx")
         matches = sorted(glob.glob(pattern), reverse=True)
 
         if not matches:
@@ -145,7 +145,7 @@ class BackupManager:
         """
         if filepath:
             key = self._get_backup_key(filepath)
-            pattern = os.path.join(self.backup_dir, f"{key}_*.xlsx")
+            pattern = os.path.join(self.backup_dir, f"{key}__bak__*.xlsx")
         else:
             pattern = os.path.join(self.backup_dir, "*.xlsx")
 
