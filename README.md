@@ -78,40 +78,99 @@ It replaces a fragmented, error-prone 3-script workflow with a single, mathemati
 
 ---
 
-## Local Setup
+## Local Setup — Quick Start
 
 ### Prerequisites
-- Python 3.10+
-- Bank of Thailand API credentials ([Register here](https://apiportal.bot.or.th/))
 
-### Quick Start (Cold-Start Commands)
+- **Python 3.10+** — [Download](https://www.python.org/downloads/) · macOS: `brew install python` · Windows: check **"Add Python to PATH"** during install
+- **Git** — [Download](https://git-scm.com/downloads) · macOS: `brew install git`
+- **BOT API Keys** — [Register here](https://apiportal.bot.or.th/) for Exchange Rate + Holiday keys
+
+---
+
+### macOS / Linux — Single-Command Setup
+
+Copy and paste this entire block into your terminal:
 
 ```bash
-# 1. Clone the repository
+# ── Clone & Enter ─────────────────────────────────────────────────────
 git clone https://github.com/Dry1ceD7/BOT-Exchange-Rates.git
 cd BOT-Exchange-Rates
 
-# 2. Create and activate virtual environment
-python -m venv venv
-source venv/bin/activate        # macOS/Linux
-# venv\Scripts\activate         # Windows
+# ── Dependency Check ──────────────────────────────────────────────────
+python3 --version || { echo "❌ Python 3 is NOT installed. Download: https://www.python.org/downloads/"; exit 1; }
+git --version     || { echo "❌ Git is NOT installed. Download: https://git-scm.com/downloads"; exit 1; }
 
-# 3. Install all dependencies from manifest
-pip install -r requirements.txt
+# ── Virtual Environment & Dependencies ────────────────────────────────
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip -q
+pip install -r requirements.txt -q
 
-# 4. Copy the secrets template and add your API keys
+# ── API Credential Setup ─────────────────────────────────────────────
 cp .env.example .env
-# Edit .env with your actual BOT API credentials
+echo ""
+echo "🔑 Enter your Bank of Thailand API keys:"
+read -rp "   Exchange Rate API key (BOT_TOKEN_EXG): " EXG_KEY
+read -rp "   Holiday API key      (BOT_TOKEN_HOL): " HOL_KEY
+sed -i '' "s/your_exchange_rate_api_key_here/$EXG_KEY/" .env
+sed -i '' "s/your_holiday_api_key_here/$HOL_KEY/" .env
+echo "✅ .env file configured."
 
-# 5. Launch the application
+# ── Launch ────────────────────────────────────────────────────────────
+echo ""
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║  ✅ Setup Complete! Launching application...            ║"
+echo "╚══════════════════════════════════════════════════════════╝"
+open .
+python3 main.py
+```
+
+---
+
+### Windows — Single-Command Setup
+
+Copy and paste this entire block into **Command Prompt**:
+
+```bat
+REM ── Clone & Enter ───────────────────────────────────────────────────
+git clone https://github.com/Dry1ceD7/BOT-Exchange-Rates.git
+cd BOT-Exchange-Rates
+
+REM ── Dependency Check ────────────────────────────────────────────────
+python --version || (echo ❌ Python 3 is NOT installed. Download: https://www.python.org/downloads/ & exit /b 1)
+git --version    || (echo ❌ Git is NOT installed. Download: https://git-scm.com/downloads & exit /b 1)
+
+REM ── Virtual Environment & Dependencies ──────────────────────────────
+python -m venv venv
+venv\Scripts\activate
+pip install --upgrade pip -q
+pip install -r requirements.txt -q
+
+REM ── API Credential Setup ────────────────────────────────────────────
+copy .env.example .env
+echo.
+echo 🔑 Enter your Bank of Thailand API keys:
+set /p EXG_KEY="   Exchange Rate API key (BOT_TOKEN_EXG): "
+set /p HOL_KEY="   Holiday API key      (BOT_TOKEN_HOL): "
+powershell -Command "(Get-Content .env) -replace 'your_exchange_rate_api_key_here','%EXG_KEY%' | Set-Content .env"
+powershell -Command "(Get-Content .env) -replace 'your_holiday_api_key_here','%HOL_KEY%' | Set-Content .env"
+echo ✅ .env file configured.
+
+REM ── Launch ──────────────────────────────────────────────────────────
+echo.
+echo ╔══════════════════════════════════════════════════════════╗
+echo ║  ✅ Setup Complete! Launching application...            ║
+echo ╚══════════════════════════════════════════════════════════╝
+explorer .
 python main.py
 ```
 
+---
+
 ### Configuration
 
-> **⚠ IMPORTANT:** You must supply your own `.env` file with valid BOT API credentials. This file is **not included** in the repository for security reasons. A `.env.example` template is provided.
-
-Register for API access at [apiportal.bot.or.th](https://apiportal.bot.or.th/), then edit your `.env`:
+> **⚠ IMPORTANT:** The `.env` file contains your API secrets and is **never pushed to GitHub**. If you need to reconfigure, edit `.env` directly or delete it and re-run the setup commands above.
 
 ```env
 BOT_TOKEN_EXG=your_exchange_rate_api_key_here
@@ -121,7 +180,8 @@ BOT_TOKEN_HOL=your_holiday_api_key_here
 ### What Happens on First Run
 
 The application automatically:
-1. Creates `data/`, `data/input/`, and `data/backups/` directories (Git does not track empty folders)
+
+1. Creates `data/`, `data/input/`, and `data/backups/` directories
 2. Validates your API tokens — shows a native error popup if missing
 3. Initializes the SQLite cache at `data/cache.db`
 
