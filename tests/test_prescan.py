@@ -6,12 +6,12 @@ Unit tests for core/prescan.py — Smart Date Pre-Scanner.
 ---------------------------------------------------------------------------
 """
 
-from datetime import date, timedelta
+from datetime import date
 
 import openpyxl
 import pytest
 
-from core.prescan import _parse_scan_date, prescan_oldest_date
+from core.prescan import DATE_FORMATS, _parse_scan_date, prescan_oldest_date
 
 # =========================================================================
 #  HELPERS
@@ -20,7 +20,7 @@ from core.prescan import _parse_scan_date, prescan_oldest_date
 class TestParseScanDate:
     """Tests for _parse_scan_date helper."""
 
-    FORMATS = ["%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d %b %Y", "%d %B %Y", "%Y%m%d"]
+    FORMATS = DATE_FORMATS
 
     def test_iso_string(self):
         assert _parse_scan_date("2025-03-10", self.FORMATS) == date(2025, 3, 10)
@@ -83,8 +83,9 @@ class TestPrescanOldestDate:
         oldest, detected = prescan_oldest_date([])
         assert detected is False
         assert isinstance(oldest, date)
-        # Fallback should be ~30 days ago
-        expected = date.today() - timedelta(days=30)
+        # Fallback should be Dec 28 of previous year
+        prev_year = date.today().year - 1
+        expected = date(prev_year, 12, 28)
         assert oldest == expected
 
     def test_nonexistent_file_returns_fallback(self):

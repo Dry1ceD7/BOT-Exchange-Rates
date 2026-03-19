@@ -429,7 +429,7 @@ class LedgerEngine:
                     continue
                 try:
                     trade_date, _ = logic_engine.resolve_rate(
-                        inv_date, usd_selling, eur_selling
+                        inv_date, usd_buying, eur_buying
                     )
                 except RateNotFoundError:
                     if out_rate_idx is not None:
