@@ -161,11 +161,18 @@ def convert_xls_to_xlsx(filepath: str) -> str:
         ws_xlsx = wb_xlsx.create_sheet(title=sheet_name)
 
         # ── Copy merged cells ────────────────────────────────────
+        # Build set of non-top-left merged cell coords to skip
+        merged_skip = set()
         for (rlo, rhi, clo, chi) in ws_xls.merged_cells:
             ws_xlsx.merge_cells(
                 start_row=rlo + 1, start_column=clo + 1,
                 end_row=rhi, end_column=chi,
             )
+            # Mark all cells except top-left as "skip"
+            for r in range(rlo, rhi):
+                for c in range(clo, chi):
+                    if r != rlo or c != clo:
+                        merged_skip.add((r, c))
 
         # ── Copy column widths ───────────────────────────────────
         for col_idx in range(ws_xls.ncols):
@@ -194,6 +201,10 @@ def convert_xls_to_xlsx(filepath: str) -> str:
         # ── Copy cell values + styles ────────────────────────────
         for row_idx in range(ws_xls.nrows):
             for col_idx in range(ws_xls.ncols):
+                # Skip non-top-left cells in merged ranges
+                if (row_idx, col_idx) in merged_skip:
+                    continue
+
                 cell_type = ws_xls.cell_type(row_idx, col_idx)
                 cell_value = ws_xls.cell_value(row_idx, col_idx)
 

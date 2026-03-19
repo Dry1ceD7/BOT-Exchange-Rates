@@ -18,6 +18,7 @@ from decimal import Decimal
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import openpyxl
+from openpyxl.cell.cell import MergedCell
 
 from core.api_client import BOTClient
 from core.backup_manager import BackupError, BackupManager
@@ -451,31 +452,38 @@ class LedgerEngine:
             for row_idx in range(
                 mapping["header_row"] + 1, ws.max_row + 1
             ):
-                inv_date = self._parse_date(
-                    ws.cell(row=row_idx, column=src_idx).value
-                )
+                src_cell = ws.cell(row=row_idx, column=src_idx)
+                if isinstance(src_cell, MergedCell):
+                    continue
+                inv_date = self._parse_date(src_cell.value)
                 if not inv_date:
                     continue
                 ccy = ""
                 if cur_idx is not None:
-                    raw = ws.cell(
+                    cur_cell = ws.cell(
                         row=row_idx, column=cur_idx + 1
-                    ).value
-                    ccy = str(raw).strip().upper() if raw else ""
+                    )
+                    if not isinstance(cur_cell, MergedCell):
+                        raw = cur_cell.value
+                        ccy = str(raw).strip().upper() if raw else ""
                 if ccy == "THB":
                     if out_rate_idx is not None:
-                        ws.cell(
+                        out_cell = ws.cell(
                             row=row_idx, column=out_rate_idx + 1
-                        ).value = 1
+                        )
+                        if not isinstance(out_cell, MergedCell):
+                            out_cell.value = 1
                     continue
                 # Cross-tab lookup: walk backwards in ExRate index
                 rate = self._vlookup_exrate(
                     inv_date, ccy, exrate_index,
                 )
                 if out_rate_idx is not None:
-                    ws.cell(
+                    out_cell = ws.cell(
                         row=row_idx, column=out_rate_idx + 1
-                    ).value = rate
+                    )
+                    if not isinstance(out_cell, MergedCell):
+                        out_cell.value = rate
 
         # ── Save & Cleanup ───────────────────────────────────────────
         if converted:
