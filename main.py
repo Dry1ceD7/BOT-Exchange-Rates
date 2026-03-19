@@ -2,7 +2,7 @@
 """
 main.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.1) - Fail-Safe Enterprise
+BOT Exchange Rate Processor (v2.5.4) - Fail-Safe Enterprise
 ---------------------------------------------------------------------------
 Entry point. Loads .env, validates API tokens BEFORE GUI init,
 ensures required directories exist, and exits with a clear error

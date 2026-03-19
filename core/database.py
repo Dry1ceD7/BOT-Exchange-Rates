@@ -2,13 +2,13 @@
 """
 core/database.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.1) - Zero-Latency Local Cache
+BOT Exchange Rate Processor (v2.5.4) - Zero-Latency Local Cache
 ---------------------------------------------------------------------------
 Ultra-lightweight SQLite cache using only Python's built-in sqlite3.
 Thread-safe via check_same_thread=False + threading.Lock() on all operations.
 Zero external dependencies.
 
-V2.5.1 Schema: Expanded rates table with Buying TT / Selling columns
+V2.5.4 Schema: Expanded rates table with Buying TT / Selling columns
 for both USD and EUR (4 rate columns total).
 """
 

@@ -1,6 +1,6 @@
 [project]
 name = "bot-exrate"
-version = "2.5.1"
+version = "2.5.4"
 description = "BOT Exchange Rate Processor — Featherweight Desktop App"
 requires-python = ">=3.12"
 readme = "README.md"
