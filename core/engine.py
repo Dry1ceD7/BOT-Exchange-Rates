@@ -13,7 +13,6 @@ Slim orchestrator. Heavy logic extracted to:
 import gc
 import logging
 import os
-import shutil
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Callable, Dict, List, Optional, Set, Tuple
@@ -478,19 +477,31 @@ class LedgerEngine:
                     ).value = rate
 
         # ── Save & Cleanup ───────────────────────────────────────────
-        wb.save(filepath)
-        wb.close()
         if converted:
-            xlsx_output = os.path.splitext(original_path)[0] + ".xlsx"
-            shutil.copy2(filepath, xlsx_output)
+            # Save directly over the original path (with .xlsx extension)
+            final_path = os.path.splitext(original_path)[0] + ".xlsx"
+            wb.save(final_path)
+            wb.close()
+            # Remove the temp conversion file
             try:
                 os.remove(filepath)
             except OSError as e:
-                logger.debug("Cleanup of temp conversion file failed: %s", e)
-            filepath = xlsx_output
+                logger.debug("Cleanup of temp file failed: %s", e)
+            # Remove the original .xls so there's no split output
+            if original_path != final_path and os.path.exists(original_path):
+                try:
+                    os.remove(original_path)
+                except OSError as e:
+                    logger.debug("Cleanup of original .xls failed: %s", e)
+            filepath = final_path
             logger.info(
-                f"Saved processed output as: {os.path.basename(xlsx_output)}"
+                "Saved processed output as: %s",
+                os.path.basename(final_path),
             )
+        else:
+            # .xlsx input — save in-place
+            wb.save(filepath)
+            wb.close()
         gc.collect()
         return filepath
 
