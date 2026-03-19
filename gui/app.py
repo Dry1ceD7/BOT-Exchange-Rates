@@ -21,6 +21,7 @@ import asyncio
 import threading
 import subprocess
 import platform
+import logging
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from datetime import date, datetime
@@ -32,6 +33,7 @@ from core.engine import LedgerEngine, FileSizeLimitError, MissingColumnError
 from core.backup_manager import BackupManager, BackupError
 
 ctk.set_appearance_mode("light")
+logger = logging.getLogger(__name__)
 
 # ── Color Palette ────────────────────────────────────────────────────────
 COLOR_BG_DARK       = "#0B1A33"
@@ -76,17 +78,23 @@ def parse_drop_data(raw: str) -> List[str]:
     return results
 
 
-def resolve_xlsx_files(paths: List[str]) -> List[str]:
+# Supported Excel extensions (openpyxl handles .xlsx and .xlsm natively)
+EXCEL_EXTENSIONS = (".xlsx", ".xls", ".xlsm", ".xlsb")
+OPENPYXL_NATIVE = (".xlsx", ".xlsm")
+
+
+def resolve_excel_files(paths: List[str]) -> List[str]:
+    """Resolve individual files and directories into a flat list of Excel files."""
     queue = []
     for p in paths:
         if os.path.isfile(p):
-            if p.lower().endswith(".xlsx") and not os.path.basename(p).startswith("."):
+            if p.lower().endswith(EXCEL_EXTENSIONS) and not os.path.basename(p).startswith("."):
                 queue.append(p)
         elif os.path.isdir(p):
             for fname in sorted(os.listdir(p)):
                 if fname.startswith("."):
                     continue
-                if fname.lower().endswith(".xlsx"):
+                if fname.lower().endswith(EXCEL_EXTENSIONS):
                     queue.append(os.path.join(p, fname))
     seen = set()
     unique = []
@@ -263,7 +271,7 @@ class BOTExrateApp(ctk.CTk):
         dz_inner = ctk.CTkFrame(self.drop_zone, fg_color="transparent")
         dz_inner.place(relx=0.5, rely=0.5, anchor="center")
 
-        dnd_hint = "Drop .xlsx files or folders here" if self.dnd_enabled else "Click to select files"
+        dnd_hint = "Drop Excel files or folders here" if self.dnd_enabled else "Click to select files"
         self.dz_text = ctk.CTkLabel(
             dz_inner, text=dnd_hint,
             font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT_SECONDARY
@@ -280,8 +288,17 @@ class BOTExrateApp(ctk.CTk):
             try:
                 self.drop_zone.drop_target_register(DND_FILES)
                 self.drop_zone.dnd_bind("<<Drop>>", self._on_drop)
-            except Exception:
-                pass
+                # Register DnD on child widgets too — they intercept events
+                # from reaching the parent drop zone
+                for child in [dz_inner, self.dz_text, self.dz_sub]:
+                    try:
+                        child.drop_target_register(DND_FILES)
+                        child.dnd_bind("<<Drop>>", self._on_drop)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"DnD registration failed: {e}")
+                self.dnd_enabled = False
 
         self.lbl_queue = ctk.CTkLabel(
             self.card, text="", font=ctk.CTkFont(size=12), text_color=COLOR_TEXT_SECONDARY
@@ -404,17 +421,31 @@ class BOTExrateApp(ctk.CTk):
     # ================================================================== #
     def _on_drop(self, event):
         paths = parse_drop_data(event.data)
-        xlsx_files = resolve_xlsx_files(paths)
-        if xlsx_files:
-            self._set_queue(xlsx_files)
+        excel_files = resolve_excel_files(paths)
+        if excel_files:
+            # Warn about unsupported formats
+            unsupported = [f for f in excel_files if not f.lower().endswith(OPENPYXL_NATIVE)]
+            if unsupported:
+                names = ", ".join(os.path.basename(f) for f in unsupported)
+                messagebox.showwarning(
+                    "Format Warning",
+                    f"These files use formats that may not be fully supported:\n{names}\n\n"
+                    f"Only .xlsx and .xlsm files are guaranteed to work."
+                )
+            self._set_queue(excel_files)
         else:
             messagebox.showwarning("No Valid Files",
-                                   "No .xlsx files found in the dropped items.")
+                                   "No Excel files found in the dropped items.")
 
     def _browse_files(self):
         paths = filedialog.askopenfilenames(
             title="Select Excel Ledgers",
-            filetypes=[("Excel workbooks", "*.xlsx")]
+            filetypes=[
+                ("Excel workbooks", "*.xlsx *.xlsm *.xls *.xlsb"),
+                ("Excel (modern)", "*.xlsx *.xlsm"),
+                ("Excel (legacy)", "*.xls *.xlsb"),
+                ("All files", "*.*")
+            ]
         )
         if paths:
             self._set_queue(list(paths))

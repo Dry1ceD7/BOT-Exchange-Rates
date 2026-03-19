@@ -220,16 +220,20 @@ class LedgerEngine:
         return date(prev_year, 12, 20)
 
     # ================================================================== #
-    #  CACHE-FIRST DATA LOADING (v2.5.0)
+    #  CACHE-FIRST DATA LOADING (v2.5.1 — 4-Column Rates)
     # ================================================================== #
     async def _preload_api_data(
         self, dates: Set[date], start_date: str = "2025-01-01"
-    ) -> Tuple[BOTLogicEngine, Dict[date, Decimal], Dict[date, Decimal], List, List]:
+    ) -> Tuple:
         """
-        Cache-First Architecture (v2.5.0):
-        1. Check SQLite for holidays & rates
+        Cache-First Architecture (v2.5.1):
+        1. Check SQLite for holidays & rates (4 columns)
         2. Only call BOT API for MISSING data
         3. Store API results in SQLite immediately
+        
+        Returns:
+            (logic_engine, usd_selling_rates, eur_selling_rates,
+             usd_buying_rates, eur_buying_rates, usd_data, eur_data)
         """
         try:
             force_start = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -270,17 +274,23 @@ class LedgerEngine:
 
         logic_engine = BOTLogicEngine(holidays=holidays_list, max_rollback_days=10)
 
-        # ── RATES: Cache-first ───────────────────────────────────────────
+        # ── RATES: Cache-first (4 columns) ───────────────────────────────
         cached_rates = self.cache.get_rates_bulk(min_date, max_date)
 
-        usd_rates: Dict[date, Decimal] = {}
-        eur_rates: Dict[date, Decimal] = {}
+        usd_buying_rates: Dict[date, Decimal] = {}
+        usd_selling_rates: Dict[date, Decimal] = {}
+        eur_buying_rates: Dict[date, Decimal] = {}
+        eur_selling_rates: Dict[date, Decimal] = {}
 
-        for d, (usd, eur) in cached_rates.items():
-            if usd is not None:
-                usd_rates[d] = usd
-            if eur is not None:
-                eur_rates[d] = eur
+        for d, rate_dict in cached_rates.items():
+            if rate_dict["usd_buying"] is not None:
+                usd_buying_rates[d] = rate_dict["usd_buying"]
+            if rate_dict["usd_selling"] is not None:
+                usd_selling_rates[d] = rate_dict["usd_selling"]
+            if rate_dict["eur_buying"] is not None:
+                eur_buying_rates[d] = rate_dict["eur_buying"]
+            if rate_dict["eur_selling"] is not None:
+                eur_selling_rates[d] = rate_dict["eur_selling"]
 
         all_needed_dates = set()
         check_date = min_date
@@ -302,44 +312,43 @@ class LedgerEngine:
             rate_cache_entries = {}
 
             for r in usd_data:
+                d = datetime.strptime(r.period, "%Y-%m-%d").date()
+                if r.buying_transfer is not None:
+                    usd_buying_rates[d] = safe_to_decimal(r.buying_transfer)
                 if r.selling is not None:
-                    d = datetime.strptime(r.period, "%Y-%m-%d").date()
-                    usd_rates[d] = safe_to_decimal(r.selling)
-                    rate_cache_entries.setdefault(r.period, [None, None])
-                    rate_cache_entries[r.period][0] = r.selling
+                    usd_selling_rates[d] = safe_to_decimal(r.selling)
+                rate_cache_entries.setdefault(r.period, [None, None, None, None])
+                rate_cache_entries[r.period][0] = r.buying_transfer
+                rate_cache_entries[r.period][1] = r.selling
 
             for r in eur_data:
+                d = datetime.strptime(r.period, "%Y-%m-%d").date()
+                if r.buying_transfer is not None:
+                    eur_buying_rates[d] = safe_to_decimal(r.buying_transfer)
                 if r.selling is not None:
-                    d = datetime.strptime(r.period, "%Y-%m-%d").date()
-                    eur_rates[d] = safe_to_decimal(r.selling)
-                    rate_cache_entries.setdefault(r.period, [None, None])
-                    rate_cache_entries[r.period][1] = r.selling
+                    eur_selling_rates[d] = safe_to_decimal(r.selling)
+                rate_cache_entries.setdefault(r.period, [None, None, None, None])
+                rate_cache_entries[r.period][2] = r.buying_transfer
+                rate_cache_entries[r.period][3] = r.selling
 
-            bulk = [(d_str, vals[0], vals[1]) for d_str, vals in rate_cache_entries.items()]
+            bulk = [
+                (d_str, vals[0], vals[1], vals[2], vals[3])
+                for d_str, vals in rate_cache_entries.items()
+            ]
             self.cache.insert_rates_bulk(bulk)
-        else:
-            for d, (usd, eur) in cached_rates.items():
-                d_str = d.strftime("%Y-%m-%d")
-                if usd is not None:
-                    usd_data.append(BOTRateDetail(
-                        period=d_str, currency_id="USD",
-                        buying_transfer=None, selling=float(usd)
-                    ))
-                if eur is not None:
-                    eur_data.append(BOTRateDetail(
-                        period=d_str, currency_id="EUR",
-                        buying_transfer=None, selling=float(eur)
-                    ))
 
-        return logic_engine, usd_rates, eur_rates, usd_data, eur_data
+        return (logic_engine, usd_selling_rates, eur_selling_rates,
+                usd_buying_rates, eur_buying_rates, usd_data, eur_data)
 
     # ================================================================== #
-    #  UNIFIED "ExRate" MASTER SHEET — Merge & Backfill (V2.5)
+    #  UNIFIED "ExRate" MASTER SHEET — Merge & Backfill (V2.5.1)
     # ================================================================== #
     def _update_master_exrate_sheet(
         self, wb: openpyxl.Workbook,
-        usd_rates: Dict[date, Decimal],
-        eur_rates: Dict[date, Decimal],
+        usd_buying_rates: Dict[date, Decimal],
+        usd_selling_rates: Dict[date, Decimal],
+        eur_buying_rates: Dict[date, Decimal],
+        eur_selling_rates: Dict[date, Decimal],
         holidays_list: List[date],
         holidays_names: Dict[date, str],
         start_date: date,
@@ -347,23 +356,21 @@ class LedgerEngine:
         """
         Creates or updates a unified "ExRate" master tab.
         
-        Non-Destructive Merge & Backfill Protocol:
-          1. Read existing rows first.
-          2. If date+rate is already correct → skip (do not rewrite).
-          3. If data is missing or incorrect → overwrite that specific row.
-          4. New dates are appended at the correct chronological position.
+        Columns: Date | USD Buying TT Rate | USD Selling Rate |
+                 EUR Buying TT Rate | EUR Selling Rate | Holidays/Weekend
         
-        Columns: Date | USD Rate | EUR Rate | Holidays/Weekend
-        
-        Holiday/Weekend Overlap Rule:
+        Holiday/Weekend Overlap Rule (semicolon separator):
           - Weekend only → "Weekend"
           - Holiday on weekday → "[Holiday Name]"
-          - Holiday on weekend → "Weekend - [Holiday Name]"
+          - Holiday on weekend → "Weekend; [Holiday Name]"
         """
         SHEET_NAME = "ExRate"
         HEADER_ROW = 1
         DATA_START_ROW = 2
-        HEADERS = ["Date", "USD Rate", "EUR Rate", "Holidays/Weekend"]
+        HEADERS = [
+            "Date", "USD Buying TT Rate", "USD Selling Rate",
+            "EUR Buying TT Rate", "EUR Selling Rate", "Holidays/Weekend"
+        ]
         
         # ── Get or create the sheet ──────────────────────────────────────
         if SHEET_NAME in wb.sheetnames:
@@ -388,18 +395,20 @@ class LedgerEngine:
         
         # Set column widths
         ws.column_dimensions["A"].width = 14
-        ws.column_dimensions["B"].width = 12
-        ws.column_dimensions["C"].width = 12
-        ws.column_dimensions["D"].width = 40
+        ws.column_dimensions["B"].width = 18
+        ws.column_dimensions["C"].width = 16
+        ws.column_dimensions["D"].width = 18
+        ws.column_dimensions["E"].width = 16
+        ws.column_dimensions["F"].width = 40
         
-        # Clear old column E if it exists (legacy "Holiday Name" remnant)
-        if ws.max_column and ws.max_column >= 5:
+        # Clear legacy columns beyond our 6-column layout
+        if ws.max_column and ws.max_column > 6:
             for row_idx in range(HEADER_ROW, (ws.max_row or 1) + 1):
-                ws.cell(row=row_idx, column=5).value = None
+                for col in range(7, ws.max_column + 1):
+                    ws.cell(row=row_idx, column=col).value = None
         
         # ── Read existing data from the sheet ────────────────────────────
         existing_data: Dict[date, dict] = {}
-        existing_row_map: Dict[date, int] = {}  # Track which row each date is on
         if ws.max_row and ws.max_row >= DATA_START_ROW:
             for row_idx in range(DATA_START_ROW, ws.max_row + 1):
                 cell_val = ws.cell(row=row_idx, column=1).value
@@ -419,13 +428,14 @@ class LedgerEngine:
                 
                 if row_date:
                     existing_data[row_date] = {
-                        "usd": ws.cell(row=row_idx, column=2).value,
-                        "eur": ws.cell(row=row_idx, column=3).value,
-                        "holidays_weekend": ws.cell(row=row_idx, column=4).value,
+                        "usd_buy": ws.cell(row=row_idx, column=2).value,
+                        "usd_sell": ws.cell(row=row_idx, column=3).value,
+                        "eur_buy": ws.cell(row=row_idx, column=4).value,
+                        "eur_sell": ws.cell(row=row_idx, column=5).value,
+                        "holidays_weekend": ws.cell(row=row_idx, column=6).value,
                     }
-                    existing_row_map[row_date] = row_idx
         
-        # ── Build ALL calendar dates (not just trading days) ─────────────
+        # ── Build ALL calendar dates ─────────────────────────────────────
         holidays_set = set(holidays_list)
         today = date.today()
         end_date = today
@@ -436,10 +446,7 @@ class LedgerEngine:
             all_dates.add(current)
             current += timedelta(days=1)
         
-        # Also include any dates from existing sheet and API data
         all_dates |= set(existing_data.keys())
-        all_dates |= set(usd_rates.keys())
-        all_dates |= set(eur_rates.keys())
         all_dates = {d for d in all_dates if d >= start_date}
         
         # ── Build the merged dataset ────────────────────────────────────
@@ -450,31 +457,35 @@ class LedgerEngine:
             is_holiday = d in holidays_set
             
             # API data takes priority; MISSING API data preserves local
-            usd_api = float(usd_rates[d]) if d in usd_rates and usd_rates[d] is not None else None
-            eur_api = float(eur_rates[d]) if d in eur_rates and eur_rates[d] is not None else None
+            ub = float(usd_buying_rates[d]) if d in usd_buying_rates and usd_buying_rates[d] is not None else None
+            us = float(usd_selling_rates[d]) if d in usd_selling_rates and usd_selling_rates[d] is not None else None
+            eb = float(eur_buying_rates[d]) if d in eur_buying_rates and eur_buying_rates[d] is not None else None
+            es = float(eur_selling_rates[d]) if d in eur_selling_rates and eur_selling_rates[d] is not None else None
             
-            merged_usd = usd_api if usd_api is not None else existing.get("usd")
-            merged_eur = eur_api if eur_api is not None else existing.get("eur")
+            merged_ub = ub if ub is not None else existing.get("usd_buy")
+            merged_us = us if us is not None else existing.get("usd_sell")
+            merged_eb = eb if eb is not None else existing.get("eur_buy")
+            merged_es = es if es is not None else existing.get("eur_sell")
             
-            # Build consolidated "Holidays/Weekend" label
+            # Build consolidated "Holidays/Weekend" label with semicolon
             holiday_label = ""
             if is_weekend and is_holiday:
                 hol_name = holidays_names.get(d, "Holiday")
-                holiday_label = f"Weekend - {hol_name}"
+                holiday_label = f"Weekend; {hol_name}"
             elif is_weekend:
                 holiday_label = "Weekend"
             elif is_holiday:
                 holiday_label = holidays_names.get(d, "Holiday")
             
             merged[d] = {
-                "usd": merged_usd,
-                "eur": merged_eur,
+                "usd_buy": merged_ub,
+                "usd_sell": merged_us,
+                "eur_buy": merged_eb,
+                "eur_sell": merged_es,
                 "holidays_weekend": holiday_label,
             }
         
-        # ── Write data using non-destructive Merge & Backfill ───────────
-        # Clear all existing data rows and rewrite in correct order
-        # (necessary to maintain chronological sort after backfill)
+        # ── Write data ───────────────────────────────────────────────────
         if ws.max_row and ws.max_row >= DATA_START_ROW:
             ws.delete_rows(DATA_START_ROW, ws.max_row - DATA_START_ROW + 1)
         
@@ -489,7 +500,6 @@ class LedgerEngine:
             entry = merged[d]
             is_weekend = d.weekday() >= 5
             is_holiday = d in holidays_set
-            label = entry["holidays_weekend"]
             
             # Date
             cell_date = ws.cell(row=current_row, column=1, value=d)
@@ -498,36 +508,49 @@ class LedgerEngine:
             cell_date.alignment = date_align
             cell_date.border = thin_border
             
-            # USD Rate
-            cell_usd = ws.cell(row=current_row, column=2, value=entry["usd"])
-            if entry["usd"] is not None:
-                cell_usd.number_format = "0.0000"
-            cell_usd.font = data_font
-            cell_usd.alignment = num_align
-            cell_usd.border = thin_border
+            # USD Buying TT Rate
+            cell_ub = ws.cell(row=current_row, column=2, value=entry["usd_buy"])
+            if entry["usd_buy"] is not None:
+                cell_ub.number_format = "0.0000"
+            cell_ub.font = data_font
+            cell_ub.alignment = num_align
+            cell_ub.border = thin_border
             
-            # EUR Rate
-            cell_eur = ws.cell(row=current_row, column=3, value=entry["eur"])
-            if entry["eur"] is not None:
-                cell_eur.number_format = "0.0000"
-            cell_eur.font = data_font
-            cell_eur.alignment = num_align
-            cell_eur.border = thin_border
+            # USD Selling Rate
+            cell_us = ws.cell(row=current_row, column=3, value=entry["usd_sell"])
+            if entry["usd_sell"] is not None:
+                cell_us.number_format = "0.0000"
+            cell_us.font = data_font
+            cell_us.alignment = num_align
+            cell_us.border = thin_border
             
-            # Holidays/Weekend (consolidated column)
-            cell_hw = ws.cell(row=current_row, column=4, value=label)
+            # EUR Buying TT Rate
+            cell_eb = ws.cell(row=current_row, column=4, value=entry["eur_buy"])
+            if entry["eur_buy"] is not None:
+                cell_eb.number_format = "0.0000"
+            cell_eb.font = data_font
+            cell_eb.alignment = num_align
+            cell_eb.border = thin_border
+            
+            # EUR Selling Rate
+            cell_es = ws.cell(row=current_row, column=5, value=entry["eur_sell"])
+            if entry["eur_sell"] is not None:
+                cell_es.number_format = "0.0000"
+            cell_es.font = data_font
+            cell_es.alignment = num_align
+            cell_es.border = thin_border
+            
+            # Holidays/Weekend
+            cell_hw = ws.cell(row=current_row, column=6, value=entry["holidays_weekend"])
             cell_hw.font = data_font
             cell_hw.border = thin_border
             
             # Row highlighting
-            if is_holiday and is_weekend:
-                for col in range(1, 5):
-                    ws.cell(row=current_row, column=col).fill = holiday_fill
-            elif is_holiday:
-                for col in range(1, 5):
+            if is_holiday:
+                for col in range(1, 7):
                     ws.cell(row=current_row, column=col).fill = holiday_fill
             elif is_weekend:
-                for col in range(1, 5):
+                for col in range(1, 7):
                     ws.cell(row=current_row, column=col).fill = weekend_fill
             
             current_row += 1
@@ -582,26 +605,26 @@ class LedgerEngine:
         # Even if no monthly sheets matched, we still fetch API data
         # for the master ExRate sheet update.
         
-        # ── Compute dynamic start date (V2.5 year-end logic) ────────────
-        if start_date is None:
-            if all_target_dates:
-                target_year = min(all_target_dates).year
-            else:
-                target_year = date.today().year
-            # We need holidays to compute year start, but we don't have them yet.
-            # Use a preliminary start date; the _preload will extend as needed.
-            start_date = f"{target_year - 1}-12-20"
-        
-        logic_engine, usd_rates, eur_rates, usd_data, eur_data = await self._preload_api_data(
-            all_target_dates, start_date=start_date
-        )
-        
-        # ── Recompute start date with actual holiday data ────────────────
+        # ── STRICT START DATE HIERARCHY ──────────────────────────────────
+        # Monthly tabs ONLY provide the target year.
+        # ExRate start date ALWAYS comes from compute_year_start_date().
         if all_target_dates:
             target_year = min(all_target_dates).year
         else:
             target_year = date.today().year
         
+        # Preliminary fetch: we need holidays to compute year-end start
+        preliminary_start = f"{target_year - 1}-12-20"
+        if start_date is None:
+            start_date = preliminary_start
+        
+        (logic_engine, usd_selling_rates, eur_selling_rates,
+         usd_buying_rates, eur_buying_rates,
+         usd_data, eur_data) = await self._preload_api_data(
+            all_target_dates, start_date=start_date
+        )
+        
+        # ── Compute STRICT start date from year-end logic ────────────────
         computed_start = self.compute_year_start_date(
             target_year, logic_engine.holidays
         )
@@ -625,7 +648,7 @@ class LedgerEngine:
 
                     try:
                         trade_date, rate = logic_engine.resolve_rate_for_currency(
-                            inv_date, ccy, usd_rates, eur_rates
+                            inv_date, ccy, usd_selling_rates, eur_selling_rates
                         )
 
                         # Write rate to the output column
@@ -649,7 +672,9 @@ class LedgerEngine:
                     pass
 
         self._update_master_exrate_sheet(
-            wb, usd_rates, eur_rates,
+            wb,
+            usd_buying_rates, usd_selling_rates,
+            eur_buying_rates, eur_selling_rates,
             list(logic_engine.holidays),
             holidays_names,
             computed_start
