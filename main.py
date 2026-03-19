@@ -9,14 +9,15 @@ ensures required directories exist, and exits with a clear error
 popup if tokens are missing.
 """
 
-import sys
 import os
+import sys
 
 # Explicitly insert current directory to Python Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tkinter as tk
 from tkinter import messagebox
+
 from dotenv import load_dotenv
 
 # Securely load API Keys to os.environ BEFORE anything else

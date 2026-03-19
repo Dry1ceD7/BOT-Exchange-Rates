@@ -3,15 +3,19 @@
 tests/test_database.py
 ---------------------------------------------------------------------------
 Unit tests for core/database.py — CacheDB thread-safe SQLite operations.
+V2.5.1: Updated to 4-column rate schema (usd_buying, usd_selling,
+        eur_buying, eur_selling).
 ---------------------------------------------------------------------------
 """
 
 import os
-import pytest
 import tempfile
 import threading
 from datetime import date
 from decimal import Decimal
+
+import pytest
+
 from core.database import CacheDB
 
 
@@ -32,20 +36,22 @@ def db():
 
 
 # =========================================================================
-#  RATES
+#  RATES (4-column schema)
 # =========================================================================
 
 class TestRates:
-    """Tests for rate CRUD operations."""
+    """Tests for rate CRUD operations with 4-column schema."""
 
     def test_insert_and_get_single_rate(self, db):
         d = date(2025, 3, 10)
-        db.insert_rate(d, usd_rate=33.5, eur_rate=36.2)
+        db.insert_rate(d, usd_buying=33.4, usd_selling=33.5,
+                       eur_buying=36.1, eur_selling=36.2)
         result = db.get_rate(d)
         assert result is not None
-        usd, eur = result
-        assert usd == Decimal("33.5")
-        assert eur == Decimal("36.2")
+        assert result["usd_buying"] == Decimal("33.4")
+        assert result["usd_selling"] == Decimal("33.5")
+        assert result["eur_buying"] == Decimal("36.1")
+        assert result["eur_selling"] == Decimal("36.2")
 
     def test_get_rate_returns_none_for_missing(self, db):
         result = db.get_rate(date(2025, 1, 1))
@@ -54,31 +60,39 @@ class TestRates:
     def test_insert_rate_upsert(self, db):
         """INSERT OR REPLACE should update existing entries."""
         d = date(2025, 3, 10)
-        db.insert_rate(d, usd_rate=33.0)
-        db.insert_rate(d, usd_rate=34.0, eur_rate=37.0)
+        db.insert_rate(d, usd_buying=33.0, usd_selling=33.1)
+        db.insert_rate(d, usd_buying=34.0, usd_selling=34.1,
+                       eur_buying=37.0, eur_selling=37.1)
         result = db.get_rate(d)
-        usd, eur = result
-        assert usd == Decimal("34.0")
-        assert eur == Decimal("37.0")
+        assert result["usd_buying"] == Decimal("34.0")
+        assert result["usd_selling"] == Decimal("34.1")
+        assert result["eur_buying"] == Decimal("37.0")
+        assert result["eur_selling"] == Decimal("37.1")
 
     def test_insert_rate_with_none_values(self, db):
         d = date(2025, 3, 10)
-        db.insert_rate(d, usd_rate=33.5, eur_rate=None)
+        db.insert_rate(d, usd_buying=33.4, usd_selling=33.5,
+                       eur_buying=None, eur_selling=None)
         result = db.get_rate(d)
-        usd, eur = result
-        assert usd == Decimal("33.5")
-        assert eur is None
+        assert result["usd_buying"] == Decimal("33.4")
+        assert result["usd_selling"] == Decimal("33.5")
+        assert result["eur_buying"] is None
+        assert result["eur_selling"] is None
 
     def test_bulk_insert_and_retrieve(self, db):
         entries = [
-            ("2025-03-10", 33.5, 36.2),
-            ("2025-03-11", 33.6, 36.3),
-            ("2025-03-12", 33.7, 36.4),
+            ("2025-03-10", 33.4, 33.5, 36.1, 36.2),
+            ("2025-03-11", 33.5, 33.6, 36.2, 36.3),
+            ("2025-03-12", 33.6, 33.7, 36.3, 36.4),
         ]
         db.insert_rates_bulk(entries)
         result = db.get_rates_bulk(date(2025, 3, 10), date(2025, 3, 12))
         assert len(result) == 3
-        assert result[date(2025, 3, 11)] == (Decimal("33.6"), Decimal("36.3"))
+        row = result[date(2025, 3, 11)]
+        assert row["usd_buying"] == Decimal("33.5")
+        assert row["usd_selling"] == Decimal("33.6")
+        assert row["eur_buying"] == Decimal("36.2")
+        assert row["eur_selling"] == Decimal("36.3")
 
     def test_bulk_insert_empty_list(self, db):
         db.insert_rates_bulk([])  # Should not raise
@@ -132,7 +146,8 @@ class TestStats:
         assert stats["size_kb"] >= 0
 
     def test_stats_after_inserts(self, db):
-        db.insert_rate(date(2025, 1, 1), 33.0, 36.0)
+        db.insert_rate(date(2025, 1, 1), usd_buying=33.0, usd_selling=33.1,
+                       eur_buying=36.0, eur_selling=36.1)
         db.insert_holidays([("2025-01-01", "NY")])
         stats = db.get_stats()
         assert stats["rates"] == 1
@@ -154,7 +169,8 @@ class TestThreadSafety:
             try:
                 for i in range(10):
                     d = date(2025, 3, start_day)
-                    db.insert_rate(d, usd_rate=33.0 + i * 0.01)
+                    db.insert_rate(d, usd_buying=33.0 + i * 0.01,
+                                   usd_selling=33.1 + i * 0.01)
             except Exception as e:
                 errors.append(str(e))
 
@@ -168,7 +184,8 @@ class TestThreadSafety:
 
     def test_concurrent_read_write(self, db):
         """Reading while writing should not raise."""
-        db.insert_rate(date(2025, 1, 1), 33.0, 36.0)
+        db.insert_rate(date(2025, 1, 1), usd_buying=33.0, usd_selling=33.1,
+                       eur_buying=36.0, eur_selling=36.1)
         errors = []
 
         def reader():
@@ -181,7 +198,9 @@ class TestThreadSafety:
         def writer():
             try:
                 for i in range(50):
-                    db.insert_rate(date(2025, 1, 1), 33.0 + i * 0.001)
+                    db.insert_rate(date(2025, 1, 1),
+                                   usd_buying=33.0 + i * 0.001,
+                                   usd_selling=33.1 + i * 0.001)
             except Exception as e:
                 errors.append(str(e))
 

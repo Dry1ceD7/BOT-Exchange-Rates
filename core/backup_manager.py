@@ -9,9 +9,9 @@ Protects against file corruption during in-place editing with automatic
 garbage collection for legacy hardware.
 """
 
+import glob
 import os
 import shutil
-import glob
 from datetime import datetime, timedelta
 
 

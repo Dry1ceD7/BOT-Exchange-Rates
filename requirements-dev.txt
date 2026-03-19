@@ -1,0 +1,5 @@
+# Development dependencies for BOT Exchange Rate Processor
+# Install: pip install -r requirements-dev.txt
+
+ruff>=0.15.0
+pytest>=9.0.0

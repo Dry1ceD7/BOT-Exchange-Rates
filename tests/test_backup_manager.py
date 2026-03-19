@@ -7,11 +7,13 @@ Unit tests for core/backup_manager.py — BackupManager lifecycle operations.
 """
 
 import os
-import time
-import pytest
-import tempfile
 import shutil
-from core.backup_manager import BackupManager, BackupError
+import tempfile
+import time
+
+import pytest
+
+from core.backup_manager import BackupError, BackupManager
 
 
 @pytest.fixture

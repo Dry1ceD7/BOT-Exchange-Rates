@@ -16,8 +16,8 @@ import os
 import sqlite3
 import threading
 from datetime import date, datetime
-from typing import Optional, Tuple, List, Dict
 from decimal import Decimal
+from typing import Dict, List, Optional, Tuple
 
 
 class CacheDB:
@@ -63,21 +63,35 @@ class CacheDB:
         """
         Auto-migrate from old 2-column schema to new 4-column schema.
         If old columns (usd_rate, eur_rate) exist, add new columns and
-        copy data to the selling columns (which is what the old schema stored).
+        copy data: selling gets the old rate, buying also gets it as
+        best-available fallback for historical data.
         """
         with self._lock:
             cursor = self._conn.execute("PRAGMA table_info(rates)")
             columns = [row[1] for row in cursor.fetchall()]
 
             if "usd_rate" in columns and "usd_buying" not in columns:
-                # Old schema detected — migrate
+                # Old schema detected — migrate (add new columns)
                 self._conn.executescript("""
                     ALTER TABLE rates ADD COLUMN usd_buying REAL;
                     ALTER TABLE rates ADD COLUMN usd_selling REAL;
                     ALTER TABLE rates ADD COLUMN eur_buying REAL;
                     ALTER TABLE rates ADD COLUMN eur_selling REAL;
 
-                    UPDATE rates SET usd_selling = usd_rate, eur_selling = eur_rate;
+                    UPDATE rates SET
+                        usd_buying  = usd_rate,
+                        usd_selling = usd_rate,
+                        eur_buying  = eur_rate,
+                        eur_selling = eur_rate;
+                """)
+                self._conn.commit()
+            elif "usd_rate" in columns and "usd_buying" in columns:
+                # Migration ran before but didn't backfill buying — fix it
+                self._conn.execute("""
+                    UPDATE rates SET
+                        usd_buying  = COALESCE(usd_buying, usd_selling, usd_rate),
+                        eur_buying  = COALESCE(eur_buying, eur_selling, eur_rate)
+                    WHERE usd_buying IS NULL OR eur_buying IS NULL
                 """)
                 self._conn.commit()
 

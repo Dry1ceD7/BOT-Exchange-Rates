@@ -8,13 +8,14 @@ Handles asynchronous communication with the Bank of Thailand (BOT) API.
 Enforces strict JSON schema validation via Pydantic v2.
 """
 
-import os
-import httpx
 import asyncio
+import os
 from datetime import date, timedelta
 from typing import List, Optional
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+import httpx
 from pydantic import BaseModel, Field, ValidationError
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 # -------------------------------------------------------------------------
 # PYDANTIC v2 SCHEMAS
@@ -66,10 +67,10 @@ class BOTClient:
         self.client = client
         self.token_exg = os.environ.get("BOT_TOKEN_EXG")
         self.token_hol = os.environ.get("BOT_TOKEN_HOL")
-        
+
         if not self.token_exg or not self.token_hol:
             raise BOTAPIError("Missing BOT API tokens.")
-            
+
         self.gateway = "https://gateway.api.bot.or.th"
         self.exg_path = "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
         self.hol_path = "/financial-institutions-holidays/"

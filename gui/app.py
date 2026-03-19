@@ -15,22 +15,19 @@ Features:
  - Professional centered financial accounting theme
 """
 
-import os
-import re
-import asyncio
-import threading
-import subprocess
-import platform
 import logging
-import customtkinter as ctk
-from tkinter import filedialog, messagebox
+import os
+import platform
+import re
+import subprocess
 from datetime import date, datetime
+from tkinter import filedialog, messagebox
 from typing import List, Optional
-import httpx
 
-from core.api_client import BOTClient, BOTAPIError
-from core.engine import LedgerEngine, FileSizeLimitError, MissingColumnError
-from core.backup_manager import BackupManager, BackupError
+import customtkinter as ctk
+
+from core.backup_manager import BackupManager
+from gui.handlers import BatchHandler
 
 ctk.set_appearance_mode("light")
 logger = logging.getLogger(__name__)
@@ -63,10 +60,10 @@ COLOR_PROCESS_TEXT   = "#2563EB"
 # ── Attempt tkinterdnd2 ──────────────────────────────────────────────────
 HAS_DND = False
 try:
-    from tkinterdnd2 import TkinterDnD, DND_FILES
+    from tkinterdnd2 import DND_FILES, TkinterDnD
     HAS_DND = True
-except Exception:
-    pass
+except Exception as e:
+    logger.debug("tkinterdnd2 not available: %s", e)
 
 
 def parse_drop_data(raw: str, tk_root=None) -> List[str]:
@@ -75,8 +72,8 @@ def parse_drop_data(raw: str, tk_root=None) -> List[str]:
     if tk_root is not None:
         try:
             return list(tk_root.tk.splitlist(raw))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Tcl splitlist failed: %s", e)
     # Fallback: regex parser
     results = []
     for match in re.finditer(r'\{([^}]+)\}|(\S+)', raw):
@@ -126,6 +123,7 @@ class BOTExrateApp(ctk.CTk):
         self.file_queue: List[str] = []
         self.last_processed_path: Optional[str] = None
         self.backup_mgr = BackupManager()
+        self.batch_handler = BatchHandler(self) # Initialize BatchHandler here
 
         # Center window
         self.update_idletasks()
@@ -140,8 +138,8 @@ class BOTExrateApp(ctk.CTk):
             try:
                 TkinterDnD._require(self)
                 self.dnd_enabled = True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("DnD init failed: %s", e)
 
         self._build_header()
         self._build_card()
@@ -302,8 +300,8 @@ class BOTExrateApp(ctk.CTk):
                     try:
                         child.drop_target_register(DND_FILES)
                         child.dnd_bind("<<Drop>>", self._on_drop)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("DnD bind failed for child widget: %s", e)
             except Exception as e:
                 logger.warning(f"DnD registration failed: {e}")
                 self.dnd_enabled = False
@@ -496,12 +494,12 @@ class BOTExrateApp(ctk.CTk):
         is_auto = self.auto_detect_var.get() == "on"
 
         if is_auto:
-            # ── V2.4: Smart Date Auto-Detection ──────────────────────────
+            # ── V2.4: Smart Date Auto-Detection ──────────────────────
             self.lbl_status.configure(
                 text=f"Scanning {total} ledger{'s' if total != 1 else ''} for date range...",
                 text_color=COLOR_PROCESS_TEXT
             )
-            self.update_idletasks()  # Force UI refresh before blocking scan
+            self.update_idletasks()
 
             from core.engine import LedgerEngine
             oldest_date, was_detected = LedgerEngine.prescan_oldest_date(self.file_queue)
@@ -526,7 +524,7 @@ class BOTExrateApp(ctk.CTk):
                     text_color=COLOR_WARNING
                 )
         else:
-            # ── Manual mode ──────────────────────────────────────────────
+            # ── Manual mode ──────────────────────────────────────────
             start_date_str = self._assemble_start_date()
             if start_date_str is None:
                 self.btn_process.configure(state="normal")
@@ -537,31 +535,7 @@ class BOTExrateApp(ctk.CTk):
                 text_color=COLOR_PROCESS_TEXT
             )
 
-        threading.Thread(
-            target=self._batch_thread, args=(start_date_str,), daemon=True
-        ).start()
-
-    def _batch_thread(self, start_date: str):
-        try:
-            asyncio.run(self._run_batch(start_date))
-        except (httpx.ConnectError, httpx.TimeoutException) as e:
-            self.after(0, self._show_error,
-                       "Network error — please check your internet connection.")
-        except Exception as e:
-            self.after(0, self._show_error, str(e))
-
-    async def _run_batch(self, start_date: str):
-        async with httpx.AsyncClient() as client:
-            api = BOTClient(client)
-            engine = LedgerEngine(api)
-
-            def progress_cb(idx, total, fname, error):
-                self.after(0, self._update_progress, idx, total, fname, error)
-
-            success, fail, errors = await engine.process_batch(
-                self.file_queue, start_date=start_date, progress_cb=progress_cb
-            )
-            self.after(0, self._show_batch_complete, success, fail, errors)
+        self.batch_handler.start_batch(self.file_queue, start_date_str)
 
     def _update_progress(self, idx: int, total: int, fname: str, error):
         self.progressbar.set(idx / total)
@@ -621,19 +595,9 @@ class BOTExrateApp(ctk.CTk):
         self.progressbar.configure(mode="indeterminate")
         self.progressbar.start()
 
-        threading.Thread(
-            target=self._revert_thread, args=(path,), daemon=True
-        ).start()
+        self.batch_handler.start_revert(path)
 
-    def _revert_thread(self, filepath: str):
-        try:
-            backup_used = self.backup_mgr.restore_latest(filepath)
-            backup_name = os.path.basename(backup_used)
-            self.after(0, self._show_revert_success, filepath, backup_name)
-        except BackupError as e:
-            self.after(0, self._show_revert_error, str(e))
-        except Exception as e:
-            self.after(0, self._show_revert_error, str(e))
+
 
     def _show_revert_success(self, filepath: str, backup_name: str):
         self.progressbar.stop()
@@ -671,7 +635,8 @@ class BOTExrateApp(ctk.CTk):
                 subprocess.Popen(["explorer", "/select,", os.path.normpath(fp)])
             else:
                 subprocess.Popen(["xdg-open", os.path.dirname(fp)])
-        except Exception:
+        except Exception as e:
+            logger.debug("File manager open failed: %s", e)
             self.lbl_status.configure(
                 text="Could not open file manager.", text_color=COLOR_WARNING
             )
