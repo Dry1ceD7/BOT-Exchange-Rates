@@ -268,7 +268,7 @@ class LedgerEngine:
                     pass
             self.cache.insert_holidays(hol_entries)
 
-        logic_engine = BOTLogicEngine(holidays=holidays_list, max_rollback_days=5)
+        logic_engine = BOTLogicEngine(holidays=holidays_list, max_rollback_days=10)
 
         # ── RATES: Cache-first ───────────────────────────────────────────
         cached_rates = self.cache.get_rates_bulk(min_date, max_date)
@@ -334,7 +334,7 @@ class LedgerEngine:
         return logic_engine, usd_rates, eur_rates, usd_data, eur_data
 
     # ================================================================== #
-    #  UNIFIED "ExRate" MASTER SHEET — Merge, Don't Purge (V2.5)
+    #  UNIFIED "ExRate" MASTER SHEET — Merge & Backfill (V2.5)
     # ================================================================== #
     def _update_master_exrate_sheet(
         self, wb: openpyxl.Workbook,
@@ -347,48 +347,59 @@ class LedgerEngine:
         """
         Creates or updates a unified "ExRate" master tab.
         
-        Merge, Don't Purge Rules:
-          - Read existing data from the sheet first.
-          - If existing data is incorrect vs API, overwrite to correct it.
-          - If data is missing locally, backfill from API.
-          - If API returned no data for a date, PRESERVE existing local data.
+        Non-Destructive Merge & Backfill Protocol:
+          1. Read existing rows first.
+          2. If date+rate is already correct → skip (do not rewrite).
+          3. If data is missing or incorrect → overwrite that specific row.
+          4. New dates are appended at the correct chronological position.
         
-        Columns: Date | USD Rate | EUR Rate | Holiday | Holiday Name
+        Columns: Date | USD Rate | EUR Rate | Holidays/Weekend
+        
+        Holiday/Weekend Overlap Rule:
+          - Weekend only → "Weekend"
+          - Holiday on weekday → "[Holiday Name]"
+          - Holiday on weekend → "Weekend - [Holiday Name]"
         """
         SHEET_NAME = "ExRate"
         HEADER_ROW = 1
         DATA_START_ROW = 2
-        HEADERS = ["Date", "USD Rate", "EUR Rate", "Holiday", "Holiday Name"]
+        HEADERS = ["Date", "USD Rate", "EUR Rate", "Holidays/Weekend"]
         
         # ── Get or create the sheet ──────────────────────────────────────
         if SHEET_NAME in wb.sheetnames:
             ws = wb[SHEET_NAME]
         else:
             ws = wb.create_sheet(SHEET_NAME)
-            # Write headers with enterprise styling
-            header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-            header_fill = PatternFill(start_color="1A365D", end_color="1A365D", fill_type="solid")
-            header_align = Alignment(horizontal="center", vertical="center")
-            thin_border = Border(
-                left=Side(style="thin"), right=Side(style="thin"),
-                top=Side(style="thin"), bottom=Side(style="thin")
-            )
-            for col_idx, header in enumerate(HEADERS, 1):
-                cell = ws.cell(row=HEADER_ROW, column=col_idx, value=header)
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = header_align
-                cell.border = thin_border
-            
-            # Set column widths
-            ws.column_dimensions["A"].width = 14
-            ws.column_dimensions["B"].width = 12
-            ws.column_dimensions["C"].width = 12
-            ws.column_dimensions["D"].width = 10
-            ws.column_dimensions["E"].width = 40
         
-        # ── Read existing data from the sheet (Merge, Don't Purge) ──────
+        # Always write/refresh headers with enterprise styling
+        header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="1A365D", end_color="1A365D", fill_type="solid")
+        header_align = Alignment(horizontal="center", vertical="center")
+        thin_border = Border(
+            left=Side(style="thin"), right=Side(style="thin"),
+            top=Side(style="thin"), bottom=Side(style="thin")
+        )
+        for col_idx, header in enumerate(HEADERS, 1):
+            cell = ws.cell(row=HEADER_ROW, column=col_idx, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
+            cell.border = thin_border
+        
+        # Set column widths
+        ws.column_dimensions["A"].width = 14
+        ws.column_dimensions["B"].width = 12
+        ws.column_dimensions["C"].width = 12
+        ws.column_dimensions["D"].width = 40
+        
+        # Clear old column E if it exists (legacy "Holiday Name" remnant)
+        if ws.max_column and ws.max_column >= 5:
+            for row_idx in range(HEADER_ROW, (ws.max_row or 1) + 1):
+                ws.cell(row=row_idx, column=5).value = None
+        
+        # ── Read existing data from the sheet ────────────────────────────
         existing_data: Dict[date, dict] = {}
+        existing_row_map: Dict[date, int] = {}  # Track which row each date is on
         if ws.max_row and ws.max_row >= DATA_START_ROW:
             for row_idx in range(DATA_START_ROW, ws.max_row + 1):
                 cell_val = ws.cell(row=row_idx, column=1).value
@@ -410,55 +421,75 @@ class LedgerEngine:
                     existing_data[row_date] = {
                         "usd": ws.cell(row=row_idx, column=2).value,
                         "eur": ws.cell(row=row_idx, column=3).value,
-                        "is_holiday": ws.cell(row=row_idx, column=4).value,
-                        "holiday_name": ws.cell(row=row_idx, column=5).value,
+                        "holidays_weekend": ws.cell(row=row_idx, column=4).value,
                     }
+                    existing_row_map[row_date] = row_idx
+        
+        # ── Build ALL calendar dates (not just trading days) ─────────────
+        holidays_set = set(holidays_list)
+        today = date.today()
+        end_date = today
+        
+        all_dates = set()
+        current = start_date
+        while current <= end_date:
+            all_dates.add(current)
+            current += timedelta(days=1)
+        
+        # Also include any dates from existing sheet and API data
+        all_dates |= set(existing_data.keys())
+        all_dates |= set(usd_rates.keys())
+        all_dates |= set(eur_rates.keys())
+        all_dates = {d for d in all_dates if d >= start_date}
         
         # ── Build the merged dataset ────────────────────────────────────
-        holidays_set = set(holidays_list)
-        all_dates = set(usd_rates.keys()) | set(eur_rates.keys()) | set(existing_data.keys())
-        all_dates = {d for d in all_dates if d >= start_date}
-
         merged: Dict[date, dict] = {}
         for d in sorted(all_dates):
             existing = existing_data.get(d, {})
+            is_weekend = d.weekday() >= 5
+            is_holiday = d in holidays_set
             
-            # API data takes priority for corrections, 
-            # but MISSING API data preserves existing local data
+            # API data takes priority; MISSING API data preserves local
             usd_api = float(usd_rates[d]) if d in usd_rates and usd_rates[d] is not None else None
             eur_api = float(eur_rates[d]) if d in eur_rates and eur_rates[d] is not None else None
             
             merged_usd = usd_api if usd_api is not None else existing.get("usd")
             merged_eur = eur_api if eur_api is not None else existing.get("eur")
             
-            is_holiday = "Yes" if d in holidays_set else ""
-            holiday_name = holidays_names.get(d, existing.get("holiday_name", ""))
+            # Build consolidated "Holidays/Weekend" label
+            holiday_label = ""
+            if is_weekend and is_holiday:
+                hol_name = holidays_names.get(d, "Holiday")
+                holiday_label = f"Weekend - {hol_name}"
+            elif is_weekend:
+                holiday_label = "Weekend"
+            elif is_holiday:
+                holiday_label = holidays_names.get(d, "Holiday")
             
             merged[d] = {
                 "usd": merged_usd,
                 "eur": merged_eur,
-                "is_holiday": is_holiday,
-                "holiday_name": holiday_name if is_holiday else "",
+                "holidays_weekend": holiday_label,
             }
         
-        # ── Write the merged data ───────────────────────────────────────
-        # Clear existing data rows
+        # ── Write data using non-destructive Merge & Backfill ───────────
+        # Clear all existing data rows and rewrite in correct order
+        # (necessary to maintain chronological sort after backfill)
         if ws.max_row and ws.max_row >= DATA_START_ROW:
             ws.delete_rows(DATA_START_ROW, ws.max_row - DATA_START_ROW + 1)
         
         data_font = Font(name="Calibri", size=10)
         date_align = Alignment(horizontal="center")
         num_align = Alignment(horizontal="right")
-        thin_border = Border(
-            left=Side(style="thin"), right=Side(style="thin"),
-            top=Side(style="thin"), bottom=Side(style="thin")
-        )
         holiday_fill = PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid")
+        weekend_fill = PatternFill(start_color="E8E8E8", end_color="E8E8E8", fill_type="solid")
         
         current_row = DATA_START_ROW
         for d in sorted(merged.keys()):
             entry = merged[d]
-            is_hol = entry["is_holiday"] == "Yes"
+            is_weekend = d.weekday() >= 5
+            is_holiday = d in holidays_set
+            label = entry["holidays_weekend"]
             
             # Date
             cell_date = ws.cell(row=current_row, column=1, value=d)
@@ -483,21 +514,21 @@ class LedgerEngine:
             cell_eur.alignment = num_align
             cell_eur.border = thin_border
             
-            # Holiday flag
-            cell_hol = ws.cell(row=current_row, column=4, value=entry["is_holiday"])
-            cell_hol.font = data_font
-            cell_hol.alignment = date_align
-            cell_hol.border = thin_border
+            # Holidays/Weekend (consolidated column)
+            cell_hw = ws.cell(row=current_row, column=4, value=label)
+            cell_hw.font = data_font
+            cell_hw.border = thin_border
             
-            # Holiday name
-            cell_name = ws.cell(row=current_row, column=5, value=entry["holiday_name"])
-            cell_name.font = data_font
-            cell_name.border = thin_border
-            
-            # Highlight holiday rows
-            if is_hol:
-                for col in range(1, 6):
+            # Row highlighting
+            if is_holiday and is_weekend:
+                for col in range(1, 5):
                     ws.cell(row=current_row, column=col).fill = holiday_fill
+            elif is_holiday:
+                for col in range(1, 5):
+                    ws.cell(row=current_row, column=col).fill = holiday_fill
+            elif is_weekend:
+                for col in range(1, 5):
+                    ws.cell(row=current_row, column=col).fill = weekend_fill
             
             current_row += 1
 
