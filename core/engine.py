@@ -428,7 +428,7 @@ class LedgerEngine:
                         cell.font = exrate_font
                     continue
                 try:
-                    trade_date, _ = logic_engine.resolve_rate(
+                    trade_date, usd_rate, eur_rate = logic_engine.resolve_rate(
                         inv_date, usd_buying, eur_buying
                     )
                 except RateNotFoundError:
@@ -439,12 +439,12 @@ class LedgerEngine:
                         cell.value = None
                         cell.font = exrate_font
                     continue
-                exrate_row = exrate_index.get(trade_date, {})
+                # Use the resolved buying rate directly based on currency
                 rate = None
                 if ccy == "USD":
-                    rate = exrate_row.get("usd_buying")
+                    rate = usd_rate
                 elif ccy == "EUR":
-                    rate = exrate_row.get("eur_buying")
+                    rate = eur_rate
                 if out_rate_idx is not None:
                     cell = ws.cell(row=row_idx, column=out_rate_idx + 1)
                     cell.value = float(rate) if rate is not None else None
