@@ -629,38 +629,9 @@ class LedgerEngine:
             target_year, logic_engine.holidays
         )
 
-        # ── Process monthly tabs with standard date + currency routing ──
-        for sheet_name, mapping in sheet_maps.items():
-            ws = wb[sheet_name]
-            cols = mapping["columns"]
-            src_idx = cols["source"] + 1
-            cur_idx = cols.get("currency")
-            out_rate_idx = cols.get("out_rate")
-
-            for row_idx in range(mapping["header_row"] + 1, ws.max_row + 1):
-                inv_date = self._parse_date(ws.cell(row=row_idx, column=src_idx).value)
-                if inv_date:
-                    # Read currency from the "Cur" column
-                    ccy = ""
-                    if cur_idx is not None:
-                        raw_ccy = ws.cell(row=row_idx, column=cur_idx + 1).value
-                        ccy = str(raw_ccy).strip().upper() if raw_ccy else ""
-
-                    try:
-                        trade_date, rate = logic_engine.resolve_rate_for_currency(
-                            inv_date, ccy, usd_selling_rates, eur_selling_rates
-                        )
-
-                        # Write rate to the output column
-                        if out_rate_idx is not None and rate is not None:
-                            ws.cell(row=row_idx, column=out_rate_idx + 1).value = float(rate)
-
-                    except RateNotFoundError:
-                        if out_rate_idx is not None:
-                            ws.cell(row=row_idx, column=out_rate_idx + 1).value = "<ERROR: No Rate>"
-
-        # ── Update unified ExRate master sheet ───────────────────────────
-        # Build holiday names dict for the master sheet
+        # ── STEP 1: Build ExRate master sheet FIRST ──────────────────────
+        # The ExRate tab is the master database. It must be fully populated
+        # before any monthly tab can read from it.
         holidays_names: Dict[date, str] = {}
         for year in set(d.year for d in (all_target_dates | {computed_start, date.today()})):
             cached_hols = self.cache.get_holidays(year)
@@ -679,6 +650,80 @@ class LedgerEngine:
             holidays_names,
             computed_start
         )
+
+        # ── STEP 2: Build in-memory ExRate lookup index ──────────────────
+        # This index is the VLOOKUP source for all monthly tabs.
+        # Monthly tabs must NOT fetch from the API; they query this index.
+        # Maps: date → {"usd_buying": float, "eur_buying": float, ...}
+        exrate_index: Dict[date, dict] = {}
+        if "ExRate" in wb.sheetnames:
+            ws_exrate = wb["ExRate"]
+            for row_idx in range(2, (ws_exrate.max_row or 1) + 1):
+                cell_val = ws_exrate.cell(row=row_idx, column=1).value
+                row_date = None
+                if isinstance(cell_val, datetime):
+                    row_date = cell_val.date()
+                elif isinstance(cell_val, date):
+                    row_date = cell_val
+                if row_date:
+                    exrate_index[row_date] = {
+                        "usd_buying": ws_exrate.cell(row=row_idx, column=2).value,
+                        "usd_selling": ws_exrate.cell(row=row_idx, column=3).value,
+                        "eur_buying": ws_exrate.cell(row=row_idx, column=4).value,
+                        "eur_selling": ws_exrate.cell(row=row_idx, column=5).value,
+                    }
+
+        # ── STEP 3: Process monthly tabs via cross-tab VLOOKUP ───────────
+        # Each row reads its date, resolves to the nearest trading day,
+        # then looks up the Buying TT Rate from the ExRate index.
+        for sheet_name, mapping in sheet_maps.items():
+            ws = wb[sheet_name]
+            cols = mapping["columns"]
+            src_idx = cols["source"] + 1
+            cur_idx = cols.get("currency")
+            out_rate_idx = cols.get("out_rate")
+
+            for row_idx in range(mapping["header_row"] + 1, ws.max_row + 1):
+                inv_date = self._parse_date(ws.cell(row=row_idx, column=src_idx).value)
+                if inv_date:
+                    # Read currency from the "Cur" column
+                    ccy = ""
+                    if cur_idx is not None:
+                        raw_ccy = ws.cell(row=row_idx, column=cur_idx + 1).value
+                        ccy = str(raw_ccy).strip().upper() if raw_ccy else ""
+
+                    # THB bypass: always write 1
+                    if ccy == "THB":
+                        if out_rate_idx is not None:
+                            ws.cell(row=row_idx, column=out_rate_idx + 1).value = 1
+                        continue
+
+                    # Resolve to nearest trading day (weekend/holiday rollback)
+                    try:
+                        trade_date, _ = logic_engine.resolve_rate(
+                            inv_date, usd_selling_rates, eur_selling_rates
+                        )
+                    except RateNotFoundError:
+                        if out_rate_idx is not None:
+                            ws.cell(row=row_idx, column=out_rate_idx + 1).value = "<ERROR: No Rate>"
+                        continue
+
+                    # VLOOKUP: query ExRate index by resolved trade_date
+                    exrate_row = exrate_index.get(trade_date, {})
+
+                    # Currency matching → Buying TT Rate
+                    rate = None
+                    if ccy == "USD":
+                        rate = exrate_row.get("usd_buying")
+                    elif ccy == "EUR":
+                        rate = exrate_row.get("eur_buying")
+
+                    # Write the looked-up rate to the output column
+                    if out_rate_idx is not None:
+                        if rate is not None:
+                            ws.cell(row=row_idx, column=out_rate_idx + 1).value = float(rate)
+                        else:
+                            ws.cell(row=row_idx, column=out_rate_idx + 1).value = "<ERROR: No Rate>"
 
         wb.save(filepath)
         wb.close()
