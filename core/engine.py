@@ -19,13 +19,12 @@ from decimal import Decimal
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import openpyxl
-from openpyxl.styles import Font
 
 from core.api_client import BOTClient
 from core.backup_manager import BackupError, BackupManager
 from core.database import CacheDB
 from core.exrate_sheet import update_master_exrate_sheet
-from core.logic import BOTLogicEngine, RateNotFoundError, safe_to_decimal
+from core.logic import BOTLogicEngine, safe_to_decimal
 from core.prescan import prescan_oldest_date
 from core.xls_converter import convert_xls_to_xlsx
 
@@ -68,7 +67,9 @@ def _get_cache() -> CacheDB:
 
 
 # Sheets that are reference/master and should NOT be processed as ledgers
-SKIP_SHEET_NAMES = {"ExRate", "Exrate USD", "Exrate EUR"}
+# Only the master ExRate tab is skipped — old "Exrate USD"/"Exrate EUR" tabs
+# are fully deprecated and no longer referenced anywhere in the codebase.
+SKIP_SHEET_NAMES = {"ExRate"}
 
 
 # -------------------------------------------------------------------------
@@ -86,7 +87,6 @@ class LedgerEngine:
         self.cache = _get_cache()
         self.target_cols = {
             "source_date": "Date",
-            "out_date": "Date",
             "currency": "Cur",
             "out_rate": "EX Rate",
         }
@@ -147,11 +147,51 @@ class LedgerEngine:
             check_date -= timedelta(days=1)
         return date(prev_year, 12, 20)
 
+    # ── Cross-tab VLOOKUP with rollback ───────────────────────────
+    @staticmethod
+    def _vlookup_exrate(
+        target_date: date,
+        currency: str,
+        exrate_index: Dict[date, dict],
+        max_rollback: int = 10,
+    ) -> Optional[float]:
+        """
+        Cross-tab VLOOKUP: look up Buying TT Rate in the ExRate index.
+
+        Walks backwards from target_date until a valid trading day
+        with non-None rate data is found (skips weekends/holidays).
+
+        Args:
+            target_date: The date from the monthly tab's "Date" column.
+            currency: The value from the "Cur" column ("USD" or "EUR").
+            exrate_index: The in-memory index built from the ExRate tab.
+            max_rollback: Safety guardrail for max backwards steps.
+
+        Returns:
+            The Buying TT rate as a float, or None if not resolvable.
+        """
+        rate_key = {
+            "USD": "usd_buying",
+            "EUR": "eur_buying",
+        }.get(currency)
+        if rate_key is None:
+            return None
+
+        current = target_date
+        for _ in range(max_rollback + 1):
+            entry = exrate_index.get(current)
+            if entry is not None:
+                val = entry.get(rate_key)
+                if val is not None:
+                    return float(val) if not isinstance(val, float) else val
+            current -= timedelta(days=1)
+        return None
+
     # ================================================================== #
     #  CACHE-FIRST DATA LOADING (v2.5.4)
     # ================================================================== #
     async def _preload_api_data(
-        self, dates: Set[date], start_date: str = "2025-01-01"
+        self, dates: Set[date], start_date: str
     ) -> Tuple:
         """
         Cache-First Architecture: SQLite → API fallback → cache store.
@@ -401,15 +441,16 @@ class LedgerEngine:
                         ).value,
                     }
 
-        # ── STEP 3: Process monthly tabs via cross-tab VLOOKUP ───────
-        exrate_font = Font(name="Calibri", size=10, color="C0392B")
+        # ── STEP 3: Cross-Tab VLOOKUP — ExRate is single source of truth ──
         for sheet_name, mapping in sheet_maps.items():
             ws = wb[sheet_name]
             cols = mapping["columns"]
             src_idx = cols["source"] + 1
             cur_idx = cols.get("currency")
             out_rate_idx = cols.get("out_rate")
-            for row_idx in range(mapping["header_row"] + 1, ws.max_row + 1):
+            for row_idx in range(
+                mapping["header_row"] + 1, ws.max_row + 1
+            ):
                 inv_date = self._parse_date(
                     ws.cell(row=row_idx, column=src_idx).value
                 )
@@ -417,38 +458,24 @@ class LedgerEngine:
                     continue
                 ccy = ""
                 if cur_idx is not None:
-                    raw = ws.cell(row=row_idx, column=cur_idx + 1).value
+                    raw = ws.cell(
+                        row=row_idx, column=cur_idx + 1
+                    ).value
                     ccy = str(raw).strip().upper() if raw else ""
                 if ccy == "THB":
                     if out_rate_idx is not None:
-                        cell = ws.cell(
+                        ws.cell(
                             row=row_idx, column=out_rate_idx + 1
-                        )
-                        cell.value = 1
-                        cell.font = exrate_font
+                        ).value = 1
                     continue
-                try:
-                    trade_date, usd_rate, eur_rate = logic_engine.resolve_rate(
-                        inv_date, usd_buying, eur_buying
-                    )
-                except RateNotFoundError:
-                    if out_rate_idx is not None:
-                        cell = ws.cell(
-                            row=row_idx, column=out_rate_idx + 1
-                        )
-                        cell.value = None
-                        cell.font = exrate_font
-                    continue
-                # Use the resolved buying rate directly based on currency
-                rate = None
-                if ccy == "USD":
-                    rate = usd_rate
-                elif ccy == "EUR":
-                    rate = eur_rate
+                # Cross-tab lookup: walk backwards in ExRate index
+                rate = self._vlookup_exrate(
+                    inv_date, ccy, exrate_index,
+                )
                 if out_rate_idx is not None:
-                    cell = ws.cell(row=row_idx, column=out_rate_idx + 1)
-                    cell.value = float(rate) if rate is not None else None
-                    cell.font = exrate_font
+                    ws.cell(
+                        row=row_idx, column=out_rate_idx + 1
+                    ).value = rate
 
         # ── Save & Cleanup ───────────────────────────────────────────
         wb.save(filepath)
