@@ -5,8 +5,8 @@ core/engine.py
 BOT Exchange Rate Processor (v2.5.0) - Cache-First + Singleton Architecture
 ---------------------------------------------------------------------------
 V2.5.0 Changes:
-  - T-1 retraction via resolve_rate_for_currency()
-  - Source column changed to "วันที่ดึง Exchange rate date"
+  - Standard date resolution via resolve_rate_for_currency()
+  - Source column: "Date"
   - THB rows → write 1 (no API lookup)
   - Unified "ExRate" master tab with "Merge, Don't Purge" resilience
   - Legacy "Exrate USD" / "Exrate EUR" tabs no longer updated
@@ -82,8 +82,8 @@ class LedgerEngine:
         self.backup = _get_backup()
         self.cache = _get_cache()
         self.target_cols = {
-            "source_date": "วันที่ดึง Exchange rate date",
-            "out_date": "วันที่ดึง Exchange rate date",
+            "source_date": "Date",
+            "out_date": "Date",
             "currency": "Cur",
             "out_rate": "EX Rate"
         }
@@ -114,13 +114,13 @@ class LedgerEngine:
     @staticmethod
     def prescan_oldest_date(
         filepaths: List[str],
-        target_col_name: str = "วันที่ดึง Exchange rate date",
+        target_col_name: str = "Date",
     ) -> Tuple[date, bool]:
         """
         Pre-scans queued .xlsx files in read-only mode to find the absolute
         oldest date in the source column. This eliminates manual date entry.
 
-        V2.5: Now reads from "วันที่ดึง Exchange rate date" column.
+        V2.5: Reads from the "Date" column.
 
         Returns:
             Tuple of (oldest_date, was_detected).
@@ -506,9 +506,9 @@ class LedgerEngine:
     # ================================================================== #
     async def process_ledger(self, filepath: str, start_date: str = None) -> str:
         """
-        Process a single ledger with V2.5 T-1 logic:
+        Process a single ledger with V2.5 standard date resolution:
         1. Memory guardrail → 2. Backup → 3. Load → 4. Cache-first API
-        5. T-1 resolve per row, currency-aware → 6. Update ExRate master
+        5. Resolve per row, currency-aware → 6. Update ExRate master
         7. Save in-place → 8. Close + gc.collect()
         """
         self._check_memory_guardrail(filepath)
@@ -575,7 +575,7 @@ class LedgerEngine:
             target_year, logic_engine.holidays
         )
 
-        # ── Process monthly tabs with T-1 + currency routing ────────────
+        # ── Process monthly tabs with standard date + currency routing ──
         for sheet_name, mapping in sheet_maps.items():
             ws = wb[sheet_name]
             cols = mapping["columns"]

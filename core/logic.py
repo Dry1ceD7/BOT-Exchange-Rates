@@ -4,10 +4,11 @@ core/logic.py
 ---------------------------------------------------------------------------
 BOT Exchange Rate Processor (v2.5.0) - Featherweight Architecture
 ---------------------------------------------------------------------------
-The T-1 Financial Accounting Engine. Enforces strict "previous valid
-trading day" retraction per Thai accounting standards. Handles weekend
-and BOT holiday backtracking. No Excel formulas are used; outputs are
-guaranteed Python Decimal objects.
+The Standard Date Resolution Engine. Fetches the exchange rate for the
+exact date provided. If the target date is a weekend or BOT holiday,
+rolls back day-by-day until it finds the first valid historical trading
+day. No Excel formulas are used; outputs are guaranteed Python Decimal
+objects.
 """
 
 from datetime import date, timedelta
@@ -33,7 +34,7 @@ class DateExtractionError(Exception):
 class BOTLogicEngine:
     """Mathematical engine for resolving strict Bank of Thailand trading dates."""
     
-    def __init__(self, holidays: List[date], max_rollback_days: int = 5):
+    def __init__(self, holidays: List[date], max_rollback_days: int = 10):
         """
         Args:
             holidays: A list of official BOT holiday dates.
@@ -57,22 +58,21 @@ class BOTLogicEngine:
         """Safely extracts a Decimal rate for a specific date from the data dictionary."""
         return rates_data.get(target_date)
 
-    def resolve_rate(self, invoice_date: date, usd_rates: Dict[date, Decimal], eur_rates: Dict[date, Decimal]) -> Tuple[date, Optional[Decimal], Optional[Decimal]]:
+    def resolve_rate(self, target_date: date, usd_rates: Dict[date, Decimal], eur_rates: Dict[date, Decimal]) -> Tuple[date, Optional[Decimal], Optional[Decimal]]:
         """
-        T-1 Financial Accounting Engine (V2.5).
+        Standard Date Resolution Engine (V2.5).
         
-        Always returns the rate from the PREVIOUS valid trading day (T-1).
-        If the previous day is a weekend or BOT holiday, continues retracting
-        day-by-day until it finds the first valid historical trading day.
+        Returns the rate for the EXACT date provided. If the target date is
+        a weekend or BOT holiday, it rolls back day-by-day until it finds
+        the first valid historical trading day with available data.
         
         Examples:
-            - Invoice on Tuesday  → returns Monday's rate
-            - Invoice on Monday   → T-1 is Sunday → rolls back to Friday
-            - Invoice on Thursday (day after a holiday Wed) → T-1 is Wed
-              (holiday) → rolls back to Tuesday
+            - Target is Tuesday (trading day)  → returns Tuesday's rate
+            - Target is Saturday               → rolls back to Friday
+            - Target is Monday (BOT holiday)   → rolls back to Friday
         
         Args:
-            invoice_date: The date from the "วันที่ดึง Exchange rate date" column.
+            target_date: The date from the "Date" column in the ledger.
             usd_rates: Dictionary mapping dates to USD Decimal rates.
             eur_rates: Dictionary mapping dates to EUR Decimal rates.
             
@@ -83,8 +83,8 @@ class BOTLogicEngine:
             RateNotFoundError: If the backtrack limit is triggered or
                                a required rate is missing on a valid trading day.
         """
-        # T-1 RETRACTION: Always start from the day BEFORE the invoice date
-        current_date = invoice_date - timedelta(days=1)
+        # STANDARD RESOLUTION: Start from the exact target date
+        current_date = target_date
         days_rolled_back = 0
         
         # Guardrail Loop
@@ -107,29 +107,29 @@ class BOTLogicEngine:
         # If we exit the loop, we hit the safety limit
         raise RateNotFoundError(
             f"<ERROR: No Rate Found> Backtracked {self.max_rollback_days} days "
-            f"from {invoice_date.strftime('%Y-%m-%d')} without hitting valid BOT data."
+            f"from {target_date.strftime('%Y-%m-%d')} without hitting valid BOT data."
         )
 
     def resolve_rate_for_currency(
-        self, invoice_date: date, currency: str,
+        self, target_date: date, currency: str,
         usd_rates: Dict[date, Decimal], eur_rates: Dict[date, Decimal]
     ) -> Tuple[date, Optional[Decimal]]:
         """
-        Currency-aware T-1 resolver.
+        Currency-aware date resolver.
         
-        - THB: Returns (invoice_date, Decimal("1.0000")) immediately.
-        - USD: Returns (trade_date, usd_rate) via T-1 resolve.
-        - EUR: Returns (trade_date, eur_rate) via T-1 resolve.
-        - Other: Returns (invoice_date, None) — no rate available.
+        - THB: Returns (target_date, Decimal("1.0000")) immediately.
+        - USD: Returns (trade_date, usd_rate) via standard resolve.
+        - EUR: Returns (trade_date, eur_rate) via standard resolve.
+        - Other: Returns (target_date, None) — no rate available.
         """
         ccy = currency.strip().upper() if currency else ""
         
         if ccy == "THB":
-            return invoice_date, Decimal("1.0000")
+            return target_date, Decimal("1.0000")
         
         if ccy in ("USD", "EUR"):
             trade_date, usd_rt, eur_rt = self.resolve_rate(
-                invoice_date, usd_rates, eur_rates
+                target_date, usd_rates, eur_rates
             )
             if ccy == "USD":
                 return trade_date, usd_rt
@@ -137,7 +137,7 @@ class BOTLogicEngine:
                 return trade_date, eur_rt
         
         # Unsupported currency — skip silently
-        return invoice_date, None
+        return target_date, None
 
 # -------------------------------------------------------------------------
 # UTILITIES

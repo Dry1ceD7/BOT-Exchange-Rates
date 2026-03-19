@@ -2,7 +2,7 @@
 """
 tests/test_logic.py
 ---------------------------------------------------------------------------
-Unit tests for core/logic.py — V2.5 T-1 Financial Accounting Engine.
+Unit tests for core/logic.py — V2.5 Standard Date Resolution Engine.
 ---------------------------------------------------------------------------
 """
 
@@ -87,50 +87,47 @@ class TestIsTradingDay:
 
 
 # =========================================================================
-#  BOTLogicEngine.resolve_rate — T-1 Retraction Algorithm (V2.5)
+#  BOTLogicEngine.resolve_rate — Standard Date Resolution (V2.5)
 # =========================================================================
 
 class TestResolveRate:
-    """Tests for the T-1 retraction algorithm (V2.5)."""
+    """Tests for the standard date resolution algorithm (V2.5)."""
 
     def _make_rates(self, entries: dict) -> dict:
         """Helper: convert {date: float} to {date: Decimal}."""
         return {d: Decimal(str(v)) for d, v in entries.items()}
 
-    def test_t1_tuesday_returns_monday(self):
-        """Invoice on Tuesday → T-1 → should return Monday's rate."""
+    def test_exact_weekday_returns_same_day(self):
+        """Target is a normal Tuesday with data → returns Tuesday's rate."""
         engine = BOTLogicEngine(holidays=[])
         tuesday = date(2025, 1, 7)   # Tuesday
-        monday = date(2025, 1, 6)    # Monday (T-1)
-        usd = self._make_rates({monday: 33.5})
-        eur = self._make_rates({monday: 36.2})
+        usd = self._make_rates({tuesday: 33.5})
+        eur = self._make_rates({tuesday: 36.2})
         trade_date, usd_rate, eur_rate = engine.resolve_rate(tuesday, usd, eur)
-        assert trade_date == monday
+        assert trade_date == tuesday
         assert usd_rate == Decimal("33.5")
         assert eur_rate == Decimal("36.2")
 
-    def test_t1_monday_returns_friday(self):
-        """Invoice on Monday → T-1 is Sunday → rolls back to Friday."""
+    def test_exact_monday_returns_monday(self):
+        """Target is Monday with data → returns Monday's rate (no rollback)."""
         engine = BOTLogicEngine(holidays=[])
         monday = date(2025, 1, 6)    # Monday
-        friday = date(2025, 1, 3)    # Previous Friday
-        usd = self._make_rates({friday: 33.4})
-        eur = self._make_rates({friday: 36.1})
+        usd = self._make_rates({monday: 33.4})
+        eur = self._make_rates({monday: 36.1})
         trade_date, usd_rate, eur_rate = engine.resolve_rate(monday, usd, eur)
-        assert trade_date == friday
+        assert trade_date == monday
 
-    def test_t1_wednesday_returns_tuesday(self):
-        """Invoice on Wednesday → T-1 → should return Tuesday's rate."""
+    def test_exact_wednesday_returns_wednesday(self):
+        """Target is Wednesday with data → returns Wednesday's rate."""
         engine = BOTLogicEngine(holidays=[])
         wednesday = date(2025, 1, 8)  # Wednesday
-        tuesday = date(2025, 1, 7)    # Tuesday
-        usd = self._make_rates({tuesday: 33.6})
-        eur = self._make_rates({tuesday: 36.3})
+        usd = self._make_rates({wednesday: 33.6})
+        eur = self._make_rates({wednesday: 36.3})
         trade_date, _, _ = engine.resolve_rate(wednesday, usd, eur)
-        assert trade_date == tuesday
+        assert trade_date == wednesday
 
-    def test_t1_saturday_returns_friday(self):
-        """Invoice on Saturday → T-1 is Friday → trading day → return Friday."""
+    def test_saturday_rolls_back_to_friday(self):
+        """Target is Saturday → rolls back to Friday."""
         engine = BOTLogicEngine(holidays=[])
         saturday = date(2025, 1, 4)
         friday = date(2025, 1, 3)
@@ -139,8 +136,8 @@ class TestResolveRate:
         trade_date, _, _ = engine.resolve_rate(saturday, usd, eur)
         assert trade_date == friday
 
-    def test_t1_sunday_returns_friday(self):
-        """Invoice on Sunday → T-1 is Saturday → rolls back to Friday."""
+    def test_sunday_rolls_back_to_friday(self):
+        """Target is Sunday → rolls back past Saturday to Friday."""
         engine = BOTLogicEngine(holidays=[])
         sunday = date(2025, 1, 5)
         friday = date(2025, 1, 3)
@@ -149,68 +146,60 @@ class TestResolveRate:
         trade_date, _, _ = engine.resolve_rate(sunday, usd, eur)
         assert trade_date == friday
 
-    def test_t1_tuesday_after_monday_holiday(self):
+    def test_holiday_on_weekday_rolls_back(self):
         """
-        Invoice on Tuesday, but Monday is a BOT holiday.
-        T-1 of Tuesday = Monday (holiday) → rolls back to Friday.
+        Target is Monday, but Monday is a BOT holiday.
+        Rolls back to Friday.
         """
         engine = BOTLogicEngine(holidays=[date(2025, 1, 6)])  # Monday holiday
-        tuesday = date(2025, 1, 7)
+        monday = date(2025, 1, 6)
         friday = date(2025, 1, 3)
         usd = self._make_rates({friday: 33.5})
         eur = self._make_rates({friday: 36.2})
-        trade_date, _, _ = engine.resolve_rate(tuesday, usd, eur)
+        trade_date, _, _ = engine.resolve_rate(monday, usd, eur)
         assert trade_date == friday
 
-    def test_t1_with_long_holiday_block(self):
-        """Invoice during a holiday block: T-1 stacks with rollback."""
+    def test_long_holiday_block(self):
+        """Target during a multi-day holiday block stacks with weekend rollback."""
         # Wed-Fri holiday block
         holidays = [date(2025, 4, 16), date(2025, 4, 15), date(2025, 4, 14)]
         engine = BOTLogicEngine(holidays=holidays, max_rollback_days=10)
-        # Invoice on Sat Apr 19 → T-1 is Fri Apr 18 (but Fri 18 has no data...
-        # Actually Fri 18 is NOT in the holiday list, so we need data there.
-        # Let's test: Invoice on Mon Apr 14 (holiday) — wait, resolve_rate
-        # uses the invoice date as input, so T-1 of Mon Apr 14 = Sun Apr 13
-        # → rolls back to... Fri Apr 11 (not holiday)
-        # Actually let's do invoice on Thu Apr 17:
-        # T-1 = Wed Apr 16 (holiday) → Tue Apr 15 (holiday) → Mon Apr 14 (holiday)
+        # Target is Wed Apr 16 (holiday) → Tue Apr 15 (holiday) → Mon Apr 14 (holiday)
         # → Sun Apr 13 (weekend) → Sat Apr 12 (weekend) → Fri Apr 11 ✓
-        invoice = date(2025, 4, 17)
-        target = date(2025, 4, 11)
-        usd = self._make_rates({target: 34.0})
-        eur = self._make_rates({target: 37.0})
-        trade_date, _, _ = engine.resolve_rate(invoice, usd, eur)
-        assert trade_date == target
+        target = date(2025, 4, 16)
+        expected = date(2025, 4, 11)
+        usd = self._make_rates({expected: 34.0})
+        eur = self._make_rates({expected: 37.0})
+        trade_date, _, _ = engine.resolve_rate(target, usd, eur)
+        assert trade_date == expected
 
     def test_raises_when_exceeds_rollback_limit(self):
         """Exceeding max_rollback_days should raise RateNotFoundError."""
         engine = BOTLogicEngine(holidays=[], max_rollback_days=3)
-        invoice = date(2025, 1, 7)  # Tuesday
+        target = date(2025, 1, 7)  # Tuesday
         usd = self._make_rates({})
         eur = self._make_rates({})
         with pytest.raises(RateNotFoundError):
-            engine.resolve_rate(invoice, usd, eur)
+            engine.resolve_rate(target, usd, eur)
 
     def test_requires_both_usd_and_eur(self):
-        """If USD exists on T-1 but EUR doesn't, should keep rolling back."""
+        """If USD exists on target but EUR doesn't, should keep rolling back."""
         engine = BOTLogicEngine(holidays=[], max_rollback_days=5)
-        # Invoice on Tuesday 2025-01-07 → T-1 is Monday 2025-01-06
-        # Monday has USD only → rolls back to Friday
+        # Target is Tuesday 2025-01-07 — has USD only
+        # Rolls back to Monday (has both)
         tuesday = date(2025, 1, 7)
         monday = date(2025, 1, 6)
-        friday = date(2025, 1, 3)
-        usd = self._make_rates({monday: 33.5, friday: 33.4})
-        eur = self._make_rates({friday: 36.0})  # No EUR on Monday
+        usd = self._make_rates({tuesday: 33.5, monday: 33.4})
+        eur = self._make_rates({monday: 36.0})  # No EUR on Tuesday
         trade_date, usd_rate, eur_rate = engine.resolve_rate(tuesday, usd, eur)
-        assert trade_date == friday
+        assert trade_date == monday
         assert eur_rate == Decimal("36.0")
 
     def test_raises_when_eur_missing_everywhere(self):
         """If EUR is never found within rollback, raises RateNotFoundError."""
         engine = BOTLogicEngine(holidays=[], max_rollback_days=2)
         tuesday = date(2025, 1, 7)
-        monday = date(2025, 1, 6)
-        usd = self._make_rates({monday: 33.5, date(2025, 1, 3): 33.4})
+        usd = self._make_rates({tuesday: 33.5, date(2025, 1, 6): 33.4})
         eur = self._make_rates({})
         with pytest.raises(RateNotFoundError):
             engine.resolve_rate(tuesday, usd, eur)
@@ -221,7 +210,7 @@ class TestResolveRate:
 # =========================================================================
 
 class TestResolveRateForCurrency:
-    """Tests for the currency-aware T-1 resolver."""
+    """Tests for the currency-aware date resolver."""
 
     def _make_rates(self, entries: dict) -> dict:
         return {d: Decimal(str(v)) for d, v in entries.items()}
@@ -245,30 +234,28 @@ class TestResolveRateForCurrency:
         )
         assert rate == Decimal("1.0000")
 
-    def test_usd_returns_t1_rate(self):
-        """USD should route through T-1 resolve and return USD rate."""
+    def test_usd_returns_exact_date_rate(self):
+        """USD should resolve to the exact date's rate."""
         engine = BOTLogicEngine(holidays=[])
         tuesday = date(2025, 1, 7)
-        monday = date(2025, 1, 6)
-        usd = self._make_rates({monday: 33.5})
-        eur = self._make_rates({monday: 36.2})
+        usd = self._make_rates({tuesday: 33.5})
+        eur = self._make_rates({tuesday: 36.2})
         trade_date, rate = engine.resolve_rate_for_currency(
             tuesday, "USD", usd, eur
         )
-        assert trade_date == monday
+        assert trade_date == tuesday
         assert rate == Decimal("33.5")
 
-    def test_eur_returns_t1_rate(self):
-        """EUR should route through T-1 resolve and return EUR rate."""
+    def test_eur_returns_exact_date_rate(self):
+        """EUR should resolve to the exact date's rate."""
         engine = BOTLogicEngine(holidays=[])
         tuesday = date(2025, 1, 7)
-        monday = date(2025, 1, 6)
-        usd = self._make_rates({monday: 33.5})
-        eur = self._make_rates({monday: 36.2})
+        usd = self._make_rates({tuesday: 33.5})
+        eur = self._make_rates({tuesday: 36.2})
         trade_date, rate = engine.resolve_rate_for_currency(
             tuesday, "EUR", usd, eur
         )
-        assert trade_date == monday
+        assert trade_date == tuesday
         assert rate == Decimal("36.2")
 
     def test_unsupported_currency_returns_none(self):
