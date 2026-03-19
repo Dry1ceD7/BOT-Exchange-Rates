@@ -2,9 +2,9 @@
 """
 core/engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.0) - Cache-First + Singleton Architecture
+BOT Exchange Rate Processor (v2.5.1) - Cache-First + Singleton Architecture
 ---------------------------------------------------------------------------
-V2.5.0 Changes:
+V2.5.1 Changes:
   - Standard date resolution via resolve_rate_for_currency()
   - Source column: "Date"
   - THB rows → write 1 (no API lookup)
