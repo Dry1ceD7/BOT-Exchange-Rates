@@ -16,11 +16,14 @@ V2.5.1 Changes:
 import os
 import gc
 import logging
+import tempfile
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from datetime import date, datetime, timedelta
 from typing import Dict, Tuple, Set, List, Callable, Optional
 from decimal import Decimal
+
+import xlrd
 
 from core.api_client import BOTClient, BOTRateDetail
 from core.logic import BOTLogicEngine, RateNotFoundError, safe_to_decimal
@@ -556,19 +559,86 @@ class LedgerEngine:
             current_row += 1
 
     # ================================================================== #
+    #  LEGACY .xls AUTO-CONVERSION PIPELINE
+    # ================================================================== #
+    def _convert_xls_to_xlsx(self, filepath: str) -> str:
+        """
+        Convert a legacy .xls file to .xlsx using xlrd + openpyxl.
+        Returns the path to the new .xlsx file.
+        Constraint: No pandas, no win32com — memory-safe, cross-platform.
+        """
+        logger.info(f"Converting legacy .xls: {os.path.basename(filepath)}")
+        wb_xls = xlrd.open_workbook(filepath, formatting_info=False)
+        wb_xlsx = openpyxl.Workbook()
+        # Remove the default sheet created by openpyxl
+        wb_xlsx.remove(wb_xlsx.active)
+
+        for sheet_name in wb_xls.sheet_names():
+            ws_xls = wb_xls.sheet_by_name(sheet_name)
+            ws_xlsx = wb_xlsx.create_sheet(title=sheet_name)
+
+            for row_idx in range(ws_xls.nrows):
+                for col_idx in range(ws_xls.ncols):
+                    cell_type = ws_xls.cell_type(row_idx, col_idx)
+                    cell_value = ws_xls.cell_value(row_idx, col_idx)
+
+                    # Convert xlrd date floats to Python datetime objects
+                    if cell_type == xlrd.XL_CELL_DATE:
+                        try:
+                            cell_value = xlrd.xldate_as_datetime(
+                                cell_value, wb_xls.datemode
+                            )
+                        except Exception:
+                            pass  # Keep raw value if conversion fails
+
+                    ws_xlsx.cell(
+                        row=row_idx + 1,
+                        column=col_idx + 1,
+                        value=cell_value
+                    )
+
+        # Save to a temp file in the same directory (preserves filesystem)
+        dir_name = os.path.dirname(filepath)
+        base_name = os.path.splitext(os.path.basename(filepath))[0]
+        temp_path = os.path.join(dir_name, f".{base_name}_converted.xlsx")
+        wb_xlsx.save(temp_path)
+        logger.info(f"Conversion complete: {temp_path}")
+        return temp_path
+
+    # ================================================================== #
     #  PROCESS SINGLE LEDGER (V2.5)
     # ================================================================== #
     async def process_ledger(self, filepath: str, start_date: str = None) -> str:
         """
         Process a single ledger with V2.5 standard date resolution:
-        1. Memory guardrail → 2. Backup → 3. Load → 4. Cache-first API
-        5. Resolve per row, currency-aware → 6. Update ExRate master
-        7. Save in-place → 8. Close + gc.collect()
+        1. Memory guardrail → 2. Backup → 3. Auto-convert .xls if needed
+        4. Load → 5. Cache-first API → 6. Resolve per row, currency-aware
+        7. Update ExRate master → 8. Save in-place → 9. Close + gc.collect()
         """
         self._check_memory_guardrail(filepath)
         self.backup.create_backup(filepath)
 
-        wb = openpyxl.load_workbook(filepath)
+        # ── .xls Auto-Conversion Pipeline ────────────────────────────────
+        # If the file is a legacy .xls, convert it to .xlsx first.
+        # Process the .xlsx copy, then copy the result back to .xlsx
+        # so that the output overwrites the original location.
+        original_path = filepath
+        converted = False
+        if filepath.lower().endswith('.xls') and not filepath.lower().endswith('.xlsx'):
+            filepath = self._convert_xls_to_xlsx(filepath)
+            converted = True
+
+        try:
+            wb = openpyxl.load_workbook(filepath)
+        except Exception as e:
+            # If conversion produced a bad file, clean it up
+            if converted and os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
+            raise
+
         all_target_dates = set()
         sheet_maps = {}
 
@@ -731,8 +801,23 @@ class LedgerEngine:
                         cell.value = float(rate) if rate is not None else None
                         cell.font = exrate_font
 
+        # ── Save & Cleanup ──────────────────────────────────────────────
         wb.save(filepath)
         wb.close()
+
+        # If we converted from .xls, save as .xlsx alongside original
+        if converted:
+            import shutil
+            xlsx_output = os.path.splitext(original_path)[0] + ".xlsx"
+            shutil.copy2(filepath, xlsx_output)
+            # Clean up the hidden temp file
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
+            filepath = xlsx_output
+            logger.info(f"Saved processed output as: {os.path.basename(xlsx_output)}")
+
         gc.collect()
 
         return filepath

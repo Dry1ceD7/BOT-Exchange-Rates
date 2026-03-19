@@ -69,7 +69,15 @@ except Exception:
     pass
 
 
-def parse_drop_data(raw: str) -> List[str]:
+def parse_drop_data(raw: str, tk_root=None) -> List[str]:
+    """Parse drag-and-drop payload. Uses native Tcl/Tk splitlist for
+    cross-platform correctness ({} bracket stripping on macOS/Linux)."""
+    if tk_root is not None:
+        try:
+            return list(tk_root.tk.splitlist(raw))
+        except Exception:
+            pass
+    # Fallback: regex parser
     results = []
     for match in re.finditer(r'\{([^}]+)\}|(\S+)', raw):
         path = match.group(1) or match.group(2)
@@ -80,7 +88,7 @@ def parse_drop_data(raw: str) -> List[str]:
 
 # Supported Excel extensions (openpyxl handles .xlsx and .xlsm natively)
 EXCEL_EXTENSIONS = (".xlsx", ".xls", ".xlsm", ".xlsb")
-OPENPYXL_NATIVE = (".xlsx", ".xlsm")
+OPENPYXL_NATIVE = (".xlsx", ".xlsm", ".xls")  # .xls auto-converted via xlrd
 
 
 def resolve_excel_files(paths: List[str]) -> List[str]:
@@ -420,19 +428,25 @@ class BOTExrateApp(ctk.CTk):
     #  DROP / BROWSE
     # ================================================================== #
     def _on_drop(self, event):
-        paths = parse_drop_data(event.data)
+        paths = parse_drop_data(event.data, tk_root=self)
         excel_files = resolve_excel_files(paths)
         if excel_files:
-            # Warn about unsupported formats
-            unsupported = [f for f in excel_files if not f.lower().endswith(OPENPYXL_NATIVE)]
+            # Warn about truly unsupported formats (.xlsb only)
+            unsupported = [f for f in excel_files if f.lower().endswith('.xlsb')]
             if unsupported:
                 names = ", ".join(os.path.basename(f) for f in unsupported)
                 messagebox.showwarning(
                     "Format Warning",
-                    f"These files use formats that may not be fully supported:\n{names}\n\n"
-                    f"Only .xlsx and .xlsm files are guaranteed to work."
+                    f"These files use .xlsb format which is not supported:\n{names}\n\n"
+                    f"Please save as .xlsx first."
                 )
-            self._set_queue(excel_files)
+                # Remove unsupported files from queue
+                excel_files = [f for f in excel_files if not f.lower().endswith('.xlsb')]
+            if excel_files:
+                self._set_queue(excel_files)
+            else:
+                messagebox.showwarning("No Valid Files",
+                                       "No supported Excel files found.")
         else:
             messagebox.showwarning("No Valid Files",
                                    "No Excel files found in the dropped items.")
