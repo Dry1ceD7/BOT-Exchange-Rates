@@ -4,7 +4,7 @@
 
 **Enterprise-Grade Bank of Thailand Exchange Rate Automation**
 
-Version 2.5.4  ·  Modular SFFB Architecture  ·  Zero-Latency Cache
+Version 2.5.5  ·  Modular SFFB Architecture  ·  Zero-Latency Cache
 
 ---
 
@@ -274,6 +274,6 @@ This project is developed for internal enterprise use. All rights reserved.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V2.5.4*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V2.5.5*
 
 </div>
