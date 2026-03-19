@@ -676,6 +676,9 @@ class LedgerEngine:
         # ── STEP 3: Process monthly tabs via cross-tab VLOOKUP ───────────
         # Each row reads its date, resolves to the nearest trading day,
         # then looks up the Buying TT Rate from the ExRate index.
+        # All values in the "EX Rate" column are styled with red font.
+        exrate_font = Font(name="Calibri", size=10, color="C0392B")
+
         for sheet_name, mapping in sheet_maps.items():
             ws = wb[sheet_name]
             cols = mapping["columns"]
@@ -695,7 +698,9 @@ class LedgerEngine:
                     # THB bypass: always write 1
                     if ccy == "THB":
                         if out_rate_idx is not None:
-                            ws.cell(row=row_idx, column=out_rate_idx + 1).value = 1
+                            cell = ws.cell(row=row_idx, column=out_rate_idx + 1)
+                            cell.value = 1
+                            cell.font = exrate_font
                         continue
 
                     # Resolve to nearest trading day (weekend/holiday rollback)
@@ -705,7 +710,9 @@ class LedgerEngine:
                         )
                     except RateNotFoundError:
                         if out_rate_idx is not None:
-                            ws.cell(row=row_idx, column=out_rate_idx + 1).value = "<ERROR: No Rate>"
+                            cell = ws.cell(row=row_idx, column=out_rate_idx + 1)
+                            cell.value = None
+                            cell.font = exrate_font
                         continue
 
                     # VLOOKUP: query ExRate index by resolved trade_date
@@ -720,10 +727,9 @@ class LedgerEngine:
 
                     # Write the looked-up rate to the output column
                     if out_rate_idx is not None:
-                        if rate is not None:
-                            ws.cell(row=row_idx, column=out_rate_idx + 1).value = float(rate)
-                        else:
-                            ws.cell(row=row_idx, column=out_rate_idx + 1).value = "<ERROR: No Rate>"
+                        cell = ws.cell(row=row_idx, column=out_rate_idx + 1)
+                        cell.value = float(rate) if rate is not None else None
+                        cell.font = exrate_font
 
         wb.save(filepath)
         wb.close()
