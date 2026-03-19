@@ -76,9 +76,12 @@ class BOTClient:
         self.hol_path = "/financial-institutions-holidays/"
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((httpx.RequestError, httpx.ConnectError, httpx.TimeoutException))
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=15),
+        retry=retry_if_exception_type((
+            httpx.RequestError, httpx.ConnectError,
+            httpx.TimeoutException, httpx.HTTPStatusError,
+        ))
     )
     async def _fetch_json(self, url: str, token: str) -> dict:
         # Normalize token: strip any existing "Bearer " prefix to prevent
@@ -92,6 +95,11 @@ class BOTClient:
         response = await self.client.get(url, headers=headers, timeout=30.0)
         if response.status_code == 404:
             return {}
+        if response.status_code == 429:
+            # Rate limited — wait and let tenacity retry
+            retry_after = int(response.headers.get("Retry-After", "5"))
+            await asyncio.sleep(retry_after)
+            response.raise_for_status()  # triggers tenacity retry
         response.raise_for_status()
         return response.json()
 
@@ -111,7 +119,7 @@ class BOTClient:
                 except ValidationError as e:
                     raise BOTAPIError(f"Schema mismatch! {e}")
             current_start = current_end + timedelta(days=1)
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)  # Rate-limit safe spacing
         return all_results
 
     async def get_holidays(self, year: int) -> List[BOTHolidayDetail]:

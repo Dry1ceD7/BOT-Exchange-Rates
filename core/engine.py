@@ -376,13 +376,14 @@ class LedgerEngine:
                     all_target_dates.add(parsed_date)
 
         # ── Date hierarchy ───────────────────────────────────────────
+        # Start date is ALWAYS computed from target_year, NOT from
+        # prescan. Prescan is only used for the GUI's date-range display.
+        # The ExRate tab must cover from last week of Dec (year-1).
         target_year = (
             min(all_target_dates).year if all_target_dates
             else date.today().year
         )
-        preliminary_start = f"{target_year - 1}-12-20"
-        if start_date is None:
-            start_date = preliminary_start
+        start_date = f"{target_year - 1}-12-20"
 
         (
             logic_engine, usd_selling, eur_selling,
