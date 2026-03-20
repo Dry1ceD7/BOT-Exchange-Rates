@@ -2,7 +2,7 @@
 """
 core/backup_manager.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.7) - Fail-Safe Backup & Revert
+BOT Exchange Rate Processor (v2.5.8) - Fail-Safe Backup & Revert
 ---------------------------------------------------------------------------
 Lightweight backup/restore layer using only Python stdlib (shutil, os, glob).
 Protects against file corruption during in-place editing with automatic

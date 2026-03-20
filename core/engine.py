@@ -2,7 +2,7 @@
 """
 core/engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.7) - Cache-First Orchestrator
+BOT Exchange Rate Processor (v2.5.8) - Cache-First Orchestrator
 ---------------------------------------------------------------------------
 Slim orchestrator. Heavy logic extracted to:
   - core/exrate_sheet.py → Master ExRate sheet builder
@@ -209,7 +209,7 @@ class LedgerEngine:
         cell.value = value
 
     # ================================================================== #
-    #  CACHE-FIRST DATA LOADING (v2.5.7)
+    #  CACHE-FIRST DATA LOADING (v2.5.8)
     # ================================================================== #
     async def _preload_api_data(
         self, dates: Set[date], start_date: str
