@@ -197,15 +197,22 @@ python3 main.py
 
 **Windows:**
 
+> **⚠️ Windows PowerShell Users:** If you receive an `Execution Policy` error (`activate.ps1 cannot be loaded because running scripts is disabled`), you have two options:
+> - **Option A (CMD Bypass):** Open standard **Command Prompt** (`cmd.exe`) instead of PowerShell. Batch scripts bypass this policy entirely.
+> - **Option B (Unblock Local PowerShell):** Run this command once in PowerShell: `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser`
+
+Alternatively, you can skip the manual commands below and simply double-click the included `run.bat` file, which automatically bypasses execution policies and sets up everything for you.
+
 ```bat
 python -m venv venv
-venv\Scripts\activate
+venv\Scripts\activate.bat
 pip install -r requirements.txt
 python main.py
 ```
 
 > **💡 What do these commands do?**
-> - `python3 -m venv venv` — Creates a private workspace so the app's libraries don't interfere with your computer
+> - `python -m venv venv` — Creates a private workspace so the app's libraries don't interfere with your computer
+> - `venv\Scripts\activate.bat` — Enters that workspace (explicitly using `.bat` to avoid PowerShell Execution Policy locks)
 > - `source venv/bin/activate` — Enters that workspace
 > - `pip install -r requirements.txt` — Downloads all the libraries the app needs (one-time only)
 > - `python3 main.py` — Starts the application!
