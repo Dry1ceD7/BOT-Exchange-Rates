@@ -2,7 +2,7 @@
 """
 core/prescan.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.8) - Smart Date Pre-Scanner
+BOT Exchange Rate Processor (v2.5.9) - Smart Date Pre-Scanner
 ---------------------------------------------------------------------------
 Separated from engine.py for SFFB compliance (<200 lines).
 Pre-scans queued .xls/.xlsx files to detect the oldest date in the

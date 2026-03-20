@@ -2,11 +2,16 @@
 """
 core/com_engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.8) - Native Windows COM Engine
+BOT Exchange Rate Processor (v2.5.9) — High-Speed Native Windows COM Engine
 ---------------------------------------------------------------------------
 Primary data processing engine for Windows 11 using win32com.client.
 Spawns an invisible Microsoft Excel instance to read/write ledger files,
 guaranteeing 100% preservation of all native styles, fonts, and layouts.
+
+PERFORMANCE ARCHITECTURE (v2.5.9):
+  1. Silent Mode: Calculation=Manual, EnableEvents=False, ScreenUpdating=False
+  2. Vectorized I/O: All reads/writes use bulk Range operations (zero cell loops)
+  3. Instance Pooling: Optional shared Excel instance for batch processing
 
 CRITICAL: This module MUST ONLY be imported on sys.platform == "win32".
 ---------------------------------------------------------------------------
@@ -35,8 +40,10 @@ except ImportError:
     )
 
 # Excel constants
-XL_FILE_FORMAT_XLSX = 51  # xlOpenXMLWorkbook
-XL_UP = -4162  # xlUp
+XL_FILE_FORMAT_XLSX = 51   # xlOpenXMLWorkbook
+XL_UP = -4162              # xlUp
+XL_CALC_MANUAL = -4135     # xlCalculationManual
+XL_CALC_AUTOMATIC = -4105  # xlCalculationAutomatic
 
 
 def _ensure_absolute(path: str) -> str:
@@ -45,7 +52,7 @@ def _ensure_absolute(path: str) -> str:
 
 
 def _parse_cell_date(value) -> Optional[date]:
-    """Parse a date from an Excel COM cell value."""
+    """Parse a date from an Excel COM cell value (or from a bulk-read tuple)."""
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -56,19 +63,13 @@ def _parse_cell_date(value) -> Optional[date]:
     try:
         import pywintypes as _pt
         if isinstance(value, _pt.TimeType):
-            # Convert to Python datetime
-            return datetime(
-                value.year, value.month, value.day
-            ).date()
+            return datetime(value.year, value.month, value.day).date()
     except (AttributeError, TypeError, ValueError):
         pass
     if isinstance(value, (int, float)):
-        # Excel serial date number
         try:
-            from datetime import timedelta as _td
-            # Excel epoch: 1899-12-30
             epoch = datetime(1899, 12, 30)
-            return (epoch + _td(days=int(value))).date()
+            return (epoch + timedelta(days=int(value))).date()
         except (ValueError, OverflowError):
             return None
     if isinstance(value, str):
@@ -85,31 +86,45 @@ def _parse_cell_date(value) -> Optional[date]:
 
 
 # =========================================================================
-#  EXCEL COM CONTEXT MANAGER — Zombie-Safe
+#  EXCEL COM CONTEXT MANAGER — Zombie-Safe + Silent Mode
 # =========================================================================
 
 class ExcelCOM:
     """
     Context manager for the Excel COM lifecycle.
 
-    Guarantees that excel.Quit() is ALWAYS called, even if the
-    processing code crashes midway. This prevents zombie EXCEL.EXE
-    processes from lingering in the Windows Task Manager.
+    MANDATE 1 — Silent Mode Performance Flags:
+      - ScreenUpdating  = False  (no UI redraws)
+      - Calculation      = Manual (no recalc on every cell write)
+      - EnableEvents     = False  (no VBA event triggers)
+
+    All flags are restored in __exit__ before Quit(), even on crash.
+    Guarantees excel.Quit() is ALWAYS called to prevent zombie processes.
     """
 
     def __init__(self):
         self.excel = None
 
     def __enter__(self):
-        logger.info("Spawning invisible Microsoft Excel COM instance...")
+        logger.info("Spawning invisible Microsoft Excel COM instance (Silent Mode)...")
         self.excel = win32com.client.DispatchEx("Excel.Application")
         self.excel.Visible = False
         self.excel.DisplayAlerts = False
+        # ── MANDATE 1: Silent Mode Performance Flags ──────────────
         self.excel.ScreenUpdating = False
+        self.excel.Calculation = XL_CALC_MANUAL
+        self.excel.EnableEvents = False
         return self.excel
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.excel is not None:
+            try:
+                # ── Restore flags before quitting ─────────────────────
+                self.excel.ScreenUpdating = True
+                self.excel.Calculation = XL_CALC_AUTOMATIC
+                self.excel.EnableEvents = True
+            except Exception:
+                pass  # Excel may already be dead
             try:
                 self.excel.Quit()
                 logger.info("Excel COM instance terminated cleanly.")
@@ -121,7 +136,7 @@ class ExcelCOM:
 
 
 # =========================================================================
-#  EXRATE MASTER SHEET — COM-Native Builder
+#  EXRATE MASTER SHEET — Vectorized COM-Native Builder
 # =========================================================================
 
 def _build_exrate_sheet_com(
@@ -135,16 +150,19 @@ def _build_exrate_sheet_com(
     start_date: date,
 ) -> None:
     """
-    Build or refresh the ExRate master tab using native Excel COM.
+    Build or refresh the ExRate master tab using VECTORIZED Excel COM.
 
-    Uses Excel's native formatting engine so fonts/colors/borders
-    are applied by Microsoft Excel itself — zero fidelity loss.
+    MANDATE 2 — Vectorized Write:
+      1. Build the entire data grid as a Python 2D list in RAM
+      2. Write ALL values in ONE Range.Value assignment
+      3. Apply formatting via range-based operations (not per-cell)
     """
     SHEET_NAME = "ExRate"
     HEADERS = [
         "Date", "USD Buying TT Rate", "USD Selling Rate",
         "EUR Buying TT Rate", "EUR Selling Rate", "Holidays/Weekend"
     ]
+    NUM_COLS = len(HEADERS)
 
     # Get or create the sheet
     sheet_names = [wb.Sheets(i).Name for i in range(1, wb.Sheets.Count + 1)]
@@ -154,132 +172,153 @@ def _build_exrate_sheet_com(
         ws = wb.Sheets.Add(After=wb.Sheets(wb.Sheets.Count))
         ws.Name = SHEET_NAME
 
-    # Write headers (Row 1)
-    for col_idx, header in enumerate(HEADERS, 1):
-        cell = ws.Cells(1, col_idx)
-        cell.Value = header
-        cell.Font.Name = "Calibri"
-        cell.Font.Size = 11
-        cell.Font.Bold = True
-        cell.Font.Color = 0xFFFFFF  # White
-        cell.Interior.Color = 0x5D361A  # Dark blue (BGR: 1A365D)
-        cell.HorizontalAlignment = -4108  # xlCenter
-        cell.VerticalAlignment = -4108  # xlCenter
-
-    # Set borders on header row
-    header_range = ws.Range(ws.Cells(1, 1), ws.Cells(1, 6))
-    for edge in range(7, 13):  # xlEdgeLeft through xlInsideVertical
+    # ── Write headers in one shot ─────────────────────────────────
+    header_range = ws.Range(ws.Cells(1, 1), ws.Cells(1, NUM_COLS))
+    header_range.Value = [HEADERS]  # 2D: [[h1, h2, ...]]
+    header_range.Font.Name = "Calibri"
+    header_range.Font.Size = 11
+    header_range.Font.Bold = True
+    header_range.Font.Color = 0xFFFFFF  # White
+    header_range.Interior.Color = 0x5D361A  # Dark blue (BGR: 1A365D)
+    header_range.HorizontalAlignment = -4108  # xlCenter
+    header_range.VerticalAlignment = -4108  # xlCenter
+    for edge in range(7, 13):
         try:
-            header_range.Borders(edge).LineStyle = 1  # xlContinuous
-            header_range.Borders(edge).Weight = 2  # xlThin
+            header_range.Borders(edge).LineStyle = 1
+            header_range.Borders(edge).Weight = 2
         except Exception:
             pass
 
-    # Column widths
-    ws.Columns("A").ColumnWidth = 14
-    ws.Columns("B").ColumnWidth = 18
-    ws.Columns("C").ColumnWidth = 16
-    ws.Columns("D").ColumnWidth = 18
-    ws.Columns("E").ColumnWidth = 16
-    ws.Columns("F").ColumnWidth = 40
+    # Column widths (bulk)
+    col_widths = [14, 18, 16, 18, 16, 40]
+    for i, w in enumerate(col_widths, 1):
+        ws.Columns(i).ColumnWidth = w
 
     # Clear existing data rows (keep header)
     last_row = ws.Cells(ws.Rows.Count, 1).End(XL_UP).Row
     if last_row > 1:
-        ws.Range(
-            ws.Cells(2, 1), ws.Cells(last_row, 6)
-        ).ClearContents()
-        ws.Range(
-            ws.Cells(2, 1), ws.Cells(last_row, 6)
-        ).ClearFormats()
+        clear_range = ws.Range(ws.Cells(2, 1), ws.Cells(last_row, NUM_COLS))
+        clear_range.ClearContents()
+        clear_range.ClearFormats()
 
-    # Build date range
+    # ══════════════════════════════════════════════════════════════
+    #  MANDATE 2: Build entire 2D data grid IN PYTHON RAM
+    # ══════════════════════════════════════════════════════════════
     end_date = date.today()
-    all_dates = set()
+    all_dates = []
     current = start_date
     while current <= end_date:
-        all_dates.add(current)
+        all_dates.append(current)
         current += timedelta(days=1)
+    all_dates.sort()
 
-    # Write data rows
-    current_row = 2
-    for d in sorted(all_dates):
+    num_rows = len(all_dates)
+    if num_rows == 0:
+        return
+
+    # Build the 2D data array and track holiday/weekend rows
+    data_grid = []
+    holiday_rows = []  # (row_index, is_holiday, is_weekend)
+    weekend_rows = []
+
+    for row_offset, d in enumerate(all_dates):
         is_weekend = d.weekday() >= 5
         is_holiday = d in holidays_set
 
-        # Date
-        cell_date = ws.Cells(current_row, 1)
-        cell_date.Value = datetime(d.year, d.month, d.day)
-        cell_date.NumberFormat = "DD MMM YYYY"
-        cell_date.Font.Name = "Calibri"
-        cell_date.Font.Size = 10
-        cell_date.HorizontalAlignment = -4108  # xlCenter
-
-        # USD Buying
         ub = float(usd_buying[d]) if d in usd_buying and usd_buying[d] is not None else None
-        ws.Cells(current_row, 2).Value = ub
-        if ub is not None:
-            ws.Cells(current_row, 2).NumberFormat = "0.0000"
-
-        # USD Selling
         us = float(usd_selling[d]) if d in usd_selling and usd_selling[d] is not None else None
-        ws.Cells(current_row, 3).Value = us
-        if us is not None:
-            ws.Cells(current_row, 3).NumberFormat = "0.0000"
-
-        # EUR Buying
         eb = float(eur_buying[d]) if d in eur_buying and eur_buying[d] is not None else None
-        ws.Cells(current_row, 4).Value = eb
-        if eb is not None:
-            ws.Cells(current_row, 4).NumberFormat = "0.0000"
-
-        # EUR Selling
         es = float(eur_selling[d]) if d in eur_selling and eur_selling[d] is not None else None
-        ws.Cells(current_row, 5).Value = es
-        if es is not None:
-            ws.Cells(current_row, 5).NumberFormat = "0.0000"
 
         # Holiday/Weekend label
-        holiday_label = ""
         if is_weekend and is_holiday:
-            holiday_label = f"weekend; {holidays_names.get(d, 'Holiday')}"
+            label = f"weekend; {holidays_names.get(d, 'Holiday')}"
         elif is_weekend:
-            holiday_label = "weekend"
+            label = "weekend"
         elif is_holiday:
-            holiday_label = holidays_names.get(d, "Holiday")
-        ws.Cells(current_row, 6).Value = holiday_label
+            label = holidays_names.get(d, "Holiday")
+        else:
+            label = ""
 
-        # Font for data columns
-        for col in range(1, 7):
-            ws.Cells(current_row, col).Font.Name = "Calibri"
-            ws.Cells(current_row, col).Font.Size = 10
+        # COM expects datetime objects for Excel date serial conversion
+        data_grid.append([
+            datetime(d.year, d.month, d.day),
+            ub, us, eb, es, label
+        ])
 
-        # Row-level styling for holidays/weekends
-        row_range = ws.Range(ws.Cells(current_row, 1), ws.Cells(current_row, 6))
+        excel_row = row_offset + 2  # +2 because row 1 is header
         if is_holiday:
-            row_range.Interior.Color = 0xCDF3FF  # Light yellow (BGR: FFF3CD)
+            holiday_rows.append(excel_row)
         elif is_weekend:
-            row_range.Interior.Color = 0xE8E8E8  # Light gray
+            weekend_rows.append(excel_row)
 
-        # Borders
-        for edge in range(7, 13):
-            try:
-                row_range.Borders(edge).LineStyle = 1
-                row_range.Borders(edge).Weight = 2
-            except Exception:
-                pass
+    # ══════════════════════════════════════════════════════════════
+    #  SINGLE VECTORIZED WRITE — all values in one COM call
+    # ══════════════════════════════════════════════════════════════
+    data_range = ws.Range(
+        ws.Cells(2, 1),
+        ws.Cells(num_rows + 1, NUM_COLS)
+    )
+    data_range.Value = data_grid
+    logger.info("ExRate: Vectorized write complete (%d rows in 1 COM call)", num_rows)
 
-        current_row += 1
+    # ══════════════════════════════════════════════════════════════
+    #  RANGE-BASED FORMATTING (not per-cell)
+    # ══════════════════════════════════════════════════════════════
 
-    logger.info("ExRate master sheet built via COM: %d rows", current_row - 2)
+    # Font for entire data range
+    data_range.Font.Name = "Calibri"
+    data_range.Font.Size = 10
+
+    # Date column formatting
+    date_col_range = ws.Range(ws.Cells(2, 1), ws.Cells(num_rows + 1, 1))
+    date_col_range.NumberFormat = "DD MMM YYYY"
+    date_col_range.HorizontalAlignment = -4108  # xlCenter
+
+    # Rate columns number format (columns B-E)
+    rate_range = ws.Range(ws.Cells(2, 2), ws.Cells(num_rows + 1, 5))
+    rate_range.NumberFormat = "0.0000"
+
+    # Borders on entire data range
+    for edge in range(7, 13):
+        try:
+            data_range.Borders(edge).LineStyle = 1
+            data_range.Borders(edge).Weight = 2
+        except Exception:
+            pass
+
+    # Holiday row fills (targeted range operations)
+    for row_idx in holiday_rows:
+        try:
+            ws.Range(
+                ws.Cells(row_idx, 1), ws.Cells(row_idx, NUM_COLS)
+            ).Interior.Color = 0xCDF3FF  # Light yellow (BGR: FFF3CD)
+        except Exception:
+            pass
+
+    # Weekend row fills
+    for row_idx in weekend_rows:
+        try:
+            ws.Range(
+                ws.Cells(row_idx, 1), ws.Cells(row_idx, NUM_COLS)
+            ).Interior.Color = 0xE8E8E8  # Light gray
+        except Exception:
+            pass
+
+    logger.info("ExRate master sheet built via vectorized COM: %d rows", num_rows)
 
 
 # =========================================================================
-#  BUILD EXRATE INDEX (from COM worksheet)
+#  BUILD EXRATE INDEX — Vectorized Bulk Read
 # =========================================================================
 
 def _build_exrate_index_com(wb) -> Dict[date, dict]:
-    """Build the in-memory ExRate lookup index from the COM workbook."""
+    """
+    Build the in-memory ExRate lookup index using VECTORIZED bulk read.
+
+    MANDATE 2: Reads the entire ExRate data range in ONE Range.Value call,
+    then parses the returned tuple in pure Python (zero COM calls per-row).
+    """
     exrate_index: Dict[date, dict] = {}
     sheet_names = [wb.Sheets(i).Name for i in range(1, wb.Sheets.Count + 1)]
     if "ExRate" not in sheet_names:
@@ -290,21 +329,34 @@ def _build_exrate_index_com(wb) -> Dict[date, dict]:
     if last_row < 2:
         return exrate_index
 
-    for row_idx in range(2, last_row + 1):
-        cell_val = ws.Cells(row_idx, 1).Value
-        row_date = _parse_cell_date(cell_val)
+    # ── SINGLE BULK READ ──────────────────────────────────────────
+    raw_data = ws.Range(
+        ws.Cells(2, 1), ws.Cells(last_row, 5)
+    ).Value  # Returns tuple of tuples
+
+    if raw_data is None:
+        return exrate_index
+
+    # Handle single-row case (COM returns flat tuple, not nested)
+    if not isinstance(raw_data[0], tuple):
+        raw_data = (raw_data,)
+
+    for row in raw_data:
+        row_date = _parse_cell_date(row[0])
         if row_date:
             exrate_index[row_date] = {
-                "usd_buying": ws.Cells(row_idx, 2).Value,
-                "usd_selling": ws.Cells(row_idx, 3).Value,
-                "eur_buying": ws.Cells(row_idx, 4).Value,
-                "eur_selling": ws.Cells(row_idx, 5).Value,
+                "usd_buying": row[1],
+                "usd_selling": row[2],
+                "eur_buying": row[3],
+                "eur_selling": row[4],
             }
+
+    logger.info("ExRate index built from bulk read: %d entries", len(exrate_index))
     return exrate_index
 
 
 # =========================================================================
-#  CROSS-TAB VLOOKUP
+#  CROSS-TAB VLOOKUP (pure Python — no COM calls)
 # =========================================================================
 
 def _vlookup_exrate(
@@ -329,10 +381,9 @@ def _vlookup_exrate(
 
 
 # =========================================================================
-#  MAIN COM PIPELINE — process_ledger_com
+#  MAIN COM PIPELINE — process_ledger_com (Vectorized + Poolable)
 # =========================================================================
 
-# Sheets that are reference/master and should NOT be processed as ledgers
 SKIP_SHEET_NAMES = {"ExRate"}
 
 
@@ -346,151 +397,193 @@ def process_ledger_com(
     holidays_names: Dict[date, str],
     computed_start: date,
     target_cols: Dict[str, str],
+    excel=None,
 ) -> str:
     """
     Process a single ledger file using Native Microsoft Excel COM.
 
-    This function opens the file in an invisible Excel instance,
-    writes the ExRate master sheet, performs cross-tab VLOOKUP on
-    monthly tabs, and saves using Excel's native engine.
+    MANDATE 3 — Instance Pooling:
+      If `excel` is provided, reuses the existing Excel.Application instance
+      instead of creating a new one. This allows batch processing to boot
+      Excel ONCE and process all files inside that single instance.
 
-    Memory management:
-      - ExcelCOM context manager guarantees excel.Quit() in finally
-      - Each workbook is explicitly closed before Excel quits
-      - No zombie EXCEL.EXE processes can survive
+    MANDATE 2 — Vectorized I/O:
+      All reads/writes use bulk Range operations. Zero cell-by-cell loops.
 
     Args:
-        filepath: Path to the .xlsx ledger file (will be made absolute)
-        usd_buying/usd_selling/eur_buying/eur_selling: Rate dicts
-        holidays_set: Set of holiday dates
-        holidays_names: Dict mapping dates to holiday names
-        computed_start: Start date for ExRate sheet
-        target_cols: Column name mapping (source_date, currency, out_rate)
+        filepath: Path to the ledger file (will be made absolute)
+        excel: Optional shared Excel.Application instance (for pooling)
+        ... (rate/holiday data)
 
     Returns:
         The absolute path to the saved file.
     """
-    # ── MANDATE 2: Absolute pathing for COM safety ────────────────────
     filepath = _ensure_absolute(filepath)
     logger.info("COM Engine: Processing %s", os.path.basename(filepath))
 
+    owns_excel = excel is None  # Did WE create the instance?
     wb = None
-    with ExcelCOM() as excel:
-        try:
-            # Open the workbook
-            wb = excel.Workbooks.Open(filepath)
+    ctx = None
 
-            # ── STEP 1: Build ExRate master sheet ─────────────────────
-            _build_exrate_sheet_com(
-                wb,
-                usd_buying, usd_selling,
-                eur_buying, eur_selling,
-                holidays_set, holidays_names,
-                computed_start,
+    try:
+        if owns_excel:
+            ctx = ExcelCOM()
+            excel = ctx.__enter__()
+
+        # Open the workbook
+        wb = excel.Workbooks.Open(filepath)
+
+        # ── STEP 1: Build ExRate master sheet (vectorized) ────────
+        _build_exrate_sheet_com(
+            wb,
+            usd_buying, usd_selling,
+            eur_buying, eur_selling,
+            holidays_set, holidays_names,
+            computed_start,
+        )
+
+        # ── STEP 2: Build in-memory ExRate lookup index (bulk read)
+        exrate_index = _build_exrate_index_com(wb)
+
+        # ── STEP 3: Vectorized Cross-Tab VLOOKUP ─────────────────
+        for sheet_idx in range(1, wb.Sheets.Count + 1):
+            ws = wb.Sheets(sheet_idx)
+            sheet_name = ws.Name
+            if sheet_name in SKIP_SHEET_NAMES:
+                continue
+
+            # ── Header scan: bulk read first 10 rows × 20 cols ───
+            scan_range = ws.Range(ws.Cells(1, 1), ws.Cells(10, 20))
+            header_data = scan_range.Value  # tuple of tuples
+
+            if header_data is None:
+                continue
+
+            header_row_idx = None
+            col_indices: Dict[str, int] = {}
+            for r_idx, row_tuple in enumerate(header_data):
+                row_vals = [
+                    str(v).strip() if v is not None else ""
+                    for v in row_tuple
+                ]
+                if target_cols["source_date"] in row_vals:
+                    header_row_idx = r_idx + 1  # 1-indexed
+                    for ci, val in enumerate(row_vals):
+                        if val == target_cols["source_date"]:
+                            col_indices["source"] = ci + 1
+                        elif val == target_cols["currency"]:
+                            col_indices["currency"] = ci + 1
+                        elif val == target_cols["out_rate"]:
+                            col_indices["out_rate"] = ci + 1
+                    break
+
+            if header_row_idx is None or "source" not in col_indices:
+                logger.info(
+                    "Sheet '%s' missing source date column — skipped.",
+                    sheet_name,
+                )
+                continue
+
+            src_col = col_indices["source"]
+            cur_col = col_indices.get("currency")
+            rate_col = col_indices.get("out_rate")
+            last_data_row = ws.Cells(ws.Rows.Count, src_col).End(XL_UP).Row
+
+            if last_data_row <= header_row_idx:
+                continue
+
+            data_start = header_row_idx + 1
+            num_data_rows = last_data_row - header_row_idx
+
+            # ── VECTORIZED BULK READ: date + currency columns ────
+            # Determine max column needed for the bulk read
+            max_col = src_col
+            if cur_col is not None:
+                max_col = max(max_col, cur_col)
+            if rate_col is not None:
+                max_col = max(max_col, rate_col)
+
+            bulk_data = ws.Range(
+                ws.Cells(data_start, 1),
+                ws.Cells(last_data_row, max_col)
+            ).Value
+
+            if bulk_data is None:
+                continue
+
+            # Handle single-row case
+            if not isinstance(bulk_data[0], tuple):
+                bulk_data = (bulk_data,)
+
+            # ── COMPUTE RATES IN PYTHON RAM ──────────────────────
+            rate_output = []  # list of (row_offset, rate_value)
+            for row_offset, row_tuple in enumerate(bulk_data):
+                # Parse date (0-indexed into tuple, but col is 1-indexed)
+                inv_date = _parse_cell_date(row_tuple[src_col - 1])
+                if not inv_date:
+                    rate_output.append(None)  # placeholder
+                    continue
+
+                # Parse currency
+                ccy = ""
+                if cur_col is not None:
+                    raw = row_tuple[cur_col - 1]
+                    ccy = str(raw).strip().upper() if raw else ""
+
+                if ccy == "THB":
+                    rate_output.append(1)
+                    continue
+
+                # Cross-tab lookup (pure Python, no COM)
+                rate = _vlookup_exrate(inv_date, ccy, exrate_index)
+                rate_output.append(rate)
+
+            # ── VECTORIZED BULK WRITE: rate column ───────────────
+            if rate_col is not None and rate_output:
+                # Build 2D array for single-column write
+                write_data = [[v] for v in rate_output]
+                write_range = ws.Range(
+                    ws.Cells(data_start, rate_col),
+                    ws.Cells(last_data_row, rate_col)
+                )
+                write_range.Value = write_data
+                logger.info(
+                    "Sheet '%s': Vectorized VLOOKUP write (%d rows in 1 COM call)",
+                    sheet_name, num_data_rows,
+                )
+
+        # ── Save natively through Excel ───────────────────────────
+        is_xls = filepath.lower().endswith(".xls") and not filepath.lower().endswith(".xlsx")
+        if is_xls:
+            final_path = os.path.splitext(filepath)[0] + ".xlsx"
+            wb.SaveAs(_ensure_absolute(final_path), FileFormat=XL_FILE_FORMAT_XLSX)
+            filepath = final_path
+            logger.info(
+                "COM Engine: Processed and converted to %s via native Excel.",
+                os.path.basename(filepath),
+            )
+        else:
+            wb.Save()
+            logger.info(
+                "COM Engine: Saved %s via native Excel.",
+                os.path.basename(filepath),
             )
 
-            # ── STEP 2: Build in-memory ExRate lookup index ──────────
-            exrate_index = _build_exrate_index_com(wb)
-
-            # ── STEP 3: Cross-Tab VLOOKUP on monthly tabs ────────────
-            for sheet_idx in range(1, wb.Sheets.Count + 1):
-                ws = wb.Sheets(sheet_idx)
-                sheet_name = ws.Name
-                if sheet_name in SKIP_SHEET_NAMES:
-                    continue
-
-                # Scan headers (first 10 rows)
-                header_row_idx = None
-                col_indices: Dict[str, int] = {}
-                for row_idx in range(1, 11):
-                    row_vals = []
-                    # Read up to 20 columns for header scan
-                    for col_idx in range(1, 21):
-                        val = ws.Cells(row_idx, col_idx).Value
-                        row_vals.append(
-                            str(val).strip() if val is not None else ""
-                        )
-
-                    if target_cols["source_date"] in row_vals:
-                        header_row_idx = row_idx
-                        for ci, val in enumerate(row_vals):
-                            if val == target_cols["source_date"]:
-                                col_indices["source"] = ci + 1  # 1-indexed
-                            elif val == target_cols["currency"]:
-                                col_indices["currency"] = ci + 1
-                            elif val == target_cols["out_rate"]:
-                                col_indices["out_rate"] = ci + 1
-                        break
-
-                if header_row_idx is None or "source" not in col_indices:
-                    logger.info(
-                        "Sheet '%s' missing source date column — skipped.",
-                        sheet_name,
-                    )
-                    continue
-
-                # Process data rows
-                src_col = col_indices["source"]
-                cur_col = col_indices.get("currency")
-                rate_col = col_indices.get("out_rate")
-                last_data_row = ws.Cells(
-                    ws.Rows.Count, src_col
-                ).End(XL_UP).Row
-
-                for row_idx in range(header_row_idx + 1, last_data_row + 1):
-                    inv_date = _parse_cell_date(
-                        ws.Cells(row_idx, src_col).Value
-                    )
-                    if not inv_date:
-                        continue
-
-                    # Read currency
-                    ccy = ""
-                    if cur_col is not None:
-                        raw = ws.Cells(row_idx, cur_col).Value
-                        ccy = str(raw).strip().upper() if raw else ""
-
-                    if ccy == "THB":
-                        if rate_col is not None:
-                            ws.Cells(row_idx, rate_col).Value = 1
-                        continue
-
-                    # Cross-tab lookup
-                    rate = _vlookup_exrate(inv_date, ccy, exrate_index)
-                    if rate_col is not None:
-                        ws.Cells(row_idx, rate_col).Value = rate
-
-            # ── Save natively through Excel ───────────────────────────
-            # If the original file is a legacy .xls, save it out as a modern .xlsx
-            is_xls = filepath.lower().endswith(".xls") and not filepath.lower().endswith(".xlsx")
-            if is_xls:
-                # FileFormat = 51 strictly enforces .xlsx
-                final_path = os.path.splitext(filepath)[0] + ".xlsx"
-                wb.SaveAs(_ensure_absolute(final_path), FileFormat=51)
-                filepath = final_path
-                logger.info(
-                    "COM Engine: Processed and converted to %s via native Excel.",
-                    os.path.basename(filepath),
-                )
-            else:
-                wb.Save()
-                logger.info(
-                    "COM Engine: Saved %s via native Excel.",
-                    os.path.basename(filepath),
-                )
-
-        except pywintypes.com_error as ce:
-            logger.error("Excel COM error during processing: %s", ce)
-            raise RuntimeError(
-                f"Microsoft Excel COM error: {ce}\n"
-                "Ensure Microsoft Excel is installed on this Windows machine."
-            ) from ce
-        finally:
-            # ── MANDATE 3: Guaranteed cleanup — no zombies ────────────
-            if wb is not None:
-                try:
-                    wb.Close(SaveChanges=False)
-                except Exception:
-                    pass
+    except pywintypes.com_error as ce:
+        logger.error("Excel COM error during processing: %s", ce)
+        raise RuntimeError(
+            f"Microsoft Excel COM error: {ce}\n"
+            "Ensure Microsoft Excel is installed on this Windows machine."
+        ) from ce
+    finally:
+        # ── Guaranteed workbook cleanup ───────────────────────────
+        if wb is not None:
+            try:
+                wb.Close(SaveChanges=False)
+            except Exception:
+                pass
+        # ── Only quit Excel if WE created it ─────────────────────
+        if owns_excel and ctx is not None:
+            ctx.__exit__(None, None, None)
 
     return filepath

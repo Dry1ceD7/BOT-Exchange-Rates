@@ -2,7 +2,7 @@
 """
 core/engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.8) - Cache-First Orchestrator
+BOT Exchange Rate Processor (v2.5.9) - Cache-First Orchestrator
 ---------------------------------------------------------------------------
 Slim orchestrator. Heavy logic extracted to:
   - core/exrate_sheet.py → Master ExRate sheet builder
@@ -209,7 +209,7 @@ class LedgerEngine:
         cell.value = value
 
     # ================================================================== #
-    #  CACHE-FIRST DATA LOADING (v2.5.8)
+    #  CACHE-FIRST DATA LOADING (v2.5.9)
     # ================================================================== #
     async def _preload_api_data(
         self, dates: Set[date], start_date: str
@@ -328,9 +328,14 @@ class LedgerEngine:
     #  PROCESS SINGLE LEDGER
     # ================================================================== #
     async def process_ledger(
-        self, filepath: str, start_date: Optional[str] = None
+        self, filepath: str, start_date: Optional[str] = None,
+        excel=None,
     ) -> str:
-        """Process a single ledger file end-to-end."""
+        """Process a single ledger file end-to-end.
+
+        Args:
+            excel: Optional shared Excel COM instance (for batch pooling).
+        """
         import sys
 
         # ── MANDATE 2: Absolute pathing for COM safety ───────────────
@@ -532,6 +537,7 @@ class LedgerEngine:
                 holidays_names=holidays_names,
                 computed_start=computed_start,
                 target_cols=self.target_cols,
+                excel=excel,
             )
 
             # Handle .xls → .xlsx output path
@@ -708,26 +714,61 @@ class LedgerEngine:
             Callable[[int, int, str, Optional[str]], None]
         ] = None,
     ) -> Tuple[int, int, List[str]]:
-        """Batch processing with pre-edit backup, cache, and auto-cleanup."""
+        """
+        Batch processing with pre-edit backup, cache, and auto-cleanup.
+
+        MANDATE 3 — Instance Pooling:
+          On Windows, boots a SINGLE Excel.Application instance for the
+          entire batch queue. All files are processed inside that one
+          instance. excel.Quit() fires only when the full batch finishes.
+        """
+        import sys
         self.backup.cleanup_old_backups(max_age_days=7)
         total = len(filepaths)
         success = 0
         errors: List[str] = []
-        for idx, fp in enumerate(filepaths):
-            fname = os.path.basename(fp)
+
+        # ── MANDATE 3: Pool a single Excel instance for the batch ─────
+        excel_instance = None
+        excel_ctx = None
+        if sys.platform == "win32":
             try:
-                await self.process_ledger(fp, start_date=start_date)
-                success += 1
-                if progress_cb:
-                    progress_cb(idx + 1, total, fname, None)
-            except BackupError as e:
-                err_msg = f"{fname}: BACKUP FAILED — skipped ({e})"
-                errors.append(err_msg)
-                if progress_cb:
-                    progress_cb(idx + 1, total, fname, str(e))
+                from core.com_engine import ExcelCOM
+                excel_ctx = ExcelCOM()
+                excel_instance = excel_ctx.__enter__()
+                logger.info(
+                    "Batch: Pooled single Excel COM instance for %d files.",
+                    total,
+                )
             except Exception as e:
-                err_msg = f"{fname}: {e!s}"
-                errors.append(err_msg)
-                if progress_cb:
-                    progress_cb(idx + 1, total, fname, str(e))
+                logger.warning("Failed to pool Excel COM: %s", e)
+                excel_instance = None
+                excel_ctx = None
+
+        try:
+            for idx, fp in enumerate(filepaths):
+                fname = os.path.basename(fp)
+                try:
+                    await self.process_ledger(
+                        fp, start_date=start_date, excel=excel_instance,
+                    )
+                    success += 1
+                    if progress_cb:
+                        progress_cb(idx + 1, total, fname, None)
+                except BackupError as e:
+                    err_msg = f"{fname}: BACKUP FAILED — skipped ({e})"
+                    errors.append(err_msg)
+                    if progress_cb:
+                        progress_cb(idx + 1, total, fname, str(e))
+                except Exception as e:
+                    err_msg = f"{fname}: {e!s}"
+                    errors.append(err_msg)
+                    if progress_cb:
+                        progress_cb(idx + 1, total, fname, str(e))
+        finally:
+            # ── Quit the pooled Excel instance ────────────────────────
+            if excel_ctx is not None:
+                excel_ctx.__exit__(None, None, None)
+                logger.info("Batch: Pooled Excel COM instance terminated.")
+
         return success, total - success, errors

@@ -2,7 +2,7 @@
 """
 gui/app.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.8) - Enterprise Edition
+BOT Exchange Rate Processor (v2.5.9) - Enterprise Edition
 ---------------------------------------------------------------------------
 Zero-emoji, typography-driven corporate UI.
 
@@ -115,7 +115,7 @@ class BOTExrateApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("BOT Exchange Rate Processor  |  V2.5.8")
+        self.title("BOT Exchange Rate Processor  |  V2.5.9")
         self.geometry("740x780")
         self.resizable(False, True)
         self.configure(fg_color=COLOR_BG_DARK)
@@ -160,7 +160,7 @@ class BOTExrateApp(ctk.CTk):
             font=ctk.CTkFont(size=22, weight="bold"), text_color=COLOR_HEADER_TEXT
         ).pack()
         ctk.CTkLabel(
-            inner, text="Enterprise Accounting Suite  |  V2.5.8",
+            inner, text="Enterprise Accounting Suite  |  V2.5.9",
             font=ctk.CTkFont(size=11), text_color=COLOR_HEADER_SUB
         ).pack(pady=(2, 0))
 
