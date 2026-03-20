@@ -2,7 +2,7 @@
 """
 core/xls_converter.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.5) - Legacy .xls Conversion Pipeline
+BOT Exchange Rate Processor (v2.5.7) - Legacy .xls Conversion Pipeline
 ---------------------------------------------------------------------------
 Converts legacy .xls files to .xlsx using xlrd + openpyxl.
 Preserves: fonts, colors, borders, alignment, column widths, row heights,

@@ -2,7 +2,7 @@
 """
 core/logic.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.5) - Featherweight Architecture
+BOT Exchange Rate Processor (v2.5.7) - Featherweight Architecture
 ---------------------------------------------------------------------------
 The Standard Date Resolution Engine. Fetches the exchange rate for the
 exact date provided. If the target date is a weekend or BOT holiday,
