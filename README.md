@@ -59,9 +59,15 @@ It replaces a fragmented, error-prone 3-script workflow with a single, mathemati
 ## Features
 
 ### Core Processing
-- **Zero-Guess Rollback Engine** — If a date falls on a weekend or BOT holiday, the engine steps back 1 day at a time (max 5 days) to find the exact valid trading date. No guessing, no approximation.
-- **Dual Currency Support** — Simultaneous USD and EUR rate resolution per row
-- **Decimal Precision** — All rates written as `Decimal` values quantized to 4 decimal places (Thai accounting standard)
+- **Zero-Guess Rollback Engine & Static Holiday Overlay** — If a date falls on a weekend or BOT holiday, the engine steps back 1 day at a time (max 5 days). The engine automatically unpacks hidden weekend substitutions from the BOT API and overlays static Thai public holidays to guarantee 100% calendar accuracy, even if the API omits dates.
+- **Dual Currency Support** — Simultaneous USD and EUR rate resolution per row.
+- **Decimal Precision** — All rates written as `Decimal` values quantized to 4 decimal places (Thai accounting standard).
+
+### Advanced File Handling (New in v2.5.7)
+- **Zero-Fidelity Loss Conversion** — Unparalleled legacy `.xls` support via native background proxies.
+- **Windows Native MS Excel Engine** — On Windows machines, explicitly commands `win32com` to orchestrate Microsoft Excel in the background for identical visual conversion.
+- **Mac/Linux LibreOffice Proxy** — Commands `soffice --headless` as an absolute 1:1 format bridge when MS Excel is unavailable natively.
+- **Zero-Touch Cell Preservation** — Values are injected into monthly ledger tabs exclusively through `.value` writes, perfectly preserving enterprise fonts, cell colors, borders, and column geometries.
 
 ### GUI
 - **Smart Date Toggle** — Defaults to today's date; unlock dropdowns for historical date selection
