@@ -187,6 +187,37 @@ class LedgerEngine:
             current -= timedelta(days=1)
         return None
 
+    # ── Zero-Touch Write (Global Formatting Protocol) ─────────────
+    @staticmethod
+    def _zero_touch_write(ws, row: int, col: int, value) -> None:
+        """
+        Write a value to a cell WITHOUT altering its formatting.
+
+        Zero-Touch Protocol: captures the cell's existing font, fill,
+        border, alignment, and number_format BEFORE the write, then
+        explicitly re-applies them. This guarantees that monthly
+        ledger tab formatting is never touched by the engine.
+
+        Silently skips MergedCell instances (read-only).
+        """
+        cell = ws.cell(row=row, column=col)
+        if isinstance(cell, MergedCell):
+            return
+        # Capture existing style before write
+        original_font = cell.font.copy()
+        original_fill = cell.fill.copy()
+        original_border = cell.border.copy()
+        original_alignment = cell.alignment.copy()
+        original_number_format = cell.number_format
+        # Write value
+        cell.value = value
+        # Re-apply original style (Zero-Touch guarantee)
+        cell.font = original_font
+        cell.fill = original_fill
+        cell.border = original_border
+        cell.alignment = original_alignment
+        cell.number_format = original_number_format
+
     # ================================================================== #
     #  CACHE-FIRST DATA LOADING (v2.5.5)
     # ================================================================== #
@@ -442,7 +473,10 @@ class LedgerEngine:
                         ).value,
                     }
 
-        # ── STEP 3: Cross-Tab VLOOKUP — ExRate is single source of truth ──
+        # ── STEP 3: Cross-Tab VLOOKUP — Zero-Touch Formatting Protocol ──
+        # The engine MUST NEVER alter fonts, colors, borders, or styles
+        # on monthly ledger tabs. When writing a value, the cell's
+        # existing style is captured and explicitly re-applied.
         for sheet_name, mapping in sheet_maps.items():
             ws = wb[sheet_name]
             cols = mapping["columns"]
@@ -468,22 +502,18 @@ class LedgerEngine:
                         ccy = str(raw).strip().upper() if raw else ""
                 if ccy == "THB":
                     if out_rate_idx is not None:
-                        out_cell = ws.cell(
-                            row=row_idx, column=out_rate_idx + 1
+                        self._zero_touch_write(
+                            ws, row_idx, out_rate_idx + 1, 1
                         )
-                        if not isinstance(out_cell, MergedCell):
-                            out_cell.value = 1
                     continue
                 # Cross-tab lookup: walk backwards in ExRate index
                 rate = self._vlookup_exrate(
                     inv_date, ccy, exrate_index,
                 )
                 if out_rate_idx is not None:
-                    out_cell = ws.cell(
-                        row=row_idx, column=out_rate_idx + 1
+                    self._zero_touch_write(
+                        ws, row_idx, out_rate_idx + 1, rate
                     )
-                    if not isinstance(out_cell, MergedCell):
-                        out_cell.value = rate
 
         # ── Save & Cleanup ───────────────────────────────────────────
         if converted:
