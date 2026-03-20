@@ -165,22 +165,39 @@ def convert_xls_to_xlsx(filepath: str) -> str:
     """
     Convert a legacy .xls file to .xlsx preserving formatting natively.
 
-    Method 1 (Primary): LibreOffice `soffice --headless`
-      Provides 100% perfect, native conversion of the proprietary .xls
-      binary format. Preserves freeze panes, macros, charts, fonts,
-      exact dimensions, and all cell styles identically to Windows Excel.
-
-    Method 2 (Fallback): xlrd -> openpyxl
-      Reads XF records to preserve roughly ~95% of visual formatting.
+    Method 1 (Absolute Primary - Windows): Microsoft Excel natively (win32com)
+    Method 2 (Primary - Mac/Linux): LibreOffice `soffice --headless`
+    Method 3 (Fallback): xlrd -> openpyxl (~95% visual formatting)
     """
     logger.info(f"Converting legacy .xls: {os.path.basename(filepath)}")
-
+    filepath = os.path.abspath(filepath)
     dir_name = os.path.dirname(filepath)
     base_name = os.path.splitext(os.path.basename(filepath))[0]
     # We output to a temp file starting with a dot
     temp_path = os.path.join(dir_name, f".{base_name}_converted.xlsx")
 
-    # ── Method 1: PERFECT LIBREOFFICE CONVERSION ─────────────────────
+    # ── Method 1: PERFECT MICROSOFT EXCEL CONVERSION (WINDOWS ONLY) ───
+    if os.name == "nt":
+        try:
+            import win32com.client  # type: ignore
+            logger.info("Using Native Microsoft Excel Engine (win32com) for 100% fidelity.")
+            excel = win32com.client.DispatchEx("Excel.Application")
+            excel.Visible = False
+            excel.DisplayAlerts = False
+            try:
+                wb = excel.Workbooks.Open(filepath)
+                # FileFormat = 51 is purely .xlsx
+                wb.SaveAs(os.path.abspath(temp_path), FileFormat=51)
+                wb.Close(False)
+            finally:
+                excel.Quit()
+            if os.path.exists(temp_path):
+                logger.info(f"MS Excel native conversion complete: {temp_path}")
+                return temp_path
+        except Exception as e:
+            logger.warning(f"Native Excel conversion failed, falling back to LibreOffice... {e}")
+
+    # ── Method 2: PERFECT LIBREOFFICE CONVERSION (MAC/LINUX) ─────────
     soffice_path = _get_soffice_path()
     if soffice_path:
         logger.info("Using LibreOffice Native Engine for 100% formatting fidelity.")
