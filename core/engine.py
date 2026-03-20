@@ -396,6 +396,7 @@ class LedgerEngine:
                 
         else:
             # Standard openpyxl pre-scan for .xlsx (and Mac/Linux converted files)
+            wb_scan = None
             try:
                 import openpyxl
                 wb_scan = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
@@ -435,7 +436,9 @@ class LedgerEngine:
                     except OSError as cleanup_err:
                         logger.debug("Cleanup failed for temp file %s: %s", filepath, cleanup_err)
                 raise
-        wb_scan.close()
+            finally:
+                if wb_scan is not None:
+                    wb_scan.close()
 
         # ── Date hierarchy ───────────────────────────────────────────
         target_year = (
@@ -531,12 +534,13 @@ class LedgerEngine:
                 target_cols=self.target_cols,
             )
 
-            # Handle .xls → .xlsx output path (mirrors openpyxl behavior)
+            # Handle .xls → .xlsx output path
             if converted:
-                import shutil
                 final_path = os.path.splitext(original_path)[0] + ".xlsx"
-                # Move the processed temp file to the permanent output path
-                shutil.move(result, final_path)
+                # COM engine SaveAs may have already saved to the final path
+                if os.path.abspath(result) != os.path.abspath(final_path):
+                    import shutil
+                    shutil.move(result, final_path)
                 result = final_path
                 logger.info(
                     "Saved processed output as: %s (original .xls preserved)",
