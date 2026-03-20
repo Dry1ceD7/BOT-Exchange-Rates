@@ -196,33 +196,26 @@ Go back to your **Terminal** / **Command Prompt** (make sure you're still inside
 **macOS / Linux:**
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
 pip install -r requirements.txt
 python3 main.py
 ```
 
 **Windows:**
 
-> **⚠️ Windows PowerShell Users:** If you receive an `Execution Policy` error (`activate.ps1 cannot be loaded because running scripts is disabled`), you have two options:
-> - **Option A (CMD Bypass):** Open standard **Command Prompt** (`cmd.exe`) instead of PowerShell. Batch scripts bypass this policy entirely.
-> - **Option B (Unblock Local PowerShell):** Run this command once in PowerShell: `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser`
+> **⚡ Quickest Method:** Simply double-click the included `run.bat` file. It automatically installs all dependencies and launches the app — no manual commands needed.
 
-Alternatively, you can skip the manual commands below and simply double-click the included `run.bat` file, which automatically bypasses execution policies and sets up everything for you.
+If you prefer to run commands manually:
 
 ```bat
-python -m venv venv
-venv\Scripts\activate.bat
 pip install -r requirements.txt
 python main.py
 ```
 
+> **⚠️ Permission Error?** If `pip install` fails with a `PermissionError`, run your terminal **as Administrator** (right-click → "Run as administrator").
+
 > **💡 What do these commands do?**
-> - `python -m venv venv` — Creates a private workspace so the app's libraries don't interfere with your computer
-> - `venv\Scripts\activate.bat` — Enters that workspace (explicitly using `.bat` to avoid PowerShell Execution Policy locks)
-> - `source venv/bin/activate` — Enters that workspace
 > - `pip install -r requirements.txt` — Downloads all the libraries the app needs (one-time only)
-> - `python3 main.py` — Starts the application!
+> - `python3 main.py` / `python main.py` — Starts the application!
 
 ---
 
