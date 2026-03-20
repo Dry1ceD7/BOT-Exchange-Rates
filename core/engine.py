@@ -331,6 +331,11 @@ class LedgerEngine:
         self, filepath: str, start_date: Optional[str] = None
     ) -> str:
         """Process a single ledger file end-to-end."""
+        import sys
+
+        # ── MANDATE 2: Absolute pathing for COM safety ───────────────
+        filepath = os.path.abspath(filepath)
+
         self._check_memory_guardrail(filepath)
         self.backup.create_backup(filepath)
 
@@ -343,8 +348,12 @@ class LedgerEngine:
             filepath = convert_xls_to_xlsx(filepath)
             converted = True
 
+        # ── Pre-scan dates for API data loading ──────────────────────
+        # We need to scan dates BEFORE choosing the engine path so that
+        # the COM engine has all the rate/holiday data it needs.
+        # Use openpyxl for the lightweight pre-scan (read-only).
         try:
-            wb = openpyxl.load_workbook(filepath)
+            wb_scan = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
         except Exception:
             if converted and os.path.exists(filepath):
                 try:
@@ -354,11 +363,11 @@ class LedgerEngine:
             raise
 
         all_target_dates: Set[date] = set()
-        sheet_maps = {}
-        for sheet_name in wb.sheetnames:
+        sheet_maps_prescan = {}
+        for sheet_name in wb_scan.sheetnames:
             if sheet_name in SKIP_SHEET_NAMES:
                 continue
-            ws = wb[sheet_name]
+            ws = wb_scan[sheet_name]
             header_row_idx = None
             col_indices: Dict[str, int] = {}
             for row_idx, row in enumerate(
@@ -379,28 +388,22 @@ class LedgerEngine:
                     break
 
             if header_row_idx is None or "source" not in col_indices:
-                logger.info(
-                    f"Sheet '{sheet_name}' missing source date column — "
-                    f"skipped."
-                )
                 continue
 
-            sheet_maps[sheet_name] = {
+            sheet_maps_prescan[sheet_name] = {
                 "header_row": header_row_idx,
                 "columns": col_indices,
             }
             src_idx = col_indices["source"] + 1
-            for row_idx in range(header_row_idx + 1, ws.max_row + 1):
+            for row_idx in range(header_row_idx + 1, (ws.max_row or 0) + 1):
                 parsed_date = self._parse_date(
                     ws.cell(row=row_idx, column=src_idx).value
                 )
                 if parsed_date:
                     all_target_dates.add(parsed_date)
+        wb_scan.close()
 
         # ── Date hierarchy ───────────────────────────────────────────
-        # Start date is ALWAYS computed from target_year, NOT from
-        # prescan. Prescan is only used for the GUI's date-range display.
-        # The ExRate tab must cover from last week of Dec (year-1).
         target_year = (
             min(all_target_dates).year if all_target_dates
             else date.today().year
@@ -433,16 +436,13 @@ class LedgerEngine:
                     h_obj = datetime.strptime(h_str, "%Y-%m-%d").date()
                     holidays_names[h_obj] = h_name
 
-                    # Unpack hidden actual weekend dates from Substitution strings
                     m = sub_pattern.search(h_name)
                     if m:
                         real_name = m.group(1).strip()
                         date_str = m.group(2).strip()
-                        # Clean ordinals (st, nd, rd, th) and weekday names (Sunday)
                         date_str_clean = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', date_str)
                         date_str_clean = re.sub(r'^[A-Za-z]+\s+', '', date_str_clean)
                         try:
-                            # e.g., "31 May 2026"
                             real_dt = datetime.strptime(date_str_clean, '%d %B %Y').date()
                             holidays_names[real_dt] = real_name
                             master_holidays_set.add(real_dt)
@@ -451,35 +451,113 @@ class LedgerEngine:
                 except (ValueError, TypeError):
                     logger.debug("Skipped unparseable holiday name: %s", h_str)
 
-            # ── 🚨 STATIC HOLIDAY OVERLAY (GAP FILLER) ───────────────────
-            # The BOT API occasionally drops unmoving static holidays from the
-            # payload entirely if they fall on weekends without strict substitutions.
-            # We hardcode fixed Thai holidays here strictly as a defensive fallback.
+            # ── STATIC HOLIDAY OVERLAY (GAP FILLER) ──────────────────
             static_holidays = {
-                (1, 1): "New Year’s Day",
+                (1, 1): "New Year's Day",
                 (4, 6): "Chakri Memorial Day",
                 (4, 13): "Songkran Festival",
                 (4, 14): "Songkran Festival",
                 (4, 15): "Songkran Festival",
                 (5, 1): "National Labour Day",
-                (6, 3): "H.M. Queen Suthida’s Birthday",
-                (7, 28): "H.M. King Maha Vajiralongkorn’s Birthday",
-                (8, 12): "H.M. Queen Sirikit The Queen Mother’s Birthday / Mother’s Day",
+                (6, 3): "H.M. Queen Suthida's Birthday",
+                (7, 28): "H.M. King Maha Vajiralongkorn's Birthday",
+                (8, 12): "H.M. Queen Sirikit The Queen Mother's Birthday / Mother's Day",
                 (10, 13): "H.M. King Bhumibol Adulyadej The Great Memorial Day",
                 (10, 23): "Chulalongkorn Day",
-                (12, 5): "H.M. King Bhumibol Adulyadej The Great’s Birthday / Father’s Day",
+                (12, 5): "H.M. King Bhumibol Adulyadej The Great's Birthday / Father's Day",
                 (12, 10): "Constitution Day",
-                (12, 31): "New Year’s Eve",
+                (12, 31): "New Year's Eve",
             }
             for (month, day), name in static_holidays.items():
                 try:
                     fixed_dt = date(year, month, day)
-                    # Only inject if the API didn't already provide it
                     if fixed_dt not in holidays_names:
                         holidays_names[fixed_dt] = name
                         master_holidays_set.add(fixed_dt)
                 except ValueError:
                     pass
+
+        # ══════════════════════════════════════════════════════════════
+        #  OS-AWARE DISPATCHER: COM (Windows) vs openpyxl (Mac/Linux)
+        # ══════════════════════════════════════════════════════════════
+        if sys.platform == "win32":
+            # ── PRIMARY PATH: Native Microsoft Excel COM Engine ───────
+            from core.com_engine import process_ledger_com
+            logger.info("Dispatching to Native COM Engine (Windows).")
+
+            result = process_ledger_com(
+                filepath=filepath,
+                usd_buying=usd_buying,
+                usd_selling=usd_selling,
+                eur_buying=eur_buying,
+                eur_selling=eur_selling,
+                holidays_set=master_holidays_set,
+                holidays_names=holidays_names,
+                computed_start=computed_start,
+                target_cols=self.target_cols,
+            )
+
+            # Cleanup temp converted file if needed
+            if converted and filepath != original_path:
+                try:
+                    os.remove(filepath)
+                except OSError as e:
+                    logger.debug("Cleanup of temp file failed: %s", e)
+
+            gc.collect()
+            return result
+
+        # ══════════════════════════════════════════════════════════════
+        #  FALLBACK PATH: openpyxl (macOS / Linux)
+        # ══════════════════════════════════════════════════════════════
+        logger.info("Using openpyxl engine (non-Windows fallback).")
+
+        try:
+            wb = openpyxl.load_workbook(filepath)
+        except Exception:
+            if converted and os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except OSError as cleanup_err:
+                    logger.debug("Cleanup failed for temp file %s: %s", filepath, cleanup_err)
+            raise
+
+        # Re-scan sheets for the openpyxl path (uses full workbook, not read-only)
+        sheet_maps = {}
+        for sheet_name in wb.sheetnames:
+            if sheet_name in SKIP_SHEET_NAMES:
+                continue
+            ws = wb[sheet_name]
+            header_row_idx = None
+            col_indices_local: Dict[str, int] = {}
+            for row_idx, row in enumerate(
+                ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
+            ):
+                row_strs = [
+                    str(c).strip() if c is not None else "" for c in row
+                ]
+                if self.target_cols["source_date"] in row_strs:
+                    header_row_idx = row_idx
+                    for ci, val in enumerate(row_strs):
+                        if val == self.target_cols["source_date"]:
+                            col_indices_local["source"] = ci
+                        elif val == self.target_cols["currency"]:
+                            col_indices_local["currency"] = ci
+                        elif val == self.target_cols["out_rate"]:
+                            col_indices_local["out_rate"] = ci
+                    break
+
+            if header_row_idx is None or "source" not in col_indices_local:
+                logger.info(
+                    f"Sheet '{sheet_name}' missing source date column — "
+                    f"skipped."
+                )
+                continue
+
+            sheet_maps[sheet_name] = {
+                "header_row": header_row_idx,
+                "columns": col_indices_local,
+            }
 
         # ── STEP 1: Build ExRate master sheet ────────────────────────
         update_master_exrate_sheet(
@@ -515,9 +593,6 @@ class LedgerEngine:
                     }
 
         # ── STEP 3: Cross-Tab VLOOKUP — Zero-Touch Formatting Protocol ──
-        # The engine MUST NEVER alter fonts, colors, borders, or styles
-        # on monthly ledger tabs. When writing a value, the cell's
-        # existing style is captured and explicitly re-applied.
         for sheet_name, mapping in sheet_maps.items():
             ws = wb[sheet_name]
             cols = mapping["columns"]
@@ -547,7 +622,6 @@ class LedgerEngine:
                             ws, row_idx, out_rate_idx + 1, 1
                         )
                     continue
-                # Cross-tab lookup: walk backwards in ExRate index
                 rate = self._vlookup_exrate(
                     inv_date, ccy, exrate_index,
                 )
@@ -558,12 +632,9 @@ class LedgerEngine:
 
         # ── Save & Cleanup ───────────────────────────────────────────
         if converted:
-            # MANDATE 1: .xls → save as NEW .xlsx alongside original.
-            # The original .xls is left untouched as a physical backup.
             final_path = os.path.splitext(original_path)[0] + ".xlsx"
             wb.save(final_path)
             wb.close()
-            # Remove only the hidden temp conversion file
             try:
                 os.remove(filepath)
             except OSError as e:
@@ -574,8 +645,6 @@ class LedgerEngine:
                 os.path.basename(final_path),
             )
         else:
-            # MANDATE 2: .xlsx → overwrite in-place.
-            # BackupManager already created a backup before processing.
             wb.save(filepath)
             wb.close()
             logger.info(
