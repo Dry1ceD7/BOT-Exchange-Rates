@@ -74,5 +74,40 @@ def main():
     app.mainloop()
 
 
+import traceback
+
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    """
+    Fallback handler to catch fatal errors when running without a console.
+    Crucial for Windows --noconsole mode so crash logs are not lost.
+    """
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+
+    error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    
+    # Write to local error.log
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "error.log")
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n--- FATAL ERROR ---\n{error_msg}\n")
+    except Exception:
+        pass
+        
+    # Show GUI popup
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "Fatal Application Error", 
+            f"A critical crash occurred:\n\n{exc_value}\n\nPlease check error.log for full details."
+        )
+        root.destroy()
+    except Exception:
+        pass
+
+sys.excepthook = global_exception_handler
+
 if __name__ == "__main__":
     main()
