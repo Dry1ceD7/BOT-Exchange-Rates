@@ -2,7 +2,7 @@
 """
 core/exrate_sheet.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.6.0) - Master ExRate Sheet Builder
+BOT Exchange Rate Processor (v2.6.1) - Master ExRate Sheet Builder
 ---------------------------------------------------------------------------
 Separated from engine.py for SFFB compliance (<200 lines).
 Builds and updates the unified "ExRate" master tab in Excel workbooks.

@@ -4,7 +4,7 @@
 
 **Enterprise-Grade Bank of Thailand Exchange Rate Automation**
 
-Version 2.6.0  ·  Modular SFFB Architecture  ·  Zero-Latency Cache
+Version 2.6.1  ·  Modular SFFB Architecture  ·  Zero-Latency Cache
 
 ---
 
@@ -69,7 +69,7 @@ It replaces a fragmented, error-prone 3-script workflow with a single, mathemati
 - **Dual Currency Support** — Simultaneous USD and EUR rate resolution per row.
 - **Decimal Precision** — All rates written as `Decimal` values quantized to 4 decimal places (Thai accounting standard).
 
-### Advanced File Handling (New in v2.6.0)
+### Advanced File Handling (New in v2.6.1)
 - **Native COM Engine (Windows 11 Primary)** — The entire data processing pipeline uses `win32com.client` to spawn an invisible Microsoft Excel instance. Files are opened, modified, and saved by Excel itself — guaranteeing 100% preservation of all enterprise fonts, styles, borders, and layouts.
 - **Zombie-Safe Memory Management** — The `ExcelCOM` context manager wraps all COM operations in a strict `try/finally` lifecycle. `excel.Quit()` is always called, preventing orphaned `EXCEL.EXE` processes in Task Manager.
 - **OS-Aware Dispatcher** — `engine.py` detects `sys.platform == 'win32'` and routes to the COM engine. On macOS/Linux, it falls back to `openpyxl` with zero-touch cell writes.
@@ -287,6 +287,6 @@ This project is developed for internal enterprise use. All rights reserved.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V2.6.0*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V2.6.1*
 
 </div>

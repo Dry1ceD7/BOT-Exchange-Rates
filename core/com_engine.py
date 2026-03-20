@@ -2,13 +2,13 @@
 """
 core/com_engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.6.0) — High-Speed Native Windows COM Engine
+BOT Exchange Rate Processor (v2.6.1) — High-Speed Native Windows COM Engine
 ---------------------------------------------------------------------------
 Primary data processing engine for Windows 11 using win32com.client.
 Spawns an invisible Microsoft Excel instance to read/write ledger files,
 guaranteeing 100% preservation of all native styles, fonts, and layouts.
 
-PERFORMANCE ARCHITECTURE (v2.6.0):
+PERFORMANCE ARCHITECTURE (v2.6.1):
   1. Silent Mode: Calculation=Manual, EnableEvents=False, ScreenUpdating=False
   2. Vectorized I/O: All reads/writes use bulk Range operations (zero cell loops)
   3. Instance Pooling: Optional shared Excel instance for batch processing
@@ -111,9 +111,20 @@ class ExcelCOM:
         self.excel.Visible = False
         self.excel.DisplayAlerts = False
         # ── MANDATE 1: Silent Mode Performance Flags ──────────────
-        self.excel.ScreenUpdating = False
-        self.excel.Calculation = XL_CALC_MANUAL
-        self.excel.EnableEvents = False
+        # Each flag is wrapped individually — some Excel versions or
+        # configurations reject certain properties. Graceful degrade.
+        try:
+            self.excel.ScreenUpdating = False
+        except Exception as e:
+            logger.warning("Could not set ScreenUpdating=False: %s", e)
+        try:
+            self.excel.Calculation = XL_CALC_MANUAL
+        except Exception as e:
+            logger.warning("Could not set Calculation=Manual: %s (Excel will recalc per write)", e)
+        try:
+            self.excel.EnableEvents = False
+        except Exception as e:
+            logger.warning("Could not set EnableEvents=False: %s", e)
         return self.excel
 
     def __exit__(self, exc_type, exc_val, exc_tb):

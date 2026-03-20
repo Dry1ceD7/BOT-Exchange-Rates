@@ -2,7 +2,7 @@
 """
 core/engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.6.0) - Cache-First Orchestrator
+BOT Exchange Rate Processor (v2.6.1) - Cache-First Orchestrator
 ---------------------------------------------------------------------------
 Slim orchestrator. Heavy logic extracted to:
   - core/exrate_sheet.py → Master ExRate sheet builder
@@ -210,7 +210,7 @@ class LedgerEngine:
         cell.value = value
 
     # ================================================================== #
-    #  CACHE-FIRST DATA LOADING (v2.6.0)
+    #  CACHE-FIRST DATA LOADING (v2.6.1)
     # ================================================================== #
     async def _preload_api_data(
         self, dates: Set[date], start_date: str
@@ -393,7 +393,7 @@ class LedgerEngine:
                     header_row_idx = None
                     src_col_idx = None
                     for row_idx in range(min(10, sheet.nrows)):
-                        row_vals = [str(c.value).strip() for c in sheet.row(row_idx)]
+                        row_vals = [str(c.value).strip() if c.value is not None else "" for c in sheet.row(row_idx)]
                         if self.target_cols["source_date"] in row_vals:
                             header_row_idx = row_idx
                             src_col_idx = row_vals.index(self.target_cols["source_date"])
