@@ -432,7 +432,7 @@ class LedgerEngine:
                 try:
                     h_obj = datetime.strptime(h_str, "%Y-%m-%d").date()
                     holidays_names[h_obj] = h_name
-                    
+
                     # Unpack hidden actual weekend dates from Substitution strings
                     m = sub_pattern.search(h_name)
                     if m:
@@ -450,6 +450,36 @@ class LedgerEngine:
                             pass
                 except (ValueError, TypeError):
                     logger.debug("Skipped unparseable holiday name: %s", h_str)
+
+            # ── 🚨 STATIC HOLIDAY OVERLAY (GAP FILLER) ───────────────────
+            # The BOT API occasionally drops unmoving static holidays from the
+            # payload entirely if they fall on weekends without strict substitutions.
+            # We hardcode fixed Thai holidays here strictly as a defensive fallback.
+            static_holidays = {
+                (1, 1): "New Year’s Day",
+                (4, 6): "Chakri Memorial Day",
+                (4, 13): "Songkran Festival",
+                (4, 14): "Songkran Festival",
+                (4, 15): "Songkran Festival",
+                (5, 1): "National Labour Day",
+                (6, 3): "H.M. Queen Suthida’s Birthday",
+                (7, 28): "H.M. King Maha Vajiralongkorn’s Birthday",
+                (8, 12): "H.M. Queen Sirikit The Queen Mother’s Birthday / Mother’s Day",
+                (10, 13): "H.M. King Bhumibol Adulyadej The Great Memorial Day",
+                (10, 23): "Chulalongkorn Day",
+                (12, 5): "H.M. King Bhumibol Adulyadej The Great’s Birthday / Father’s Day",
+                (12, 10): "Constitution Day",
+                (12, 31): "New Year’s Eve",
+            }
+            for (month, day), name in static_holidays.items():
+                try:
+                    fixed_dt = date(year, month, day)
+                    # Only inject if the API didn't already provide it
+                    if fixed_dt not in holidays_names:
+                        holidays_names[fixed_dt] = name
+                        master_holidays_set.add(fixed_dt)
+                except ValueError:
+                    pass
 
         # ── STEP 1: Build ExRate master sheet ────────────────────────
         update_master_exrate_sheet(
