@@ -487,30 +487,30 @@ class LedgerEngine:
 
         # ── Save & Cleanup ───────────────────────────────────────────
         if converted:
-            # Save directly over the original path (with .xlsx extension)
+            # MANDATE 1: .xls → save as NEW .xlsx alongside original.
+            # The original .xls is left untouched as a physical backup.
             final_path = os.path.splitext(original_path)[0] + ".xlsx"
             wb.save(final_path)
             wb.close()
-            # Remove the temp conversion file
+            # Remove only the hidden temp conversion file
             try:
                 os.remove(filepath)
             except OSError as e:
                 logger.debug("Cleanup of temp file failed: %s", e)
-            # Remove the original .xls so there's no split output
-            if original_path != final_path and os.path.exists(original_path):
-                try:
-                    os.remove(original_path)
-                except OSError as e:
-                    logger.debug("Cleanup of original .xls failed: %s", e)
             filepath = final_path
             logger.info(
-                "Saved processed output as: %s",
+                "Saved processed output as: %s (original .xls preserved)",
                 os.path.basename(final_path),
             )
         else:
-            # .xlsx input — save in-place
+            # MANDATE 2: .xlsx → overwrite in-place.
+            # BackupManager already created a backup before processing.
             wb.save(filepath)
             wb.close()
+            logger.info(
+                "Overwritten in-place: %s",
+                os.path.basename(filepath),
+            )
         gc.collect()
         return filepath
 
