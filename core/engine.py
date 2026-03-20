@@ -497,12 +497,17 @@ class LedgerEngine:
                 target_cols=self.target_cols,
             )
 
-            # Cleanup temp converted file if needed
-            if converted and filepath != original_path:
-                try:
-                    os.remove(filepath)
-                except OSError as e:
-                    logger.debug("Cleanup of temp file failed: %s", e)
+            # Handle .xls → .xlsx output path (mirrors openpyxl behavior)
+            if converted:
+                import shutil
+                final_path = os.path.splitext(original_path)[0] + ".xlsx"
+                # Move the processed temp file to the permanent output path
+                shutil.move(result, final_path)
+                result = final_path
+                logger.info(
+                    "Saved processed output as: %s (original .xls preserved)",
+                    os.path.basename(final_path),
+                )
 
             gc.collect()
             return result
