@@ -461,11 +461,23 @@ def process_ledger_com(
                         ws.Cells(row_idx, rate_col).Value = rate
 
             # ── Save natively through Excel ───────────────────────────
-            wb.Save()
-            logger.info(
-                "COM Engine: Saved %s via native Excel.",
-                os.path.basename(filepath),
-            )
+            # If the original file is a legacy .xls, save it out as a modern .xlsx
+            is_xls = filepath.lower().endswith(".xls") and not filepath.lower().endswith(".xlsx")
+            if is_xls:
+                # FileFormat = 51 strictly enforces .xlsx
+                final_path = os.path.splitext(filepath)[0] + ".xlsx"
+                wb.SaveAs(_ensure_absolute(final_path), FileFormat=51)
+                filepath = final_path
+                logger.info(
+                    "COM Engine: Processed and converted to %s via native Excel.",
+                    os.path.basename(filepath),
+                )
+            else:
+                wb.Save()
+                logger.info(
+                    "COM Engine: Saved %s via native Excel.",
+                    os.path.basename(filepath),
+                )
 
         except pywintypes.com_error as ce:
             logger.error("Excel COM error during processing: %s", ce)

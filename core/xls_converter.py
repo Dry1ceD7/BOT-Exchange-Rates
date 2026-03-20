@@ -50,44 +50,7 @@ def convert_xls_to_xlsx(filepath: str) -> str:
     base_name = os.path.splitext(os.path.basename(filepath))[0]
     temp_path = os.path.join(dir_name, f".{base_name}_converted.xlsx")
 
-    # ── Priority 1: MICROSOFT EXCEL INTEGRATION (WINDOWS PRIME) ──────
-    import sys
-    if sys.platform == "win32":
-        try:
-            import pywintypes
-            import win32com.client  # type: ignore
-        except ImportError:
-            error_msg = (
-                "FATAL: Missing Windows pywin32 dependency.\n\n"
-                "Please run: pip install pywin32"
-            )
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
-
-        try:
-            logger.info("Engaging Native Microsoft Excel Engine (win32com).")
-            excel = win32com.client.DispatchEx("Excel.Application")
-            excel.Visible = False
-            excel.DisplayAlerts = False
-            try:
-                wb = excel.Workbooks.Open(filepath)
-                # FileFormat = 51 strictly enforces .xlsx
-                wb.SaveAs(os.path.abspath(temp_path), FileFormat=51)
-                wb.Close(False)
-            finally:
-                excel.Quit()
-            if os.path.exists(temp_path):
-                logger.info(f"MS Excel native conversion complete: {temp_path}")
-                return temp_path
-        except pywintypes.com_error as ce:
-            logger.warning(
-                f"Microsoft Excel COM object failed to launch (is Excel installed?). "
-                f"Gracefully falling back. {ce}"
-            )
-        except Exception as e:
-            logger.warning(f"Native MS Excel failed. Falling back. {e}")
-
-    # ── Priority 2: LIBREOFFICE PROXY (MAC / LINUX / WIN-FALLBACK) ───
+    # ── Priority 1: LIBREOFFICE PROXY (MAC / LINUX / WIN-FALLBACK) ───
     soffice_path = _get_soffice_path()
     if soffice_path:
         logger.info("Engaging LibreOffice Native Headless Engine.")

@@ -342,65 +342,99 @@ class LedgerEngine:
         # ── .xls Auto-Conversion ─────────────────────────────────────
         original_path = filepath
         converted = False
-        if filepath.lower().endswith(".xls") and not filepath.lower().endswith(
-            ".xlsx"
-        ):
-            filepath = convert_xls_to_xlsx(filepath)
+        is_legacy_xls = filepath.lower().endswith(".xls") and not filepath.lower().endswith(".xlsx")
+
+        if is_legacy_xls:
             converted = True
+            # On Windows, the COM Engine handles .xls natively in one pass.
+            # On Mac/Linux, we must pre-convert using the LibreOffice proxy
+            # before openpyxl can read it.
+            if sys.platform != "win32":
+                filepath = convert_xls_to_xlsx(filepath)
 
         # ── Pre-scan dates for API data loading ──────────────────────
         # We need to scan dates BEFORE choosing the engine path so that
         # the COM engine has all the rate/holiday data it needs.
-        # Use openpyxl for the lightweight pre-scan (read-only).
-        try:
-            wb_scan = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
-        except Exception:
-            if converted and os.path.exists(filepath):
-                try:
-                    os.remove(filepath)
-                except OSError as cleanup_err:
-                    logger.debug("Cleanup failed for temp file %s: %s", filepath, cleanup_err)
-            raise
-
         all_target_dates: Set[date] = set()
-        sheet_maps_prescan = {}
-        for sheet_name in wb_scan.sheetnames:
-            if sheet_name in SKIP_SHEET_NAMES:
-                continue
-            ws = wb_scan[sheet_name]
-            header_row_idx = None
-            col_indices: Dict[str, int] = {}
-            for row_idx, row in enumerate(
-                ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
-            ):
-                row_strs = [
-                    str(c).strip() if c is not None else "" for c in row
-                ]
-                if self.target_cols["source_date"] in row_strs:
-                    header_row_idx = row_idx
-                    for ci, val in enumerate(row_strs):
-                        if val == self.target_cols["source_date"]:
-                            col_indices["source"] = ci
-                        elif val == self.target_cols["currency"]:
-                            col_indices["currency"] = ci
-                        elif val == self.target_cols["out_rate"]:
-                            col_indices["out_rate"] = ci
-                    break
 
-            if header_row_idx is None or "source" not in col_indices:
-                continue
+        if is_legacy_xls and sys.platform == "win32":
+            # On Windows, we didn't pre-convert, so openpyxl cannot read this.
+            # Use xlrd purely for the read-only pre-scan to extract dates.
+            try:
+                import xlrd
+                wb_scan = xlrd.open_workbook(filepath, logfile=open(os.devnull, 'w'))
+                for sheet in wb_scan.sheets():
+                    if sheet.name in SKIP_SHEET_NAMES:
+                        continue
+                    
+                    # Scan headers (first 10 rows)
+                    header_row_idx = None
+                    src_col_idx = None
+                    for row_idx in range(min(10, sheet.nrows)):
+                        row_vals = [str(c.value).strip() for c in sheet.row(row_idx)]
+                        if self.target_cols["source_date"] in row_vals:
+                            header_row_idx = row_idx
+                            src_col_idx = row_vals.index(self.target_cols["source_date"])
+                            break
+                    
+                    if header_row_idx is not None and src_col_idx is not None:
+                        for row_idx in range(header_row_idx + 1, sheet.nrows):
+                            cell = sheet.cell(row_idx, src_col_idx)
+                            if cell.ctype == xlrd.XL_CELL_DATE:
+                                try:
+                                    dt_tuple = xlrd.xldate_as_tuple(cell.value, wb_scan.datemode)
+                                    parsed_date = date(dt_tuple[0], dt_tuple[1], dt_tuple[2])
+                                    all_target_dates.add(parsed_date)
+                                except Exception:
+                                    pass
+                            else:
+                                parsed_date = self._parse_date(cell.value)
+                                if parsed_date:
+                                    all_target_dates.add(parsed_date)
+            except Exception as e:
+                logger.warning("xlrd pre-scan failed for %s: %s", os.path.basename(filepath), e)
+                
+        else:
+            # Standard openpyxl pre-scan for .xlsx (and Mac/Linux converted files)
+            try:
+                import openpyxl
+                wb_scan = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
+                for sheet_name in wb_scan.sheetnames:
+                    if sheet_name in SKIP_SHEET_NAMES:
+                        continue
+                    ws = wb_scan[sheet_name]
+                    header_row_idx = None
+                    col_indices: Dict[str, int] = {}
+                    for row_idx, row in enumerate(
+                        ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
+                    ):
+                        row_strs = [
+                            str(c).strip() if c is not None else "" for c in row
+                        ]
+                        if self.target_cols["source_date"] in row_strs:
+                            header_row_idx = row_idx
+                            for ci, val in enumerate(row_strs):
+                                if val == self.target_cols["source_date"]:
+                                    col_indices["source"] = ci
+                            break
 
-            sheet_maps_prescan[sheet_name] = {
-                "header_row": header_row_idx,
-                "columns": col_indices,
-            }
-            src_idx = col_indices["source"] + 1
-            for row_idx in range(header_row_idx + 1, (ws.max_row or 0) + 1):
-                parsed_date = self._parse_date(
-                    ws.cell(row=row_idx, column=src_idx).value
-                )
-                if parsed_date:
-                    all_target_dates.add(parsed_date)
+                    if header_row_idx is None or "source" not in col_indices:
+                        continue
+
+                    src_idx = col_indices["source"] + 1
+                    for row_idx in range(header_row_idx + 1, (ws.max_row or 0) + 1):
+                        parsed_date = self._parse_date(
+                            ws.cell(row=row_idx, column=src_idx).value
+                        )
+                        if parsed_date:
+                            all_target_dates.add(parsed_date)
+            except Exception:
+                if converted and os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                    except OSError as cleanup_err:
+                        logger.debug("Cleanup failed for temp file %s: %s", filepath, cleanup_err)
+                raise
         wb_scan.close()
 
         # ── Date hierarchy ───────────────────────────────────────────
