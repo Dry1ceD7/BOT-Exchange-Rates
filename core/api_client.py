@@ -2,7 +2,7 @@
 """
 core/api_client.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.9) - Featherweight Architecture
+BOT Exchange Rate Processor (v2.6.0) - Featherweight Architecture
 ---------------------------------------------------------------------------
 Handles asynchronous communication with the Bank of Thailand (BOT) API.
 Enforces strict JSON schema validation via Pydantic v2.
@@ -119,7 +119,9 @@ class BOTClient:
                 except ValidationError as e:
                     raise BOTAPIError(f"Schema mismatch! {e}")
             current_start = current_end + timedelta(days=1)
-            await asyncio.sleep(1.0)  # Rate-limit safe spacing
+            # Randomized jitter (0.2-0.4s) — fast but safe against rate limits
+            import random
+            await asyncio.sleep(random.uniform(0.2, 0.4))
         return all_results
 
     async def get_holidays(self, year: int) -> List[BOTHolidayDetail]:

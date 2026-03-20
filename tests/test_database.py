@@ -3,7 +3,7 @@
 tests/test_database.py
 ---------------------------------------------------------------------------
 Unit tests for core/database.py — CacheDB thread-safe SQLite operations.
-V2.5.9: Updated to 4-column rate schema (usd_buying, usd_selling,
+V2.6.0: Updated to 4-column rate schema (usd_buying, usd_selling,
         eur_buying, eur_selling).
 ---------------------------------------------------------------------------
 """

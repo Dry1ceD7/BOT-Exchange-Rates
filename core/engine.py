@@ -2,7 +2,7 @@
 """
 core/engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.9) - Cache-First Orchestrator
+BOT Exchange Rate Processor (v2.6.0) - Cache-First Orchestrator
 ---------------------------------------------------------------------------
 Slim orchestrator. Heavy logic extracted to:
   - core/exrate_sheet.py → Master ExRate sheet builder
@@ -10,6 +10,7 @@ Slim orchestrator. Heavy logic extracted to:
   - core/prescan.py → Smart date pre-scanner
 """
 
+import asyncio
 import gc
 import logging
 import os
@@ -209,7 +210,7 @@ class LedgerEngine:
         cell.value = value
 
     # ================================================================== #
-    #  CACHE-FIRST DATA LOADING (v2.5.9)
+    #  CACHE-FIRST DATA LOADING (v2.6.0)
     # ================================================================== #
     async def _preload_api_data(
         self, dates: Set[date], start_date: str
@@ -288,12 +289,22 @@ class LedgerEngine:
         missing_dates = all_needed - set(cached_rates.keys())
         usd_data, eur_data = [], []
         if missing_dates:
-            usd_data = await self.api.get_exchange_rates(
-                min_date, max_date, "USD"
+            # ── Narrowed fetch range: only fetch the missing window ───
+            fetch_start = min(missing_dates)
+            fetch_end = max(missing_dates)
+            logger.info(
+                "Cache miss: %d dates missing (%s → %s). Fetching from API...",
+                len(missing_dates),
+                fetch_start.strftime("%Y-%m-%d"),
+                fetch_end.strftime("%Y-%m-%d"),
             )
-            eur_data = await self.api.get_exchange_rates(
-                min_date, max_date, "EUR"
+
+            # ── Concurrent USD+EUR via asyncio.gather() ──────────────
+            usd_data, eur_data = await asyncio.gather(
+                self.api.get_exchange_rates(fetch_start, fetch_end, "USD"),
+                self.api.get_exchange_rates(fetch_start, fetch_end, "EUR"),
             )
+
             rate_cache = {}
             for r in usd_data:
                 d = datetime.strptime(r.period, "%Y-%m-%d").date()
@@ -318,6 +329,12 @@ class LedgerEngine:
                 for d_str, v in rate_cache.items()
             ]
             self.cache.insert_rates_bulk(bulk)
+            logger.info(
+                "API fetch complete: %d USD + %d EUR records cached.",
+                len(usd_data), len(eur_data),
+            )
+        else:
+            logger.info("All rates served from cache (0 API calls).")
 
         return (
             logic_engine, usd_selling, eur_selling,

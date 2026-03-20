@@ -1,1 +1,1 @@
-# Tests for BOT Exchange Rate Processor V2.5.9
+# Tests for BOT Exchange Rate Processor V2.6.0

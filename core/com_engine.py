@@ -2,13 +2,13 @@
 """
 core/com_engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.9) — High-Speed Native Windows COM Engine
+BOT Exchange Rate Processor (v2.6.0) — High-Speed Native Windows COM Engine
 ---------------------------------------------------------------------------
 Primary data processing engine for Windows 11 using win32com.client.
 Spawns an invisible Microsoft Excel instance to read/write ledger files,
 guaranteeing 100% preservation of all native styles, fonts, and layouts.
 
-PERFORMANCE ARCHITECTURE (v2.5.9):
+PERFORMANCE ARCHITECTURE (v2.6.0):
   1. Silent Mode: Calculation=Manual, EnableEvents=False, ScreenUpdating=False
   2. Vectorized I/O: All reads/writes use bulk Range operations (zero cell loops)
   3. Instance Pooling: Optional shared Excel instance for batch processing

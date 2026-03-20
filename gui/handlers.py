@@ -2,7 +2,7 @@
 """
 gui/handlers.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.5.9) - Async Processing Handlers
+BOT Exchange Rate Processor (v2.6.0) - Async Processing Handlers
 ---------------------------------------------------------------------------
 Separated from app.py for SFFB compliance (<200 lines).
 Contains the threading bridge and batch processing logic.
