@@ -39,13 +39,18 @@ It replaces a fragmented, error-prone 3-script workflow with a single, mathemati
 │    CustomTkinter  ·  Smart Date Toggle  ·  Drop Zone        │
 │    Batch Queue  ·  Progress Bar  ·  Revert Button           │
 ├─────────────────────────────────────────────────────────────┤
-│                      core/engine.py                         │
-│          Orchestrator: Cache → Backup → Process → GC        │
-├──────────────┬──────────────┬──────────────┬────────────────┤
-│  api_client  │    logic     │   database   │ backup_manager │
-│  Async BOT   │  Zero-Guess  │   SQLite     │  Timestamped   │
-│  API + retry │  Rollback    │   Cache      │  Backup/Revert │
-└──────────────┴──────────────┴──────────────┴────────────────┘
+│                   core/engine.py (Dispatcher)                │
+│      OS-Aware Router: Cache → Backup → Dispatch → GC        │
+├─────────────────────────┬───────────────────────────────────┤
+│   core/com_engine.py    │        core/exrate_sheet.py       │
+│   Windows 11 Primary    │        macOS / Linux Fallback     │
+│   win32com.client COM   │        openpyxl read/write        │
+│   ExcelCOM ctx manager  │        Zero-Touch Cell Writes     │
+├──────────────┬──────────┴────────────┬─────────────────────┤
+│  api_client  │    logic · database   │   backup_manager    │
+│  Async BOT   │  Zero-Guess Rollback  │   Timestamped       │
+│  API + retry │  SQLite Cache         │   Backup/Revert     │
+└──────────────┴───────────────────────┴─────────────────────┘
 ```
 
 **Design Principles**:
@@ -53,6 +58,7 @@ It replaces a fragmented, error-prone 3-script workflow with a single, mathemati
 - **Featherweight** — strict 15MB file-size guardrail, per-file `gc.collect()`, no pandas
 - **Cache-First** — SQLite checked before BOT API; today's rate cached until new data arrives
 - **Fail-Safe** — every file backed up before modification; if backup fails, file is skipped
+- **OS-Aware Dual Runtime** — `win32com.client` COM engine on Windows 11 (primary), `openpyxl` fallback on macOS/Linux
 
 ---
 
@@ -64,10 +70,11 @@ It replaces a fragmented, error-prone 3-script workflow with a single, mathemati
 - **Decimal Precision** — All rates written as `Decimal` values quantized to 4 decimal places (Thai accounting standard).
 
 ### Advanced File Handling (New in v2.5.7)
-- **Zero-Fidelity Loss Conversion** — Unparalleled legacy `.xls` support via native background proxies.
-- **Windows Native MS Excel Engine** — On Windows machines, explicitly commands `win32com` to orchestrate Microsoft Excel in the background for identical visual conversion.
-- **Mac/Linux LibreOffice Proxy** — Commands `soffice --headless` as an absolute 1:1 format bridge when MS Excel is unavailable natively.
-- **Zero-Touch Cell Preservation** — Values are injected into monthly ledger tabs exclusively through `.value` writes, perfectly preserving enterprise fonts, cell colors, borders, and column geometries.
+- **Native COM Engine (Windows 11 Primary)** — The entire data processing pipeline uses `win32com.client` to spawn an invisible Microsoft Excel instance. Files are opened, modified, and saved by Excel itself — guaranteeing 100% preservation of all enterprise fonts, styles, borders, and layouts.
+- **Zombie-Safe Memory Management** — The `ExcelCOM` context manager wraps all COM operations in a strict `try/finally` lifecycle. `excel.Quit()` is always called, preventing orphaned `EXCEL.EXE` processes in Task Manager.
+- **OS-Aware Dispatcher** — `engine.py` detects `sys.platform == 'win32'` and routes to the COM engine. On macOS/Linux, it falls back to `openpyxl` with zero-touch cell writes.
+- **Zero-Fidelity Loss Conversion** — Legacy `.xls` files are converted via native Excel COM (Windows) or LibreOffice `soffice --headless` (Mac/Linux). The legacy `xlrd` fallback has been permanently removed.
+- **Absolute Pathing Enforced** — Every file path is converted via `os.path.abspath()` before touching the COM interface, preventing crashes from relative path resolution.
 
 ### GUI
 - **Smart Date Toggle** — Defaults to today's date; unlock dropdowns for historical date selection
