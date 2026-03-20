@@ -191,32 +191,22 @@ class LedgerEngine:
     @staticmethod
     def _zero_touch_write(ws, row: int, col: int, value) -> None:
         """
-        Write a value to a cell WITHOUT altering its formatting.
+        Write a value to a monthly-tab cell WITHOUT touching formatting.
 
-        Zero-Touch Protocol: captures the cell's existing font, fill,
-        border, alignment, and number_format BEFORE the write, then
-        explicitly re-applies them. This guarantees that monthly
-        ledger tab formatting is never touched by the engine.
+        Zero-Touch Protocol: ONLY writes cell.value.
+        NEVER reads, copies, or re-applies font/fill/border/alignment.
+
+        In openpyxl, assigning cell.value does NOT alter the cell's
+        existing styles. Touching style attributes (even via .copy())
+        creates new style objects that can differ from the originals.
 
         Silently skips MergedCell instances (read-only).
         """
         cell = ws.cell(row=row, column=col)
         if isinstance(cell, MergedCell):
             return
-        # Capture existing style before write
-        original_font = cell.font.copy()
-        original_fill = cell.fill.copy()
-        original_border = cell.border.copy()
-        original_alignment = cell.alignment.copy()
-        original_number_format = cell.number_format
-        # Write value
+        # Value-only write. Formatting is NEVER touched.
         cell.value = value
-        # Re-apply original style (Zero-Touch guarantee)
-        cell.font = original_font
-        cell.fill = original_fill
-        cell.border = original_border
-        cell.alignment = original_alignment
-        cell.number_format = original_number_format
 
     # ================================================================== #
     #  CACHE-FIRST DATA LOADING (v2.5.5)
