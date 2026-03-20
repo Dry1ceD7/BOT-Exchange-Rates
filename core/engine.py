@@ -417,7 +417,12 @@ class LedgerEngine:
         )
 
         # ── Build holiday names lookup ───────────────────────────────
+        import re
+        sub_pattern = re.compile(r'^Substitution for (.*)\((.*?)\)$')
+
         holidays_names: Dict[date, str] = {}
+        master_holidays_set = set(logic_engine.holidays)
+
         for year in {
             d.year
             for d in (all_target_dates | {computed_start, date.today()})
@@ -427,13 +432,29 @@ class LedgerEngine:
                 try:
                     h_obj = datetime.strptime(h_str, "%Y-%m-%d").date()
                     holidays_names[h_obj] = h_name
+                    
+                    # Unpack hidden actual weekend dates from Substitution strings
+                    m = sub_pattern.search(h_name)
+                    if m:
+                        real_name = m.group(1).strip()
+                        date_str = m.group(2).strip()
+                        # Clean ordinals (st, nd, rd, th) and weekday names (Sunday)
+                        date_str_clean = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', date_str)
+                        date_str_clean = re.sub(r'^[A-Za-z]+\s+', '', date_str_clean)
+                        try:
+                            # e.g., "31 May 2026"
+                            real_dt = datetime.strptime(date_str_clean, '%d %B %Y').date()
+                            holidays_names[real_dt] = real_name
+                            master_holidays_set.add(real_dt)
+                        except (ValueError, TypeError):
+                            pass
                 except (ValueError, TypeError):
                     logger.debug("Skipped unparseable holiday name: %s", h_str)
 
         # ── STEP 1: Build ExRate master sheet ────────────────────────
         update_master_exrate_sheet(
             wb, usd_buying, usd_selling, eur_buying, eur_selling,
-            list(logic_engine.holidays), holidays_names, computed_start,
+            list(master_holidays_set), holidays_names, computed_start,
         )
 
         # ── STEP 2: Build in-memory ExRate lookup index ──────────────

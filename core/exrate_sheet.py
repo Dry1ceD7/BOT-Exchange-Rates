@@ -169,9 +169,9 @@ def _merge_rate_data(
 
         holiday_label = ""
         if is_weekend and is_holiday:
-            holiday_label = f"Weekend; {holidays_names.get(d, 'Holiday')}"
+            holiday_label = f"weekend; {holidays_names.get(d, 'Holiday')}"
         elif is_weekend:
-            holiday_label = "Weekend"
+            holiday_label = "weekend"
         elif is_holiday:
             holiday_label = holidays_names.get(d, "Holiday")
 
