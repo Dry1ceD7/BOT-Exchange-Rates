@@ -74,7 +74,7 @@ def main():
     app.mainloop()
 
 
-import traceback
+import traceback  # noqa: E402
 
 
 def global_exception_handler(exc_type, exc_value, exc_traceback):
