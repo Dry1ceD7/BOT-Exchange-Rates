@@ -2,7 +2,7 @@
 """
 core/engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.4) - Cache-First Orchestrator
+BOT Exchange Rate Processor (v3.0.5) - Cache-First Orchestrator
 ---------------------------------------------------------------------------
 Slim orchestrator. Heavy logic extracted to:
   - core/exrate_sheet.py → Master ExRate sheet builder
@@ -403,9 +403,12 @@ class LedgerEngine:
         if is_legacy_xls and sys.platform == "win32":
             # On Windows, we didn't pre-convert, so openpyxl cannot read this.
             # Use xlrd purely for the read-only pre-scan to extract dates.
+            wb_scan = None
+            devnull_fh = None
             try:
                 import xlrd
-                wb_scan = xlrd.open_workbook(filepath, logfile=open(os.devnull, 'w'))
+                devnull_fh = open(os.devnull, 'w')
+                wb_scan = xlrd.open_workbook(filepath, logfile=devnull_fh)
                 for sheet in wb_scan.sheets():
                     if sheet.name in SKIP_SHEET_NAMES:
                         continue
@@ -436,6 +439,11 @@ class LedgerEngine:
                                     all_target_dates.add(parsed_date)
             except Exception as e:
                 logger.warning("xlrd pre-scan failed for %s: %s", os.path.basename(filepath), e)
+            finally:
+                if wb_scan is not None:
+                    wb_scan.release_resources()
+                if devnull_fh is not None:
+                    devnull_fh.close()
 
         else:
             # Standard openpyxl pre-scan for .xlsx (and Mac/Linux converted files)
@@ -612,135 +620,148 @@ class LedgerEngine:
                     logger.debug("Cleanup failed for temp file %s: %s", filepath, cleanup_err)
             raise
 
-        # Re-scan sheets for the openpyxl path (uses full workbook, not read-only)
-        sheet_maps = {}
-        for sheet_name in wb.sheetnames:
-            if sheet_name in SKIP_SHEET_NAMES:
-                continue
-            ws = wb[sheet_name]
-            header_row_idx = None
-            col_indices_local: Dict[str, int] = {}
-            for row_idx, row in enumerate(
-                ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
-            ):
-                row_strs = [
-                    str(c).strip() if c is not None else "" for c in row
-                ]
-                if self.target_cols["source_date"] in row_strs:
-                    header_row_idx = row_idx
-                    for ci, val in enumerate(row_strs):
-                        if val == self.target_cols["source_date"]:
-                            col_indices_local["source"] = ci
-                        elif val == self.target_cols["currency"]:
-                            col_indices_local["currency"] = ci
-                        elif val == self.target_cols["out_rate"]:
-                            col_indices_local["out_rate"] = ci
-                    break
-
-            if header_row_idx is None or "source" not in col_indices_local:
-                logger.info(
-                    "Sheet '%s' missing source date column — skipped.",
-                    sheet_name,
-                )
-                continue
-
-            sheet_maps[sheet_name] = {
-                "header_row": header_row_idx,
-                "columns": col_indices_local,
-            }
-
-        # ── STEP 1: Build ExRate master sheet ────────────────────────
-        update_master_exrate_sheet(
-            wb, usd_buying, usd_selling, eur_buying, eur_selling,
-            list(master_holidays_set), holidays_names, computed_start,
-        )
-
-        # ── STEP 2: Build in-memory ExRate lookup index ──────────────
-        exrate_index: Dict[date, dict] = {}
-        if "ExRate" in wb.sheetnames:
-            ws_exrate = wb["ExRate"]
-            for row_idx in range(2, (ws_exrate.max_row or 1) + 1):
-                cell_val = ws_exrate.cell(row=row_idx, column=1).value
-                row_date = None
-                if isinstance(cell_val, datetime):
-                    row_date = cell_val.date()
-                elif isinstance(cell_val, date):
-                    row_date = cell_val
-                if row_date:
-                    exrate_index[row_date] = {
-                        "usd_buying": ws_exrate.cell(
-                            row=row_idx, column=2
-                        ).value,
-                        "usd_selling": ws_exrate.cell(
-                            row=row_idx, column=3
-                        ).value,
-                        "eur_buying": ws_exrate.cell(
-                            row=row_idx, column=4
-                        ).value,
-                        "eur_selling": ws_exrate.cell(
-                            row=row_idx, column=5
-                        ).value,
-                    }
-
-        # ── STEP 3: Cross-Tab VLOOKUP — Zero-Touch Formatting Protocol ──
-        for sheet_name, mapping in sheet_maps.items():
-            ws = wb[sheet_name]
-            cols = mapping["columns"]
-            src_idx = cols["source"] + 1
-            cur_idx = cols.get("currency")
-            out_rate_idx = cols.get("out_rate")
-            for row_idx in range(
-                mapping["header_row"] + 1, ws.max_row + 1
-            ):
-                src_cell = ws.cell(row=row_idx, column=src_idx)
-                if isinstance(src_cell, MergedCell):
+        try:
+            # Re-scan sheets for the openpyxl path (uses full workbook, not read-only)
+            sheet_maps = {}
+            for sheet_name in wb.sheetnames:
+                if sheet_name in SKIP_SHEET_NAMES:
                     continue
-                inv_date = self._parse_date(src_cell.value)
-                if not inv_date:
-                    continue
-                ccy = ""
-                if cur_idx is not None:
-                    cur_cell = ws.cell(
-                        row=row_idx, column=cur_idx + 1
+                ws = wb[sheet_name]
+                header_row_idx = None
+                col_indices_local: Dict[str, int] = {}
+                for row_idx, row in enumerate(
+                    ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
+                ):
+                    row_strs = [
+                        str(c).strip() if c is not None else "" for c in row
+                    ]
+                    if self.target_cols["source_date"] in row_strs:
+                        header_row_idx = row_idx
+                        for ci, val in enumerate(row_strs):
+                            if val == self.target_cols["source_date"]:
+                                col_indices_local["source"] = ci
+                            elif val == self.target_cols["currency"]:
+                                col_indices_local["currency"] = ci
+                            elif val == self.target_cols["out_rate"]:
+                                col_indices_local["out_rate"] = ci
+                        break
+
+                if header_row_idx is None or "source" not in col_indices_local:
+                    logger.info(
+                        "Sheet '%s' missing source date column — skipped.",
+                        sheet_name,
                     )
-                    if not isinstance(cur_cell, MergedCell):
-                        raw = cur_cell.value
-                        ccy = str(raw).strip().upper() if raw else ""
-                if ccy == "THB":
+                    continue
+
+                sheet_maps[sheet_name] = {
+                    "header_row": header_row_idx,
+                    "columns": col_indices_local,
+                }
+
+            # ── STEP 1: Build ExRate master sheet ────────────────────────
+            update_master_exrate_sheet(
+                wb, usd_buying, usd_selling, eur_buying, eur_selling,
+                list(master_holidays_set), holidays_names, computed_start,
+            )
+
+            # ── STEP 2: Build in-memory ExRate lookup index ──────────────
+            exrate_index: Dict[date, dict] = {}
+            if "ExRate" in wb.sheetnames:
+                ws_exrate = wb["ExRate"]
+                for row_idx in range(2, (ws_exrate.max_row or 1) + 1):
+                    cell_val = ws_exrate.cell(row=row_idx, column=1).value
+                    row_date = None
+                    if isinstance(cell_val, datetime):
+                        row_date = cell_val.date()
+                    elif isinstance(cell_val, date):
+                        row_date = cell_val
+                    if row_date:
+                        exrate_index[row_date] = {
+                            "usd_buying": ws_exrate.cell(
+                                row=row_idx, column=2
+                            ).value,
+                            "usd_selling": ws_exrate.cell(
+                                row=row_idx, column=3
+                            ).value,
+                            "eur_buying": ws_exrate.cell(
+                                row=row_idx, column=4
+                            ).value,
+                            "eur_selling": ws_exrate.cell(
+                                row=row_idx, column=5
+                            ).value,
+                        }
+
+            # ── STEP 3: Cross-Tab VLOOKUP — Zero-Touch Formatting Protocol ──
+            for sheet_name, mapping in sheet_maps.items():
+                ws = wb[sheet_name]
+                cols = mapping["columns"]
+                src_idx = cols["source"] + 1
+                cur_idx = cols.get("currency")
+                out_rate_idx = cols.get("out_rate")
+                for row_idx in range(
+                    mapping["header_row"] + 1, ws.max_row + 1
+                ):
+                    src_cell = ws.cell(row=row_idx, column=src_idx)
+                    if isinstance(src_cell, MergedCell):
+                        continue
+                    inv_date = self._parse_date(src_cell.value)
+                    if not inv_date:
+                        continue
+                    ccy = ""
+                    if cur_idx is not None:
+                        cur_cell = ws.cell(
+                            row=row_idx, column=cur_idx + 1
+                        )
+                        if not isinstance(cur_cell, MergedCell):
+                            raw = cur_cell.value
+                            ccy = str(raw).strip().upper() if raw else ""
+                    if ccy == "THB":
+                        if out_rate_idx is not None:
+                            self._zero_touch_write(
+                                ws, row_idx, out_rate_idx + 1, 1
+                            )
+                        continue
+                    rate = self._vlookup_exrate(
+                        inv_date, ccy, exrate_index,
+                    )
                     if out_rate_idx is not None:
                         self._zero_touch_write(
-                            ws, row_idx, out_rate_idx + 1, 1
+                            ws, row_idx, out_rate_idx + 1, rate
                         )
-                    continue
-                rate = self._vlookup_exrate(
-                    inv_date, ccy, exrate_index,
-                )
-                if out_rate_idx is not None:
-                    self._zero_touch_write(
-                        ws, row_idx, out_rate_idx + 1, rate
-                    )
 
-        # ── Save & Cleanup ───────────────────────────────────────────
-        if converted:
-            final_path = os.path.splitext(original_path)[0] + ".xlsx"
-            wb.save(final_path)
-            wb.close()
+            # ── Save & Cleanup ───────────────────────────────────────────
+            if converted:
+                final_path = os.path.splitext(original_path)[0] + ".xlsx"
+                wb.save(final_path)
+                wb.close()
+                try:
+                    os.remove(filepath)
+                except OSError as e:
+                    logger.debug("Cleanup of temp file failed: %s", e)
+                filepath = final_path
+                logger.info(
+                    "Saved processed output as: %s (original .xls preserved)",
+                    os.path.basename(final_path),
+                )
+            else:
+                wb.save(filepath)
+                wb.close()
+                logger.info(
+                    "Overwritten in-place: %s",
+                    os.path.basename(filepath),
+                )
+        except Exception:
+            # On ANY error, close the workbook to release the file lock
             try:
-                os.remove(filepath)
-            except OSError as e:
-                logger.debug("Cleanup of temp file failed: %s", e)
-            filepath = final_path
-            logger.info(
-                "Saved processed output as: %s (original .xls preserved)",
-                os.path.basename(final_path),
-            )
-        else:
-            wb.save(filepath)
-            wb.close()
-            logger.info(
-                "Overwritten in-place: %s",
-                os.path.basename(filepath),
-            )
+                wb.close()
+            except Exception:
+                pass
+            if converted and os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
+            raise
         gc.collect()
         self._emit("File saved and memory cleaned", etype="success")
         return filepath
