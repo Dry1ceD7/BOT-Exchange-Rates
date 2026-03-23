@@ -4,7 +4,7 @@
 
 **Enterprise Desktop Application for Bank of Thailand Exchange Rate Automation**
 
-Version 3.0.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
+Version 3.0.3  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
@@ -86,10 +86,11 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 - **Decimal Precision** — All rates written as `Decimal` values quantized to 4 decimal places (Thai accounting standard).
 - **Smart Date Pre-Scanner** — Scans all queued Excel files to find the oldest date, then fetches only the necessary API range.
 
-### Desktop Application (V3.0.0)
+### Desktop Application (V3.0.3)
+- **API Token Registration Dialog** — License-key-style popup on first launch to enter BOT API keys. No manual `.env` editing needed.
 - **Live Processing Console** — EventBus-driven, read-only terminal log with color-coded status messages (`[LOG]`, `[OK]`, `[ERR]`).
 - **Auto-Detect Date Range** — Toggle to read start dates directly from ledger files. No manual date selection needed.
-- **Settings Modal** — Persistent preferences for appearance (Dark/Light/System), auto-update toggle, and one-click API connectivity test.
+- **Settings Modal** — Persistent preferences for appearance (Dark/Light/System), auto-update toggle, API key management, and API connectivity test.
 - **Auto-Updater** — Background GitHub Releases API check on startup with non-intrusive update notifications.
 - **Drag-and-Drop Batching** — Drop individual `.xlsx` files or entire folders onto the drop zone (tkinterdnd2).
 - **Per-File Progress** — Real-time progress bar with file-level status and error reporting.
@@ -151,22 +152,9 @@ You need **two free API keys** from the Bank of Thailand:
 
 ---
 
-### Step 3 — Configure API Keys
+### Step 3 — Install and Run
 
-```bash
-cp .env.example .env
-```
-
-Open `.env` in any text editor and paste your keys:
-
-```env
-BOT_TOKEN_EXG=your_exchange_rate_api_key_here
-BOT_TOKEN_HOL=your_holiday_api_key_here
-```
-
----
-
-### Step 4 — Install and Run
+The app will **automatically prompt you** for your API keys on first launch via a registration dialog. No manual file editing needed.
 
 **With uv (recommended):**
 
@@ -313,6 +301,6 @@ This project is developed for internal enterprise use. All rights reserved.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.0.0*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.0.3*
 
 </div>

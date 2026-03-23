@@ -2,11 +2,11 @@
 """
 main.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.0) - Enterprise Desktop Edition
+BOT Exchange Rate Processor (v3.0.3) - Enterprise Desktop Edition
 ---------------------------------------------------------------------------
-Entry point. Loads .env, validates API tokens BEFORE GUI init,
-ensures required directories exist, and exits with a clear error
-popup if tokens are missing.
+Entry point. Loads .env, prompts for API tokens on first use via
+a registration dialog, ensures required directories exist, then
+launches the GUI.
 """
 
 import os
@@ -21,8 +21,8 @@ from tkinter import messagebox
 from dotenv import load_dotenv
 
 # Securely load API Keys to os.environ BEFORE anything else
-env_path = os.path.join(os.path.dirname(__file__), ".env")
-load_dotenv(dotenv_path=env_path)
+ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(dotenv_path=ENV_PATH)
 
 
 # ── Cold-Start: Ensure required directories exist ────────────────────────
@@ -38,36 +38,41 @@ def _ensure_directories():
         os.makedirs(os.path.join(project_root, subdir), exist_ok=True)
 
 
-# ── Early Token Validation ───────────────────────────────────────────────
-def _validate_tokens():
-    """
-    Checks for required BOT API tokens BEFORE the GUI loads.
-    Shows a native error dialog and exits if missing.
-    """
-    missing = []
-    if not os.environ.get("BOT_TOKEN_EXG"):
-        missing.append("BOT_TOKEN_EXG")
-    if not os.environ.get("BOT_TOKEN_HOL"):
-        missing.append("BOT_TOKEN_HOL")
+# ── Token Check + Registration Dialog ───────────────────────────────────
+def _tokens_present() -> bool:
+    """Return True if both BOT API tokens are set in the environment."""
+    return bool(os.environ.get("BOT_TOKEN_EXG")) and bool(
+        os.environ.get("BOT_TOKEN_HOL")
+    )
 
-    if missing:
-        root = tk.Tk()
-        root.withdraw()  # Hide the empty root window
-        messagebox.showerror(
-            "CRITICAL: API Tokens Missing",
-            f"The following required tokens are not set in your .env file:\n\n"
-            f"  • {chr(10).join(missing)}\n\n"
-            f"Please copy .env.example to .env and add your credentials.\n\n"
-            f"Register at: https://apiportal.bot.or.th/"
-        )
-        root.destroy()
-        sys.exit(1)
+
+def _prompt_for_tokens() -> bool:
+    """
+    Launch the registration dialog to collect API tokens.
+    Returns True if the user activated successfully, False otherwise.
+    """
+    import customtkinter as ctk
+
+    from gui.panels.token_dialog import TokenRegistrationDialog
+
+    root = ctk.CTk()
+    root.withdraw()
+
+    dialog = TokenRegistrationDialog(root, env_path=ENV_PATH)
+    root.wait_window(dialog)
+
+    activated = dialog.activated
+    root.destroy()
+    return activated
 
 
 def main():
-    """Ensures directories, validates tokens, then starts the application."""
+    """Ensures directories, validates/prompts tokens, then starts the app."""
     _ensure_directories()
-    _validate_tokens()
+
+    if not _tokens_present():
+        if not _prompt_for_tokens():
+            sys.exit(0)
 
     from gui.app import BOTExrateApp
     app = BOTExrateApp()

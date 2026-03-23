@@ -2,15 +2,16 @@
 """
 gui/panels/settings_modal.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.0) — Settings Modal Panel
+BOT Exchange Rate Processor (v3.0.3) — Settings Modal Panel
 ---------------------------------------------------------------------------
 Popup window for user preferences backed by core/config_manager.py.
-Controls: Appearance (Dark/Light/System), Auto-Update toggle, API ping.
+Controls: Appearance (Dark/Light/System), Auto-Update toggle, API keys, API ping.
 
 SFFB: Strict < 200 lines.
 """
 
 import logging
+import os
 import threading
 from typing import Optional
 
@@ -40,7 +41,7 @@ class SettingsModal(ctk.CTkToplevel):
         super().__init__(master, **kwargs)
 
         self.title("Settings")
-        self.geometry("420x380")
+        self.geometry("420x460")
         self.resizable(False, False)
         self.configure(fg_color=COLOR_MODAL_BG)
 
@@ -52,7 +53,7 @@ class SettingsModal(ctk.CTkToplevel):
 
     def _center(self):
         self.update_idletasks()
-        w, h = 420, 380
+        w, h = 420, 460
         sx = (self.winfo_screenwidth() - w) // 2
         sy = (self.winfo_screenheight() - h) // 2
         self.geometry(f"{w}x{h}+{sx}+{sy}")
@@ -98,6 +99,15 @@ class SettingsModal(ctk.CTkToplevel):
             progress_color=COLOR_MODAL_ACCENT,
         ).pack(anchor="w", padx=30, pady=(0, 16))
 
+        # ── Manage API Keys ──────────────────────────────────────────
+        ctk.CTkButton(
+            self, text="Manage API Keys",
+            fg_color="#475569", hover_color="#64748B",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            corner_radius=8, height=38,
+            command=self._on_manage_keys,
+        ).pack(padx=30, fill="x", pady=(0, 8))
+
         # ── API Connectivity Test ────────────────────────────────────
         self._btn_ping = ctk.CTkButton(
             self, text="Test API Connection",
@@ -125,6 +135,21 @@ class SettingsModal(ctk.CTkToplevel):
 
     def _on_appearance_change(self, value: str):
         ctk.set_appearance_mode(value)
+
+    def _on_manage_keys(self):
+        from gui.panels.token_dialog import TokenRegistrationDialog
+
+        env_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            ".env",
+        )
+        dialog = TokenRegistrationDialog(
+            self,
+            env_path=env_path,
+            prefill_exg=os.environ.get("BOT_TOKEN_EXG", ""),
+            prefill_hol=os.environ.get("BOT_TOKEN_HOL", ""),
+        )
+        self.wait_window(dialog)
 
     def _on_ping_api(self):
         self._lbl_ping.configure(text="Pinging...", text_color="#94A3B8")
