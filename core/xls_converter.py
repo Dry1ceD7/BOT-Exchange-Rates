@@ -2,7 +2,7 @@
 """
 core/xls_converter.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.0) - Native OS-Aware Conversion Pipeline
+BOT Exchange Rate Processor (v3.0.7) - Native OS-Aware Conversion Pipeline
 ---------------------------------------------------------------------------
 Strictly converts legacy .xls files to .xlsx using native proxies (win32com
 on Windows, or soffice headless on Mac/Linux) to guarantee absolute 100%

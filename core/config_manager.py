@@ -2,7 +2,7 @@
 """
 core/config_manager.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.0) — Persistent Settings Manager
+BOT Exchange Rate Processor (v3.0.7) — Persistent Settings Manager
 ---------------------------------------------------------------------------
 JSON-backed configuration file for user preferences (appearance, auto-update,
 custom directories). Gracefully handles missing or corrupt config files.

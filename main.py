@@ -2,7 +2,7 @@
 """
 main.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.6) - Enterprise Desktop Edition
+BOT Exchange Rate Processor (v3.0.7) - Enterprise Desktop Edition
 ---------------------------------------------------------------------------
 Entry point. Loads .env, prompts for API tokens on first use via
 a registration dialog, ensures required directories exist, then

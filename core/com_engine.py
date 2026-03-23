@@ -2,16 +2,17 @@
 """
 core/com_engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.0) — High-Speed Native Windows COM Engine
+BOT Exchange Rate Processor (v3.0.7) — High-Speed Native Windows COM Engine
 ---------------------------------------------------------------------------
 Primary data processing engine for Windows 11 using win32com.client.
 Spawns an invisible Microsoft Excel instance to read/write ledger files,
 guaranteeing 100% preservation of all native styles, fonts, and layouts.
 
-PERFORMANCE ARCHITECTURE (v3.0.0):
-  1. Silent Mode: Calculation=Manual, EnableEvents=False, ScreenUpdating=False
-  2. Vectorized I/O: All reads/writes use bulk Range operations (zero cell loops)
-  3. Instance Pooling: Optional shared Excel instance for batch processing
+PERFORMANCE ARCHITECTURE (v3.0.7):
+  1. No win32com.client.Dispatch() — strict late-binding is used where needed.
+  2. Bulk read/write mapping between Python Tuples and Excel Ranges.
+  3. Pre-computed USD/EUR dictionaries in pure Python to bypass COM latency
+     for O(1) rate dispatch.
 
 CRITICAL: This module MUST ONLY be imported on sys.platform == "win32".
 ---------------------------------------------------------------------------
@@ -32,11 +33,11 @@ if sys.platform != "win32":
 
 try:
     import pywintypes
-    import win32com.client  # type: ignore
+    import win32com  # noqa: F401
 except ImportError:
     raise RuntimeError(
         "FATAL: Missing pywin32 dependency.\n"
-        "Please run: pip install pywin32"
+        "Please run: pip install pywintypes"
     )
 
 # Excel constants
@@ -104,27 +105,39 @@ class ExcelCOM:
 
     def __init__(self):
         self.excel = None
+        self.original_display_alerts = None
+        self.original_screen_updating = None
+        self.original_calculation = None
+        self.original_enable_events = None
+        self.original_automation_security = None
 
     def __enter__(self):
         logger.info("Spawning invisible Microsoft Excel COM instance (Silent Mode)...")
-        self.excel = win32com.client.DispatchEx("Excel.Application")
+        import win32com.client
+
+        # Force late binding for maximum reliability
+        self.excel = win32com.client.dynamic.Dispatch("Excel.Application")
+
+        # Capture user settings so we can gracefully restore them
+        self.original_display_alerts = self.excel.DisplayAlerts
+        self.original_screen_updating = self.excel.ScreenUpdating
+        self.original_calculation = self.excel.Calculation
+        self.original_enable_events = self.excel.EnableEvents
+        self.original_automation_security = self.excel.AutomationSecurity
+
+        # Set ultra-fast batch mode overrides
         self.excel.Visible = False
         self.excel.DisplayAlerts = False
-        # ── MANDATE 1: Silent Mode Performance Flags ──────────────
-        # Each flag is wrapped individually — some Excel versions or
-        # configurations reject certain properties. Graceful degrade.
-        try:
-            self.excel.ScreenUpdating = False
-        except Exception as e:
-            logger.warning("Could not set ScreenUpdating=False: %s", e)
-        try:
-            self.excel.Calculation = XL_CALC_MANUAL
-        except Exception as e:
-            logger.warning("Could not set Calculation=Manual: %s (Excel will recalc per write)", e)
+        self.excel.ScreenUpdating = False
+        self.excel.Calculation = -4135  # xlCalculationManual (prevent auto-calc)
+        # msoAutomationSecurityForceDisable (3) bypasses Protected View (MotW) on downloads
+        self.excel.AutomationSecurity = 3
+
         try:
             self.excel.EnableEvents = False
         except Exception as e:
             logger.warning("Could not set EnableEvents=False: %s", e)
+
         return self.excel
 
     def __exit__(self, exc_type, exc_val, exc_tb):

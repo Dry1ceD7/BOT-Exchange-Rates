@@ -72,8 +72,11 @@ def _scan_xls(filepath: str, target_col_name: str) -> Optional[date]:
     devnull_fh = None
     try:
         import os
+        with open(filepath, 'rb') as f:
+            file_data = f.read()
+
         devnull_fh = open(os.devnull, 'w')
-        wb = xlrd.open_workbook(filepath, formatting_info=False, logfile=devnull_fh)
+        wb = xlrd.open_workbook(file_contents=file_data, formatting_info=False, logfile=devnull_fh)
         for sheet_name in wb.sheet_names():
             ws = wb.sheet_by_name(sheet_name)
             target_col_idx = None

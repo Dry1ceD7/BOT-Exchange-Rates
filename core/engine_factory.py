@@ -2,7 +2,7 @@
 """
 core/engine_factory.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.0) — Strategy Pattern Engine Factory
+BOT Exchange Rate Processor (v3.0.7) — Strategy Pattern Engine Factory
 ---------------------------------------------------------------------------
 OS-Level Router: detects sys.platform at runtime and returns the correct
 engine implementation. Both engines share the BaseEngine ABC interface,

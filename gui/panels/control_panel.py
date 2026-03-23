@@ -2,7 +2,7 @@
 """
 gui/panels/control_panel.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.0) — Control Panel
+BOT Exchange Rate Processor (v3.0.7) — Control Panel
 ---------------------------------------------------------------------------
 Drop zone, date selectors, and action buttons extracted from the monolithic
 gui/app.py for SFFB compliance (< 200 lines).
