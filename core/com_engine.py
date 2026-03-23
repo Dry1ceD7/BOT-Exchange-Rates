@@ -593,6 +593,9 @@ def process_ledger_com(
                 wb.Close(SaveChanges=False)
             except Exception:
                 pass
+            # Force COM to drop the object reference
+            del wb
+            wb = None
         # ── Only quit Excel if WE created it ─────────────────────
         if owns_excel and ctx is not None:
             ctx.__exit__(None, None, None)

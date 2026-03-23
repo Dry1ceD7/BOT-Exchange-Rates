@@ -68,8 +68,12 @@ def prescan_oldest_date(
 def _scan_xls(filepath: str, target_col_name: str) -> Optional[date]:
     """Scan a legacy .xls file using xlrd to find the oldest date."""
     oldest: Optional[date] = None
+    wb = None
+    devnull_fh = None
     try:
-        wb = xlrd.open_workbook(filepath, formatting_info=False)
+        import os
+        devnull_fh = open(os.devnull, 'w')
+        wb = xlrd.open_workbook(filepath, formatting_info=False, logfile=devnull_fh)
         for sheet_name in wb.sheet_names():
             ws = wb.sheet_by_name(sheet_name)
             target_col_idx = None
@@ -108,6 +112,14 @@ def _scan_xls(filepath: str, target_col_name: str) -> Optional[date]:
                         oldest = parsed
     except Exception as e:
         logger.debug("xlrd prescan failed for %s: %s", filepath, e)
+    finally:
+        if wb is not None:
+            try:
+                wb.release_resources()
+            except Exception:
+                pass
+        if devnull_fh is not None:
+            devnull_fh.close()
 
     return oldest
 
@@ -120,33 +132,34 @@ def _scan_xlsx(filepath: str, target_col_name: str) -> Optional[date]:
     oldest: Optional[date] = None
     wb = None
     try:
-        wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
-        for ws in wb.worksheets:
-            target_col_idx = None
-            header_row_idx = None
-            for row_idx, row in enumerate(
-                ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
-            ):
-                row_strs = [
-                    str(c).strip() if c is not None else "" for c in row
-                ]
-                if target_col_name in row_strs:
-                    target_col_idx = row_strs.index(target_col_name) + 1
-                    header_row_idx = row_idx
-                    break
+        with open(filepath, "rb") as f:
+            wb = openpyxl.load_workbook(f, read_only=True, data_only=True)
+            for ws in wb.worksheets:
+                target_col_idx = None
+                header_row_idx = None
+                for row_idx, row in enumerate(
+                    ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
+                ):
+                    row_strs = [
+                        str(c).strip() if c is not None else "" for c in row
+                    ]
+                    if target_col_name in row_strs:
+                        target_col_idx = row_strs.index(target_col_name) + 1
+                        header_row_idx = row_idx
+                        break
 
-            if target_col_idx is None or header_row_idx is None:
-                continue
+                if target_col_idx is None or header_row_idx is None:
+                    continue
 
-            for row in ws.iter_rows(
-                min_row=header_row_idx + 1,
-                min_col=target_col_idx, max_col=target_col_idx,
-                values_only=True,
-            ):
-                parsed = _parse_scan_date(row[0], DATE_FORMATS)
-                if parsed is not None:
-                    if oldest is None or parsed < oldest:
-                        oldest = parsed
+                for row in ws.iter_rows(
+                    min_row=header_row_idx + 1,
+                    min_col=target_col_idx, max_col=target_col_idx,
+                    values_only=True,
+                ):
+                    parsed = _parse_scan_date(row[0], DATE_FORMATS)
+                    if parsed is not None:
+                        if oldest is None or parsed < oldest:
+                            oldest = parsed
     except (
         ValueError, TypeError, KeyError,
         openpyxl.utils.exceptions.InvalidFileException,
@@ -154,7 +167,10 @@ def _scan_xlsx(filepath: str, target_col_name: str) -> Optional[date]:
         pass
     finally:
         if wb is not None:
-            wb.close()
+            try:
+                wb.close()
+            except Exception:
+                pass
 
     return oldest
 
