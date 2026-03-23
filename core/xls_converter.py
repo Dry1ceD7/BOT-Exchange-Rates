@@ -2,10 +2,10 @@
 """
 core/xls_converter.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.6.1) - Native OS-Aware Conversion Pipeline
+BOT Exchange Rate Processor (v3.0.0) - Native OS-Aware Conversion Pipeline
 ---------------------------------------------------------------------------
 Strictly converts legacy .xls files to .xlsx using native proxies (win32com
-on Windows, or soffice headless on Mac/Linux) to guarantee absolute 100% 
+on Windows, or soffice headless on Mac/Linux) to guarantee absolute 100%
 preservation of enterprise fonts, styles, and geometries.
 """
 
@@ -44,7 +44,7 @@ def convert_xls_to_xlsx(filepath: str) -> str:
     Priority 2 (Mac/Linux/WinFallback): LibreOffice soffice --headless proxy
     Priority 3 (Failsafe): RuntimeError (Alerts GUI to prevent style loss)
     """
-    logger.info(f"Converting legacy .xls natively: {os.path.basename(filepath)}")
+    logger.info("Converting legacy .xls natively: %s", os.path.basename(filepath))
     filepath = os.path.abspath(filepath)
     dir_name = os.path.dirname(filepath)
     base_name = os.path.splitext(os.path.basename(filepath))[0]
@@ -68,10 +68,10 @@ def convert_xls_to_xlsx(filepath: str) -> str:
             standard_outpath = os.path.join(outdir, f"{base_name}.xlsx")
             if os.path.exists(standard_outpath):
                 shutil.move(standard_outpath, temp_path)
-                logger.info(f"LibreOffice conversion complete: {temp_path}")
+                logger.info("LibreOffice conversion complete: %s", temp_path)
                 return temp_path
         except Exception as e:
-            logger.warning(f"LibreOffice proxy failed. {e}")
+            logger.warning("LibreOffice proxy failed. %s", e)
 
     # ── Priority 3: STRICT FORMATTING FAILSAFE (GUI ALERT) ───────────
     error_msg = (

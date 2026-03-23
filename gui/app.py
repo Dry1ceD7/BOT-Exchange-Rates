@@ -2,7 +2,7 @@
 """
 gui/app.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.6.1) - Enterprise Edition
+BOT Exchange Rate Processor (v3.0.0) - Enterprise Desktop Edition
 ---------------------------------------------------------------------------
 Zero-emoji, typography-driven corporate UI.
 
@@ -10,9 +10,10 @@ Features:
  - Smart Date Toggle (CTkSwitch, defaults to today)
  - Universal Drop Zone (tkinterdnd2 with click-browse fallback)
  - File/Folder routing, batch queue with per-file progress
- - Dynamic "Show in Folder" button
+ - Live Processing Console (EventBus-driven)
+ - Settings Modal (JSON-backed persistence)
+ - Auto-Updater Engine (GitHub Releases API)
  - Revert button — restores corrupted files from automatic backups
- - Professional centered financial accounting theme
 """
 
 import logging
@@ -20,16 +21,26 @@ import os
 import platform
 import re
 import subprocess
+import threading
 from datetime import date, datetime
 from tkinter import filedialog, messagebox
 from typing import List, Optional
 
 import customtkinter as ctk
 
+from core.auto_updater import check_for_update
 from core.backup_manager import BackupManager
+from core.config_manager import SettingsManager
+from core.workers.event_bus import EventBus
 from gui.handlers import BatchHandler
+from gui.panels.live_console import LiveConsolePanel
 
-ctk.set_appearance_mode("light")
+APP_VERSION = "3.0.0"
+
+# Load user settings and apply appearance
+_settings_mgr = SettingsManager()
+_user_settings = _settings_mgr.load()
+ctk.set_appearance_mode(_user_settings.get("appearance", "system"))
 logger = logging.getLogger(__name__)
 
 # ── Color Palette ────────────────────────────────────────────────────────
@@ -115,19 +126,20 @@ class BOTExrateApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("BOT Exchange Rate Processor  |  V2.6.1")
-        self.geometry("740x780")
+        self.title(f"BOT Exchange Rate Processor  |  V{APP_VERSION}")
+        self.geometry("740x920")
         self.resizable(False, True)
         self.configure(fg_color=COLOR_BG_DARK)
 
         self.file_queue: List[str] = []
         self.last_processed_path: Optional[str] = None
         self.backup_mgr = BackupManager()
-        self.batch_handler = BatchHandler(self) # Initialize BatchHandler here
+        self.event_bus = EventBus()
+        self.batch_handler = BatchHandler(self, event_bus=self.event_bus)
 
         # Center window
         self.update_idletasks()
-        w, h = 740, 780
+        w, h = 740, 920
         sx = (self.winfo_screenwidth() - w) // 2
         sy = (self.winfo_screenheight() - h) // 2
         self.geometry(f"{w}x{h}+{sx}+{sy}")
@@ -143,6 +155,8 @@ class BOTExrateApp(ctk.CTk):
 
         self._build_header()
         self._build_card()
+        self._build_live_console()
+        self._check_for_updates()
 
     # ================================================================== #
     #  HEADER
@@ -159,10 +173,23 @@ class BOTExrateApp(ctk.CTk):
             inner, text="Bank of Thailand  —  Ledger Processor",
             font=ctk.CTkFont(size=22, weight="bold"), text_color=COLOR_HEADER_TEXT
         ).pack()
+
+        sub_row = ctk.CTkFrame(inner, fg_color="transparent")
+        sub_row.pack(pady=(2, 0))
         ctk.CTkLabel(
-            inner, text="Enterprise Accounting Suite  |  V2.6.1",
+            sub_row, text=f"Enterprise Desktop Edition  |  V{APP_VERSION}",
             font=ctk.CTkFont(size=11), text_color=COLOR_HEADER_SUB
-        ).pack(pady=(2, 0))
+        ).pack(side="left")
+
+        # Settings gear button
+        self._btn_settings = ctk.CTkButton(
+            sub_row, text="Settings", width=70, height=24,
+            fg_color="transparent", hover_color=COLOR_HEADER_BG,
+            text_color=COLOR_HEADER_SUB,
+            font=ctk.CTkFont(size=10), corner_radius=4,
+            command=self._open_settings,
+        )
+        self._btn_settings.pack(side="left", padx=(12, 0))
 
     # ================================================================== #
     #  CARD
@@ -303,7 +330,7 @@ class BOTExrateApp(ctk.CTk):
                     except Exception as e:
                         logger.debug("DnD bind failed for child widget: %s", e)
             except Exception as e:
-                logger.warning(f"DnD registration failed: {e}")
+                logger.warning("DnD registration failed: %s", e)
                 self.dnd_enabled = False
 
         self.lbl_queue = ctk.CTkLabel(
@@ -598,7 +625,6 @@ class BOTExrateApp(ctk.CTk):
         self.batch_handler.start_revert(path)
 
 
-
     def _show_revert_success(self, filepath: str, backup_name: str):
         self.progressbar.stop()
         self.progressbar.configure(mode="determinate")
@@ -640,6 +666,51 @@ class BOTExrateApp(ctk.CTk):
             self.lbl_status.configure(
                 text="Could not open file manager.", text_color=COLOR_WARNING
             )
+
+
+    # ================================================================== #
+    #  V3.0: LIVE PROCESSING CONSOLE
+    # ================================================================== #
+    def _build_live_console(self):
+        """Embed the LiveConsolePanel below the main card."""
+        self.console = LiveConsolePanel(
+            self, event_bus=self.event_bus, height=140,
+        )
+        self.console.pack(pady=(0, 16), padx=36, fill="x")
+        self.console.start_polling()
+
+    # ================================================================== #
+    #  V3.0: SETTINGS MODAL
+    # ================================================================== #
+    def _open_settings(self):
+        """Launch the settings modal window."""
+        from gui.panels.settings_modal import SettingsModal
+        modal = SettingsModal(self)
+        modal.grab_set()
+
+    # ================================================================== #
+    #  V3.0: AUTO-UPDATER (background, non-blocking)
+    # ================================================================== #
+    def _check_for_updates(self):
+        """Check for updates in background thread on startup."""
+        if not _user_settings.get("auto_update", True):
+            return
+
+        def _worker():
+            result = check_for_update(current_version=APP_VERSION)
+            if result.get("update_available"):
+                ver = result.get("latest_version", "?")
+                url = result.get("download_url", "")
+                self.after(0, self._show_update_banner, ver, url)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_update_banner(self, version: str, url: str):
+        """Show a non-intrusive update notification in the header area."""
+        self.event_bus.push({
+            "type": "success",
+            "msg": f"Update available: V{version} — visit GitHub Releases to download.",
+        })
 
 
 if __name__ == "__main__":

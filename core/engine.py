@@ -2,7 +2,7 @@
 """
 core/engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.6.1) - Cache-First Orchestrator
+BOT Exchange Rate Processor (v3.0.0) - Cache-First Orchestrator
 ---------------------------------------------------------------------------
 Slim orchestrator. Heavy logic extracted to:
   - core/exrate_sheet.py → Master ExRate sheet builder
@@ -14,11 +14,11 @@ import asyncio
 import gc
 import logging
 import os
+import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-import openpyxl
 from openpyxl.cell.cell import MergedCell
 
 from core.api_client import BOTClient
@@ -388,7 +388,7 @@ class LedgerEngine:
                 for sheet in wb_scan.sheets():
                     if sheet.name in SKIP_SHEET_NAMES:
                         continue
-                    
+
                     # Scan headers (first 10 rows)
                     header_row_idx = None
                     src_col_idx = None
@@ -398,7 +398,7 @@ class LedgerEngine:
                             header_row_idx = row_idx
                             src_col_idx = row_vals.index(self.target_cols["source_date"])
                             break
-                    
+
                     if header_row_idx is not None and src_col_idx is not None:
                         for row_idx in range(header_row_idx + 1, sheet.nrows):
                             cell = sheet.cell(row_idx, src_col_idx)
@@ -415,7 +415,7 @@ class LedgerEngine:
                                     all_target_dates.add(parsed_date)
             except Exception as e:
                 logger.warning("xlrd pre-scan failed for %s: %s", os.path.basename(filepath), e)
-                
+
         else:
             # Standard openpyxl pre-scan for .xlsx (and Mac/Linux converted files)
             wb_scan = None
@@ -479,7 +479,6 @@ class LedgerEngine:
         )
 
         # ── Build holiday names lookup ───────────────────────────────
-        import re
         sub_pattern = re.compile(r'^Substitution for (.*)\((.*?)\)$')
 
         holidays_names: Dict[date, str] = {}
@@ -615,8 +614,8 @@ class LedgerEngine:
 
             if header_row_idx is None or "source" not in col_indices_local:
                 logger.info(
-                    f"Sheet '{sheet_name}' missing source date column — "
-                    f"skipped."
+                    "Sheet '%s' missing source date column — skipped.",
+                    sheet_name,
                 )
                 continue
 

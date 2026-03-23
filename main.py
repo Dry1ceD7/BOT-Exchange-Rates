@@ -2,7 +2,7 @@
 """
 main.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.6.1) - Fail-Safe Enterprise
+BOT Exchange Rate Processor (v3.0.0) - Enterprise Desktop Edition
 ---------------------------------------------------------------------------
 Entry point. Loads .env, validates API tokens BEFORE GUI init,
 ensures required directories exist, and exits with a clear error
@@ -76,6 +76,7 @@ def main():
 
 import traceback
 
+
 def global_exception_handler(exc_type, exc_value, exc_traceback):
     """
     Fallback handler to catch fatal errors when running without a console.
@@ -86,7 +87,7 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
         return
 
     error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-    
+
     # Write to local error.log
     log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "error.log")
     try:
@@ -94,13 +95,13 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
             f.write(f"\n--- FATAL ERROR ---\n{error_msg}\n")
     except Exception:
         pass
-        
+
     # Show GUI popup
     try:
         root = tk.Tk()
         root.withdraw()
         messagebox.showerror(
-            "Fatal Application Error", 
+            "Fatal Application Error",
             f"A critical crash occurred:\n\n{exc_value}\n\nPlease check error.log for full details."
         )
         root.destroy()
