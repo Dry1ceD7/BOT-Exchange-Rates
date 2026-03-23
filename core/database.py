@@ -28,7 +28,8 @@ class CacheDB:
 
     def __init__(self, db_path: str = None):
         if db_path is None:
-            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            from core.paths import get_project_root
+            project_root = get_project_root()
             db_dir = os.path.join(project_root, "data")
             os.makedirs(db_dir, exist_ok=True)
             db_path = os.path.join(db_dir, "cache.db")

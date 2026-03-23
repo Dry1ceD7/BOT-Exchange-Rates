@@ -33,7 +33,8 @@ class BackupManager:
                         Defaults to <project_root>/data/backups/
         """
         if backup_dir is None:
-            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            from core.paths import get_project_root
+            project_root = get_project_root()
             backup_dir = os.path.join(project_root, "data", "backups")
 
         self.backup_dir = backup_dir

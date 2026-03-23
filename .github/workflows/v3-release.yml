@@ -1,8 +1,8 @@
 # ---------------------------------------------------------------------------
-# BOT Exchange Rate Processor — V3.0.0 Cross-Platform Release Pipeline
+# BOT Exchange Rate Processor — V3.0.4 Cross-Platform Release Pipeline
 # ---------------------------------------------------------------------------
 # Triggers on version tags (v*). Builds standalone executables for
-# Windows (.exe), macOS (.app), and Linux (.AppImage) using PyInstaller.
+# Windows (.exe), macOS (.app), and Linux using PyInstaller --onedir.
 # Uses uv for dependency management per working agreement mandate.
 # ---------------------------------------------------------------------------
 
@@ -49,13 +49,10 @@ jobs:
         include:
           - os: windows-latest
             artifact: BOT-ExRate-Windows
-            ext: .exe
           - os: macos-latest
             artifact: BOT-ExRate-macOS
-            ext: .app
           - os: ubuntu-latest
             artifact: BOT-ExRate-Linux
-            ext: .AppImage
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -77,13 +74,10 @@ jobs:
       - name: Build with PyInstaller
         shell: bash
         run: |
-          # PyInstaller --add-data separator: ';' on Windows, ':' on Unix
-          if [[ "$RUNNER_OS" == "Windows" ]]; then SEP=";"; else SEP=":"; fi
           uv run pyinstaller \
             --name "BOT-ExRate" \
-            --onefile \
+            --onedir \
             --windowed \
-            --add-data "data${SEP}data" \
             --hidden-import customtkinter \
             --hidden-import tkinterdnd2 \
             --hidden-import openpyxl \
@@ -92,11 +86,26 @@ jobs:
             --hidden-import pydantic \
             main.py
 
+      - name: Package distribution
+        shell: bash
+        run: |
+          cd dist
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            7z a -tzip BOT-ExRate-Windows.zip BOT-ExRate/
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            zip -r BOT-ExRate-macOS.zip BOT-ExRate/
+          else
+            tar -czf BOT-ExRate-Linux.tar.gz BOT-ExRate/
+          fi
+
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/BOT-ExRate*
+          path: |
+            dist/BOT-ExRate-Windows.zip
+            dist/BOT-ExRate-macOS.zip
+            dist/BOT-ExRate-Linux.tar.gz
           retention-days: 30
 
   # ── STAGE 3: GitHub Release ────────────────────────────────────────────

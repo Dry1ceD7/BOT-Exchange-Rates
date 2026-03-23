@@ -2,7 +2,7 @@
 """
 core/engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.0) - Cache-First Orchestrator
+BOT Exchange Rate Processor (v3.0.4) - Cache-First Orchestrator
 ---------------------------------------------------------------------------
 Slim orchestrator. Heavy logic extracted to:
   - core/exrate_sheet.py → Master ExRate sheet builder
@@ -82,15 +82,21 @@ class LedgerEngine:
     MAX_FILE_SIZE_MB = 15
     MAX_FILE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
-    def __init__(self, api_client: BOTClient):
+    def __init__(self, api_client: BOTClient, event_bus=None):
         self.api = api_client
         self.backup = _get_backup()
         self.cache = _get_cache()
+        self._bus = event_bus
         self.target_cols = {
             "source_date": "Date",
             "currency": "Cur",
             "out_rate": "EX Rate",
         }
+
+    def _emit(self, msg: str, etype: str = "log") -> None:
+        """Push event to EventBus if one is attached."""
+        if self._bus is not None:
+            self._bus.push({"type": etype, "msg": msg})
 
     def _check_memory_guardrail(self, filepath: str):
         if not os.path.exists(filepath):
@@ -292,6 +298,13 @@ class LedgerEngine:
             # ── Narrowed fetch range: only fetch the missing window ───
             fetch_start = min(missing_dates)
             fetch_end = max(missing_dates)
+            self._emit(
+                "Cache miss: %d dates (%s to %s). Calling API" % (
+                    len(missing_dates),
+                    fetch_start.strftime("%Y-%m-%d"),
+                    fetch_end.strftime("%Y-%m-%d"),
+                ),
+            )
             logger.info(
                 "Cache miss: %d dates missing (%s → %s). Fetching from API...",
                 len(missing_dates),
@@ -329,11 +342,18 @@ class LedgerEngine:
                 for d_str, v in rate_cache.items()
             ]
             self.cache.insert_rates_bulk(bulk)
+            self._emit(
+                "API fetch done: %d USD + %d EUR records cached" % (
+                    len(usd_data), len(eur_data),
+                ),
+                etype="success",
+            )
             logger.info(
                 "API fetch complete: %d USD + %d EUR records cached.",
                 len(usd_data), len(eur_data),
             )
         else:
+            self._emit("All rates served from cache (0 API calls)", etype="success")
             logger.info("All rates served from cache (0 API calls).")
 
         return (
@@ -359,7 +379,9 @@ class LedgerEngine:
         filepath = os.path.abspath(filepath)
 
         self._check_memory_guardrail(filepath)
+        self._emit("Size check passed")
         self.backup.create_backup(filepath)
+        self._emit("Backup created")
 
         # ── .xls Auto-Conversion ─────────────────────────────────────
         original_path = filepath
@@ -368,15 +390,14 @@ class LedgerEngine:
 
         if is_legacy_xls:
             converted = True
-            # On Windows, the COM Engine handles .xls natively in one pass.
-            # On Mac/Linux, we must pre-convert using the LibreOffice proxy
-            # before openpyxl can read it.
+            self._emit("Converting legacy .xls to .xlsx")
             if sys.platform != "win32":
                 filepath = convert_xls_to_xlsx(filepath)
 
         # ── Pre-scan dates for API data loading ──────────────────────
         # We need to scan dates BEFORE choosing the engine path so that
         # the COM engine has all the rate/holiday data it needs.
+        self._emit("Scanning dates from workbook")
         all_target_dates: Set[date] = set()
 
         if is_legacy_xls and sys.platform == "win32":
@@ -469,6 +490,7 @@ class LedgerEngine:
         )
         start_date = f"{target_year - 1}-12-20"
 
+        self._emit("Loading exchange rates and holidays")
         (
             logic_engine, usd_selling, eur_selling,
             usd_buying, eur_buying, usd_data, eur_data,
@@ -541,6 +563,7 @@ class LedgerEngine:
         if sys.platform == "win32":
             # ── PRIMARY PATH: Native Microsoft Excel COM Engine ───────
             from core.com_engine import process_ledger_com
+            self._emit("Dispatching to Native COM Engine (Windows)")
             logger.info("Dispatching to Native COM Engine (Windows).")
 
             result = process_ledger_com(
@@ -570,11 +593,13 @@ class LedgerEngine:
                 )
 
             gc.collect()
+            self._emit("File saved and memory cleaned", etype="success")
             return result
 
         # ══════════════════════════════════════════════════════════════
         #  FALLBACK PATH: openpyxl (macOS / Linux)
         # ══════════════════════════════════════════════════════════════
+        self._emit("Processing sheets with openpyxl engine")
         logger.info("Using openpyxl engine (non-Windows fallback).")
 
         try:
@@ -717,6 +742,7 @@ class LedgerEngine:
                 os.path.basename(filepath),
             )
         gc.collect()
+        self._emit("File saved and memory cleaned", etype="success")
         return filepath
 
     # ================================================================== #

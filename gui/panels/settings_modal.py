@@ -2,7 +2,7 @@
 """
 gui/panels/settings_modal.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.3) — Settings Modal Panel
+BOT Exchange Rate Processor (v3.0.4) — Settings Modal Panel
 ---------------------------------------------------------------------------
 Popup window for user preferences backed by core/config_manager.py.
 Controls: Appearance (Dark/Light/System), Auto-Update toggle, API keys, API ping.
@@ -137,12 +137,10 @@ class SettingsModal(ctk.CTkToplevel):
         ctk.set_appearance_mode(value)
 
     def _on_manage_keys(self):
+        from core.paths import get_project_root
         from gui.panels.token_dialog import TokenRegistrationDialog
 
-        env_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            ".env",
-        )
+        env_path = os.path.join(get_project_root(), ".env")
         dialog = TokenRegistrationDialog(
             self,
             env_path=env_path,

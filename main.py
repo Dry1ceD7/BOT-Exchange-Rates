@@ -2,7 +2,7 @@
 """
 main.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.3) - Enterprise Desktop Edition
+BOT Exchange Rate Processor (v3.0.4) - Enterprise Desktop Edition
 ---------------------------------------------------------------------------
 Entry point. Loads .env, prompts for API tokens on first use via
 a registration dialog, ensures required directories exist, then
@@ -20,8 +20,10 @@ from tkinter import messagebox
 
 from dotenv import load_dotenv
 
+from core.paths import get_project_root
+
 # Securely load API Keys to os.environ BEFORE anything else
-ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+ENV_PATH = os.path.join(get_project_root(), ".env")
 load_dotenv(dotenv_path=ENV_PATH)
 
 
@@ -33,7 +35,7 @@ def _ensure_directories():
     (data/ and data/backups/ are also created by database.py and
     backup_manager.py singletons, but data/input/ is NOT.)
     """
-    project_root = os.path.dirname(os.path.abspath(__file__))
+    project_root = get_project_root()
     for subdir in ["data", "data/input", "data/backups"]:
         os.makedirs(os.path.join(project_root, subdir), exist_ok=True)
 

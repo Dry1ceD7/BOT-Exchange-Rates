@@ -2,7 +2,7 @@
 """
 gui/panels/live_console.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.0) — Live Processing Console Panel
+BOT Exchange Rate Processor (v3.0.4) — Live Processing Console Panel
 ---------------------------------------------------------------------------
 Read-only CTkTextbox that tails the EventBus queue, providing terminal-like
 feedback inside the GUI (e.g., "Fetching USD... Complete").

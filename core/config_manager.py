@@ -30,10 +30,8 @@ class SettingsManager:
 
     def __init__(self, config_dir: str | None = None):
         if config_dir is None:
-            # Default to project-local data/ directory
-            project_root = os.path.dirname(
-                os.path.dirname(os.path.abspath(__file__))
-            )
+            from core.paths import get_project_root
+            project_root = get_project_root()
             config_dir = os.path.join(project_root, "data")
         self._config_dir = config_dir
         self._filepath = os.path.join(config_dir, SETTINGS_FILENAME)

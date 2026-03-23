@@ -2,7 +2,7 @@
 """
 gui/panels/token_dialog.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.3) — API Token Registration Dialog
+BOT Exchange Rate Processor (v3.0.4) — API Token Registration Dialog
 ---------------------------------------------------------------------------
 License-key-style popup that collects BOT API tokens on first use.
 Writes validated tokens to .env and injects them into os.environ.
@@ -16,6 +16,8 @@ import webbrowser
 from typing import Optional
 
 import customtkinter as ctk
+
+from core.paths import get_project_root
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +57,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         super().__init__(master, **kwargs)
 
         self.activated = False
-        self._env_path = env_path or os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            ".env",
-        )
+        self._env_path = env_path or os.path.join(get_project_root(), ".env")
 
         self.title("BOT Exchange Rate — API Registration")
         self.geometry("520x520")

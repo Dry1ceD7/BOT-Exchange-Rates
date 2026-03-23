@@ -2,7 +2,7 @@
 """
 gui/handlers.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.0) - Async Processing Handlers
+BOT Exchange Rate Processor (v3.0.4) - Async Processing Handlers
 ---------------------------------------------------------------------------
 Separated from app.py for SFFB compliance (<200 lines).
 Contains the threading bridge and batch processing logic.
@@ -62,7 +62,7 @@ class BatchHandler:
         """Async batch executor."""
         async with httpx.AsyncClient() as client:
             api = BOTClient(client)
-            engine = LedgerEngine(api)
+            engine = LedgerEngine(api, event_bus=self.bus)
 
             self.bus.push({"type": "log", "msg": f"API connected. Date: {start_date}"})
 
