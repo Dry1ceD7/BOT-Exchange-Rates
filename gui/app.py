@@ -2,7 +2,7 @@
 """
 gui/app.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.7) - Enterprise Desktop Edition
+BOT Exchange Rate Processor (v3.0.8) - Enterprise Desktop Edition
 ---------------------------------------------------------------------------
 Zero-emoji, typography-driven corporate UI.
 
@@ -31,11 +31,10 @@ import customtkinter as ctk
 from core.auto_updater import check_for_update
 from core.backup_manager import BackupManager
 from core.config_manager import SettingsManager
+from core.version import __version__ as APP_VERSION
 from core.workers.event_bus import EventBus
 from gui.handlers import BatchHandler
 from gui.panels.live_console import LiveConsolePanel
-
-APP_VERSION = "3.0.0"
 
 # Load user settings and apply appearance
 _settings_mgr = SettingsManager()
@@ -709,7 +708,7 @@ class BOTExrateApp(ctk.CTk):
         """Show a non-intrusive update notification in the header area."""
         self.event_bus.push({
             "type": "success",
-            "msg": f"Update available: V{version} — visit GitHub Releases to download.",
+            "msg": f"Update available: V{version} — click 'Check for Updates' in Settings to download.",
         })
 
 

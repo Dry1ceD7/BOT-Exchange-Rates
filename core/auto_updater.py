@@ -2,7 +2,7 @@
 """
 core/auto_updater.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.7) — Auto-Updater Engine
+BOT Exchange Rate Processor (v3.0.8) — Auto-Updater Engine
 ---------------------------------------------------------------------------
 On boot, pings the GitHub Releases API to check if a newer version is
 available. Returns a structured dict for the GUI to render a non-intrusive

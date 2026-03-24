@@ -2,7 +2,7 @@
 """
 gui/panels/token_dialog.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.4) — API Token Registration Dialog
+BOT Exchange Rate Processor (v3.0.8) — API Token Registration Dialog
 ---------------------------------------------------------------------------
 License-key-style popup that collects BOT API tokens on first use.
 Writes validated tokens to .env and injects them into os.environ.

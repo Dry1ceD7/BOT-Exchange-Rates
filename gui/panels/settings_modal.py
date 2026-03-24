@@ -2,7 +2,7 @@
 """
 gui/panels/settings_modal.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.4) — Settings Modal Panel
+BOT Exchange Rate Processor (v3.0.8) — Settings Modal Panel
 ---------------------------------------------------------------------------
 Popup window for user preferences backed by core/config_manager.py.
 Controls: Appearance (Dark/Light/System), Auto-Update toggle, API keys, API ping.
@@ -13,6 +13,7 @@ SFFB: Strict < 200 lines.
 import logging
 import os
 import threading
+import webbrowser
 from typing import Optional
 
 import customtkinter as ctk
@@ -41,7 +42,7 @@ class SettingsModal(ctk.CTkToplevel):
         super().__init__(master, **kwargs)
 
         self.title("Settings")
-        self.geometry("420x460")
+        self.geometry("420x540")
         self.resizable(False, False)
         self.configure(fg_color=COLOR_MODAL_BG)
 
@@ -53,7 +54,7 @@ class SettingsModal(ctk.CTkToplevel):
 
     def _center(self):
         self.update_idletasks()
-        w, h = 420, 460
+        w, h = 420, 540
         sx = (self.winfo_screenwidth() - w) // 2
         sy = (self.winfo_screenheight() - h) // 2
         self.geometry(f"{w}x{h}+{sx}+{sy}")
@@ -122,7 +123,23 @@ class SettingsModal(ctk.CTkToplevel):
             self, text="", font=ctk.CTkFont(size=11),
             text_color=COLOR_MODAL_SUCCESS,
         )
-        self._lbl_ping.pack(pady=(0, 16))
+        self._lbl_ping.pack(pady=(0, 12))
+
+        # ── Check for Updates ─────────────────────────────────────────
+        self._btn_update = ctk.CTkButton(
+            self, text="Check for Updates",
+            fg_color="#475569", hover_color="#64748B",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            corner_radius=8, height=38,
+            command=self._on_check_update,
+        )
+        self._btn_update.pack(padx=30, fill="x", pady=(0, 4))
+
+        self._lbl_update = ctk.CTkLabel(
+            self, text="", font=ctk.CTkFont(size=11),
+            text_color=COLOR_MODAL_SUCCESS,
+        )
+        self._lbl_update.pack(pady=(0, 16))
 
         # ── Save & Close ─────────────────────────────────────────────
         ctk.CTkButton(
@@ -171,6 +188,45 @@ class SettingsModal(ctk.CTkToplevel):
                 self.after(0, self._btn_ping.configure, {"state": "normal"})
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_check_update(self):
+        from core.auto_updater import check_for_update
+        from core.version import __version__
+
+        self._lbl_update.configure(text="Checking...", text_color="#94A3B8")
+        self._btn_update.configure(state="disabled")
+        self.update_idletasks()
+
+        def _worker():
+            result = check_for_update(current_version=__version__)
+            if result.get("update_available"):
+                ver = result.get("latest_version", "?")
+                url = result.get("download_url", "")
+                self.after(0, self._show_update_available, ver, url)
+            elif result.get("error"):
+                self.after(0, self._lbl_update.configure,
+                           {"text": f"Check failed: {result['error']}",
+                            "text_color": "#F87171"})
+                self.after(0, self._btn_update.configure, {"state": "normal"})
+            else:
+                self.after(0, self._lbl_update.configure,
+                           {"text": f"✓ Up to date (V{__version__})",
+                            "text_color": COLOR_MODAL_SUCCESS})
+                self.after(0, self._btn_update.configure, {"state": "normal"})
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_update_available(self, version: str, url: str):
+        self._lbl_update.configure(
+            text=f"⬆ Update available: V{version}",
+            text_color="#F59E0B",
+        )
+        self._btn_update.configure(
+            text=f"Download V{version}",
+            fg_color="#F59E0B", hover_color="#D97706",
+            state="normal",
+            command=lambda: webbrowser.open(url),
+        )
 
     def _save_and_close(self):
         self._settings["appearance"] = self._appearance_var.get()
