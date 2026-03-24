@@ -23,6 +23,7 @@ from decimal import Decimal
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from openpyxl.cell.cell import MergedCell
+from openpyxl.utils import get_column_letter
 
 from core.api_client import BOTClient
 from core.backup_manager import BackupError, BackupManager
@@ -727,19 +728,26 @@ class LedgerEngine:
                             ).value,
                         }
 
-            # ── STEP 3: Cross-Tab VLOOKUP — Zero-Touch Formatting Protocol ──
+            # ── STEP 3: Cross-Tab Lookup — Write formulas into monthly tabs ──
             #
-            # Writes static rate values (not formulas) to the "EX Rate"
-            # column of each monthly tab.  Values are resolved by the
-            # Python _vlookup_exrate() engine which walks backwards from
-            # each date to the nearest trading day in the ExRate index
-            # (handles weekends, holidays, gaps automatically).
+            # Writes VLOOKUP + XLOOKUP formulas to the "EX Rate" column.
+            # Uses BOUNDED ranges ($A$2:$E${N}) to exclude the header row,
+            # which previously broke VLOOKUP approximate match.
             #
-            # Static values are used instead of Excel VLOOKUP/XLOOKUP
-            # formulas because:
-            #   1. Formulas break on mixed-type lookup columns (header row)
-            #   2. _xlfn.XLOOKUP prefix isn't supported in older Excel
-            #   3. Static values work in ALL Excel versions reliably
+            # Formula strategy:
+            #   XLOOKUP (Excel 365/2021+) with match_mode -1 = primary
+            #   VLOOKUP (all versions) with TRUE (approx match) = fallback
+            #   Both auto-rollback to nearest previous trading day.
+            #
+            # ExRate layout (data starts at row 2, sorted ascending):
+            #   A=Date, B=USD Buy, C=USD Sell, D=EUR Buy, E=EUR Sell
+
+            # Determine ExRate data boundaries for bounded formula ranges
+            exrate_last_row = 2  # minimum
+            if "ExRate" in wb.sheetnames:
+                ws_ex = wb["ExRate"]
+                exrate_last_row = max(ws_ex.max_row or 2, 2)
+
             for sheet_name, mapping in sheet_maps.items():
                 ws = wb[sheet_name]
                 cols = mapping["columns"]
@@ -774,11 +782,32 @@ class LedgerEngine:
                         self._zero_touch_write(ws, row_idx, out_col, 1)
                         continue
 
-                    # Resolve rate via Python rollback engine
-                    rate = self._vlookup_exrate(
-                        inv_date, ccy, exrate_index,
+                    # ExRate column mapping:
+                    #   USD Buying TT Rate → col B (VLOOKUP idx 2)
+                    #   EUR Buying TT Rate → col D (VLOOKUP idx 4)
+                    col_map = {"USD": ("$B", 2), "EUR": ("$D", 4)}
+                    col_info = col_map.get(ccy)
+                    if col_info is None:
+                        continue
+                    xl_col, vl_col = col_info
+
+                    # Cell reference for the date in this monthly row
+                    date_col_letter = get_column_letter(src_idx)
+                    date_ref = f"{date_col_letter}{row_idx}"
+                    N = exrate_last_row  # last data row in ExRate
+
+                    # BOUNDED ranges — excludes header row 1:
+                    #   $A$2:$A${N}  for date lookup column
+                    #   $B$2:$B${N}  or $D$2:$D${N} for rate return
+                    #   $A$2:$E${N}  for VLOOKUP table array
+                    formula = (
+                        f"=IFERROR(_xlfn.XLOOKUP({date_ref},"
+                        f"ExRate!$A$2:$A${N},"
+                        f"ExRate!{xl_col}$2:{xl_col}${N},\"\",-1),"
+                        f"IFERROR(VLOOKUP({date_ref},"
+                        f"ExRate!$A$2:$E${N},{vl_col},TRUE),\"\"))"
                     )
-                    self._zero_touch_write(ws, row_idx, out_col, rate)
+                    self._zero_touch_write(ws, row_idx, out_col, formula)
 
             # ── Save & Cleanup ───────────────────────────────────────────
             if converted:
