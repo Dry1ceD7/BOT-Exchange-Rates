@@ -76,12 +76,6 @@ def update_master_exrate_sheet(
     ws.column_dimensions["E"].width = 16
     ws.column_dimensions["F"].width = 40
 
-    # Clear legacy columns beyond our 6-column layout
-    if ws.max_column and ws.max_column > 6:
-        for row_idx in range(HEADER_ROW, (ws.max_row or 1) + 1):
-            for col in range(7, ws.max_column + 1):
-                ws.cell(row=row_idx, column=col).value = None
-
     # ── Read existing data from the sheet ────────────────────────────
     existing_data = _read_existing_data(ws, DATA_START_ROW)
 
@@ -102,6 +96,11 @@ def update_master_exrate_sheet(
         ws.delete_rows(DATA_START_ROW, ws.max_row - DATA_START_ROW + 1)
 
     _write_merged_data(ws, merged, holidays_set, thin_border, DATA_START_ROW)
+
+    # ── Write VLOOKUP / XLOOKUP helper section ───────────────────────
+    last_data_row = DATA_START_ROW + len(merged) - 1
+    _write_lookup_helper(ws, last_data_row, header_font, header_fill,
+                         header_align, thin_border)
 
 
 def _read_existing_data(ws, data_start_row: int) -> Dict[date, dict]:
@@ -234,3 +233,162 @@ def _write_merged_data(ws, merged, holidays_set, thin_border, start_row):
                 ws.cell(row=current_row, column=col).fill = weekend_fill
 
         current_row += 1
+
+
+def _write_lookup_helper(ws, last_data_row, header_font, header_fill,
+                         header_align, thin_border):
+    """
+    Write a Lookup Helper panel in columns H-M of the ExRate sheet.
+
+    Contains:
+      - Date input cell (H2) where users type a lookup date
+      - VLOOKUP formulas (row 2) returning all 4 rate types
+      - XLOOKUP formulas (row 5) returning all 4 rate types (Excel 365+)
+      - Reference guide (rows 8+) showing cross-sheet formula syntax
+    """
+    data_font = Font(name="Calibri", size=10)
+    label_font = Font(name="Calibri", size=10, bold=True)
+    title_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    section_font = Font(name="Calibri", size=10, bold=True, color="1A365D")
+    input_fill = PatternFill(
+        start_color="FFFFCC", end_color="FFFFCC", fill_type="solid"
+    )
+    helper_fill = PatternFill(
+        start_color="EBF5FB", end_color="EBF5FB", fill_type="solid"
+    )
+    guide_fill = PatternFill(
+        start_color="F0F4F8", end_color="F0F4F8", fill_type="solid"
+    )
+
+    # Column widths for helper area
+    ws.column_dimensions["G"].width = 3     # Spacer
+    ws.column_dimensions["H"].width = 20    # Input / Labels
+    ws.column_dimensions["I"].width = 20    # USD Buy result
+    ws.column_dimensions["J"].width = 20    # USD Sell result
+    ws.column_dimensions["K"].width = 20    # EUR Buy result
+    ws.column_dimensions["L"].width = 20    # EUR Sell result
+    ws.column_dimensions["M"].width = 50    # Formula guide
+
+    # Data range reference (absolute) for formulas
+    rng = f"$A$2:$E${last_data_row}"
+
+    # ── Clear existing helper area (cols H-M, rows 1-20) ─────────────
+    for r in range(1, 21):
+        for c in range(8, 14):  # H=8 through M=13
+            cell = ws.cell(row=r, column=c)
+            cell.value = None
+            cell.font = data_font
+            cell.fill = PatternFill()
+            cell.border = Border()
+            cell.alignment = Alignment()
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ROW 1: Section header
+    # ══════════════════════════════════════════════════════════════════
+    for col_idx, text in [
+        (8, "Lookup Date"),
+        (9, "USD Buying Rate"),
+        (10, "USD Selling Rate"),
+        (11, "EUR Buying Rate"),
+        (12, "EUR Selling Rate"),
+    ]:
+        cell = ws.cell(row=1, column=col_idx, value=text)
+        cell.font = title_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+        cell.border = thin_border
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ROW 2: VLOOKUP formulas
+    # ══════════════════════════════════════════════════════════════════
+    # H2 = date input cell (highlighted yellow)
+    cell_input = ws.cell(row=2, column=8)
+    cell_input.value = "← Enter date here"
+    cell_input.font = Font(name="Calibri", size=10, italic=True, color="999999")
+    cell_input.fill = input_fill
+    cell_input.border = thin_border
+    cell_input.alignment = Alignment(horizontal="center")
+
+    # I2-L2: VLOOKUP formulas (return_col = 2,3,4,5)
+    for col_idx, return_col in [(9, 2), (10, 3), (11, 4), (12, 5)]:
+        formula = f'=IFERROR(VLOOKUP(H2,{rng},{return_col},FALSE),"")'
+        cell = ws.cell(row=2, column=col_idx, value=formula)
+        cell.number_format = "0.0000"
+        cell.font = data_font
+        cell.fill = helper_fill
+        cell.border = thin_border
+        cell.alignment = Alignment(horizontal="right")
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ROW 3: VLOOKUP label
+    # ══════════════════════════════════════════════════════════════════
+    cell = ws.cell(row=3, column=8, value="▲ VLOOKUP results")
+    cell.font = Font(name="Calibri", size=9, italic=True, color="666666")
+    cell.alignment = Alignment(horizontal="center")
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ROW 4: XLOOKUP header label
+    # ══════════════════════════════════════════════════════════════════
+    cell = ws.cell(row=4, column=8, value="XLOOKUP (Excel 365+)")
+    cell.font = section_font
+    cell.alignment = Alignment(horizontal="center")
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ROW 5: XLOOKUP formulas (same input cell H2)
+    # ══════════════════════════════════════════════════════════════════
+    date_col = f"$A$2:$A${last_data_row}"
+    result_cols = {
+        9: f"$B$2:$B${last_data_row}",   # USD Buy
+        10: f"$C$2:$C${last_data_row}",   # USD Sell
+        11: f"$D$2:$D${last_data_row}",   # EUR Buy
+        12: f"$E$2:$E${last_data_row}",   # EUR Sell
+    }
+    for col_idx, ret_rng in result_cols.items():
+        formula = f'=IFERROR(XLOOKUP(H2,{date_col},{ret_rng},""),"")'
+        cell = ws.cell(row=5, column=col_idx, value=formula)
+        cell.number_format = "0.0000"
+        cell.font = data_font
+        cell.fill = helper_fill
+        cell.border = thin_border
+        cell.alignment = Alignment(horizontal="right")
+
+    cell = ws.cell(row=6, column=8, value="▲ XLOOKUP results")
+    cell.font = Font(name="Calibri", size=9, italic=True, color="666666")
+    cell.alignment = Alignment(horizontal="center")
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ROWS 8-17: Formula reference guide for cross-sheet usage
+    # ══════════════════════════════════════════════════════════════════
+    guide_start = 8
+    guide_lines = [
+        ("HOW TO USE FROM OTHER SHEETS", section_font, True),
+        ("", data_font, False),
+        ("VLOOKUP — works in all Excel versions:", label_font, False),
+        ('=VLOOKUP(A2,ExRate!$A:$E,2,FALSE)', data_font, False),
+        ("  → Replace A2 with your date cell", data_font, False),
+        ("  → Column 2=USD Buy, 3=USD Sell, 4=EUR Buy, 5=EUR Sell",
+         data_font, False),
+        ("", data_font, False),
+        ("XLOOKUP — Excel 365 / 2021+ only:", label_font, False),
+        ('=XLOOKUP(A2,ExRate!$A:$A,ExRate!$B:$B,"")', data_font, False),
+        ("  → Replace A2 with your date cell", data_font, False),
+        ("  → Replace $B:$B with $C, $D, or $E for other rates",
+         data_font, False),
+    ]
+
+    for i, (text, font, is_header) in enumerate(guide_lines):
+        row = guide_start + i
+        cell = ws.cell(row=row, column=8, value=text)
+        cell.font = font
+        if is_header:
+            cell.fill = header_fill
+            cell.font = title_font
+            # Span the header across H-L
+            for merge_col in range(9, 13):
+                mc = ws.cell(row=row, column=merge_col)
+                mc.fill = header_fill
+        else:
+            cell.fill = guide_fill
+            for merge_col in range(9, 13):
+                ws.cell(row=row, column=merge_col).fill = guide_fill
+
