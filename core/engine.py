@@ -23,6 +23,7 @@ from decimal import Decimal
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from openpyxl.cell.cell import MergedCell
+from openpyxl.utils import get_column_letter
 
 from core.api_client import BOTClient
 from core.backup_manager import BackupError, BackupManager
@@ -727,13 +728,17 @@ class LedgerEngine:
                             ).value,
                         }
 
-            # ── STEP 3: Cross-Tab VLOOKUP — Zero-Touch Formatting Protocol ──
+            # ── STEP 3: Cross-Tab VLOOKUP — Write formulas into monthly tabs ──
             for sheet_name, mapping in sheet_maps.items():
                 ws = wb[sheet_name]
                 cols = mapping["columns"]
                 src_idx = cols["source"] + 1
                 cur_idx = cols.get("currency")
                 out_rate_idx = cols.get("out_rate")
+                if out_rate_idx is None:
+                    continue
+                out_col = out_rate_idx + 1  # 1-indexed
+
                 for row_idx in range(
                     mapping["header_row"] + 1, ws.max_row + 1
                 ):
@@ -743,6 +748,8 @@ class LedgerEngine:
                     inv_date = self._parse_date(src_cell.value)
                     if not inv_date:
                         continue
+
+                    # Determine currency for this row
                     ccy = ""
                     if cur_idx is not None:
                         cur_cell = ws.cell(
@@ -751,19 +758,28 @@ class LedgerEngine:
                         if not isinstance(cur_cell, MergedCell):
                             raw = cur_cell.value
                             ccy = str(raw).strip().upper() if raw else ""
+
                     if ccy == "THB":
-                        if out_rate_idx is not None:
-                            self._zero_touch_write(
-                                ws, row_idx, out_rate_idx + 1, 1
-                            )
+                        self._zero_touch_write(ws, row_idx, out_col, 1)
                         continue
-                    rate = self._vlookup_exrate(
-                        inv_date, ccy, exrate_index,
+
+                    # Build the VLOOKUP formula
+                    # ExRate layout: A=Date, B=USD Buy, C=USD Sell,
+                    #                D=EUR Buy, E=EUR Sell
+                    # We use Buying TT Rate: USD=col 2, EUR=col 4
+                    vlookup_col = {"USD": 2, "EUR": 4}.get(ccy)
+                    if vlookup_col is None:
+                        continue
+
+                    # Cell reference for the date column in this sheet
+                    date_col_letter = get_column_letter(src_idx)
+                    date_ref = f"{date_col_letter}{row_idx}"
+
+                    formula = (
+                        f"=IFERROR(VLOOKUP({date_ref},"
+                        f"ExRate!$A:$E,{vlookup_col},FALSE),\"\")"
                     )
-                    if out_rate_idx is not None:
-                        self._zero_touch_write(
-                            ws, row_idx, out_rate_idx + 1, rate
-                        )
+                    self._zero_touch_write(ws, row_idx, out_col, formula)
 
             # ── Save & Cleanup ───────────────────────────────────────────
             if converted:
