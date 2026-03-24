@@ -75,14 +75,19 @@ jobs:
         shell: bash
         run: |
           ICON_FLAG=""
+          SEPARATOR=":"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             ICON_FLAG="--icon=assets/icon.ico"
+            SEPARATOR=";"
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            ICON_FLAG="--icon=assets/icon.png"
           fi
           uv run pyinstaller \
             --name "BOT-ExRate" \
             --onedir \
             --windowed \
             $ICON_FLAG \
+            --add-data "assets${SEPARATOR}assets" \
             --hidden-import customtkinter \
             --hidden-import tkinterdnd2 \
             --hidden-import openpyxl \

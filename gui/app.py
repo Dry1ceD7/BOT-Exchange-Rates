@@ -130,6 +130,9 @@ class BOTExrateApp(ctk.CTk):
         self.resizable(False, True)
         self.configure(fg_color=COLOR_BG_DARK)
 
+        # ── Set window icon ──────────────────────────────────────────────
+        self._set_app_icon()
+
         self.file_queue: List[str] = []
         self.last_processed_path: Optional[str] = None
         self.backup_mgr = BackupManager()
@@ -156,6 +159,39 @@ class BOTExrateApp(ctk.CTk):
         self._build_card()
         self._build_live_console()
         self._check_for_updates()
+
+    def _set_app_icon(self):
+        """Load and set the application window icon (works in source + frozen mode)."""
+        import sys
+        from tkinter import PhotoImage
+
+        try:
+            # Resolve assets directory
+            if getattr(sys, "frozen", False):
+                # Frozen (PyInstaller): assets bundled alongside exe
+                base_dir = os.path.dirname(sys.executable)
+            else:
+                # Source mode: project root
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+            ico_path = os.path.join(base_dir, "assets", "icon.ico")
+            png_path = os.path.join(base_dir, "assets", "icon.png")
+
+            # Windows: use .ico for taskbar + title bar
+            if platform.system() == "Windows" and os.path.exists(ico_path):
+                self.iconbitmap(ico_path)
+                logger.info("Window icon set from: %s", ico_path)
+            # All platforms: use .png via iconphoto for Tk title bar
+            elif os.path.exists(png_path):
+                icon_image = PhotoImage(file=png_path)
+                self.iconphoto(True, icon_image)
+                # Keep a reference so it's not garbage-collected
+                self._icon_ref = icon_image
+                logger.info("Window icon set from: %s", png_path)
+            else:
+                logger.debug("No icon file found at %s or %s", ico_path, png_path)
+        except Exception as e:
+            logger.debug("Icon loading failed (non-critical): %s", e)
 
     # ================================================================== #
     #  HEADER
