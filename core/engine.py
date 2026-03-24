@@ -763,21 +763,29 @@ class LedgerEngine:
                         self._zero_touch_write(ws, row_idx, out_col, 1)
                         continue
 
-                    # Build the VLOOKUP formula
+                    # Build dual lookup formula:
+                    #   Primary:  XLOOKUP (Excel 365 / 2021+)
+                    #   Fallback: VLOOKUP (all Excel versions)
                     # ExRate layout: A=Date, B=USD Buy, C=USD Sell,
                     #                D=EUR Buy, E=EUR Sell
-                    # We use Buying TT Rate: USD=col 2, EUR=col 4
-                    vlookup_col = {"USD": 2, "EUR": 4}.get(ccy)
-                    if vlookup_col is None:
+                    # We use Buying TT Rate: USD=col B (vlookup 2),
+                    #                        EUR=col D (vlookup 4)
+                    col_map = {"USD": ("$B", 2), "EUR": ("$D", 4)}
+                    col_info = col_map.get(ccy)
+                    if col_info is None:
                         continue
+                    xl_col, vl_col = col_info
 
                     # Cell reference for the date column in this sheet
                     date_col_letter = get_column_letter(src_idx)
                     date_ref = f"{date_col_letter}{row_idx}"
 
+                    # XLOOKUP first → VLOOKUP fallback
                     formula = (
-                        f"=IFERROR(VLOOKUP({date_ref},"
-                        f"ExRate!$A:$E,{vlookup_col},FALSE),\"\")"
+                        f"=IFERROR(_xlfn.XLOOKUP({date_ref},"
+                        f"ExRate!$A:$A,ExRate!{xl_col}:{xl_col},\"\"),"
+                        f"IFERROR(VLOOKUP({date_ref},"
+                        f"ExRate!$A:$E,{vl_col},FALSE),\"\"))"
                     )
                     self._zero_touch_write(ws, row_idx, out_col, formula)
 
