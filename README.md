@@ -20,18 +20,18 @@ The **BOT Exchange Rate Processor** is a standalone desktop application that aut
 
 It replaces a fragmented, error-prone multi-script workflow with a single, production-grade GUI application — built for **zero-downtime corporate environments**, legacy office hardware (4GB RAM, low-resolution monitors), and strict Thai accounting compliance.
 
-### What's New in V3.0.0
+### What's New in V3.0 (up to v3.0.20)
 
 | Feature | Description |
 |---------|-------------|
-| **Live Processing Console** | Real-time, terminal-like log viewer inside the GUI (EventBus-driven) |
-| **Auto-Detect Date Range** | Reads start dates directly from your Excel ledgers — no manual input needed |
-| **Settings Modal** | Persistent user preferences (appearance, auto-update toggle, API connectivity test) |
-| **Auto-Updater Engine** | Background GitHub Releases check on startup with non-intrusive notifications |
-| **Cross-Platform CI/CD** | GitHub Actions pipeline builds Windows/macOS executables and creates releases automatically |
-| **OS-Aware Engine Factory** | Automatic routing to COM engine (Windows) or openpyxl fallback (macOS/Linux) |
-| **Native .xls Conversion** | Legacy files converted via Excel COM or LibreOffice headless — zero fidelity loss |
-| **Smart Date Pre-Scanner** | Scans all queued files to find the oldest date before hitting the API |
+| **True Dark & Light Themes** | Dynamic recoloring of all UI elements with 28 customized color tokens for a premium aesthetic |
+| **High-Speed Concurrent API** | Uses `asyncio.gather` for parallel USD & EUR fetching with 0.3s-0.8s micro-cooldowns (~3-5x faster) |
+| **In-Place File Processing** | Modifies files directly with hidden background backups for zero duplication |
+| **Instant One-Click Revert** | "Revert Previous Edit" button instantly unwinds the last file change using the backup manager |
+| **100% Formatting Preservation** | Pure Python `.xls` fallback fully preserves all fonts, cell sizes, background colors, and borders |
+| **Auto-Detect Date Range** | Opt-in toggle to automatically parse the oldest required dates directly from dropped ledgers |
+| **In-App Auto-Updater** | Built-in GitHub Releases updater with progress bar and automatic installer launching |
+| **Native App Icon & UI Polishing** | Crisp multi-resolution `.ico`/`.icns` embedded deeply into the OS taskbar and app windows |
 
 ---
 
@@ -44,13 +44,13 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 │        Global Exception Handler (error.log + GUI popup)          │
 ├──────────────────────────────────────────────────────────────────┤
 │                        gui/app.py                                │
-│   CustomTkinter  ·  Auto-Detect Toggle  ·  Smart Date Toggle     │
+│   CustomTkinter  ·  Dynamic Theme Module  ·  Auto-Updater        │
 │   Universal Drop Zone  ·  Batch Queue  ·  Progress Bar           │
 ├──────────────┬───────────────────────┬───────────────────────────┤
 │  gui/panels/ │   gui/handlers.py     │   core/workers/           │
 │  LiveConsole │   BatchHandler        │   EventBus (thread-safe)  │
 │  Settings    │   Async Bridge        │   Push/Drain Queue        │
-│  Control     │   Revert Handler      │                           │
+│               │   Revert Handler      │                           │
 ├──────────────┴───────────────────────┴───────────────────────────┤
 │                   core/engine.py (Orchestrator)                   │
 │          Prescan → Cache → Backup → Dispatch → GC                │
@@ -61,20 +61,20 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 ├──────────────┬───────────┴─────────────┬─────────────────────────┤
 │  api_client  │  logic · database       │  backup_manager         │
 │  Async BOT   │  Zero-Guess Rollback    │  Timestamped            │
-│  API + retry │  SQLite Cache (WAL)     │  Backup + Revert        │
+│  Concurrent  │  SQLite Cache (WAL)     │  Backup + Revert        │
 ├──────────────┼─────────────────────────┼─────────────────────────┤
 │  prescan.py  │  exrate_sheet.py        │  xls_converter.py       │
 │  Date Range  │  Master ExRate Sheet    │  .xls → .xlsx Native    │
-│  Scanner     │  Builder                │  Conversion Pipeline    │
+│  Scanner     │  Builder                │  (100% style kept)      │
 └──────────────┴─────────────────────────┴─────────────────────────┘
 ```
 
 **Design Principles**:
-- **Modular SFFB** (Structure-First, File-by-File) — each concern isolated in its own module, strict <200 lines per panel
+- **Modular SFFB** (Structure-First, File-by-File) — each concern isolated in its own module
 - **Featherweight** — 15MB file-size guardrail, per-file `gc.collect()`, zero pandas dependency
 - **Cache-First** — SQLite checked before BOT API; rates cached until new data arrives
-- **Fail-Safe** — every file backed up before modification; if backup fails, file is skipped
-- **OS-Aware** — `win32com.client` COM engine on Windows (primary), `openpyxl` fallback on macOS/Linux
+- **Fail-Safe** — every file backed up before modification; safely revertible from the UI
+- **OS-Aware** — Routes natively on Windows using COM, fallback on Mac/Linux seamlessly
 
 ---
 
@@ -82,28 +82,24 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 
 ### Core Processing
 - **Zero-Guess Rollback Engine** — If a date falls on a weekend or BOT holiday, the engine steps back 1 day at a time (max 5 days). Automatically unpacks hidden weekend substitutions and overlays static Thai public holidays for 100% calendar accuracy.
-- **Dual Currency Support** — Simultaneous USD and EUR rate resolution per row.
+- **Concurrent Dual Currency** — Simultaneous (async) USD and EUR rate resolution per row.
 - **Decimal Precision** — All rates written as `Decimal` values quantized to 4 decimal places (Thai accounting standard).
 - **Smart Date Pre-Scanner** — Scans all queued Excel files to find the oldest date, then fetches only the necessary API range.
 
-### Desktop Application (V3.0.3)
-- **API Token Registration Dialog** — License-key-style popup on first launch to enter BOT API keys. No manual `.env` editing needed.
-- **Live Processing Console** — EventBus-driven, read-only terminal log with color-coded status messages (`[LOG]`, `[OK]`, `[ERR]`).
+### Desktop Application (V3.0.20)
+- **API Token Registration Dialog** — License-key-style popup on first launch to enter BOT API keys.
+- **Dynamic Themes** — True Light and Dark modes (`get_theme` engine deeply coloring all CTk panels).
+- **Live Processing Console** — EventBus-driven, read-only terminal log with color-coded status messages.
 - **Auto-Detect Date Range** — Toggle to read start dates directly from ledger files. No manual date selection needed.
-- **Settings Modal** — Persistent preferences for appearance (Dark/Light/System), auto-update toggle, API key management, and API connectivity test.
-- **Auto-Updater** — Background GitHub Releases API check on startup with non-intrusive update notifications.
-- **Drag-and-Drop Batching** — Drop individual `.xlsx` files or entire folders onto the drop zone (tkinterdnd2).
-- **Per-File Progress** — Real-time progress bar with file-level status and error reporting.
-- **One-Click Revert** — Restore any file from its most recent timestamped backup.
-- **Show in Folder** — Reveal processed files in macOS Finder, Windows Explorer, or Linux file manager.
-- **Enterprise Typography** — Zero-emoji, corporate-grade aesthetic designed for legacy monitors.
+- **In-App Auto-Updater** — Background Releases API check with one-click installer downloads and dispatch.
+- **Drag-and-Drop Batching** — Drop individual `.xlsx` files or entire folders onto the drop zone.
+- **In-Place File Processing** — Overwrites ledgers instantly in identical target paths.
+- **One-Click Revert** — Restore any file instantly from its most recent timestamped backup if an error was made.
 
 ### Engine & Data Pipeline
-- **Native COM Engine (Windows)** — `win32com.client` spawns an invisible Excel instance for 100% style/font/border preservation. Zombie-safe context manager guarantees `excel.Quit()`.
-- **OS-Aware Engine Factory** — `engine_factory.py` detects `sys.platform` and routes to the correct engine automatically.
-- **Zero-Fidelity-Loss .xls Conversion** — Legacy files converted via Excel COM (Windows) or LibreOffice `soffice --headless` (macOS/Linux).
+- **Native Format Preservation** — Pure Python converter explicitly pulls `xlrd formatting_info=True` copying exact fonts (Browallia New), header colors, 4-border boundaries, and custom column widths.
+- **High-Velocity Networking** — Uses `asyncio.gather` and 0.3s micro-cooldowns. Safely clamped by 10-layer 429 Retry handling with Tenacity exponential waits.
 - **SQLite Cache (WAL Mode)** — Rates and holidays cached locally. Repeat runs skip the API entirely.
-- **Fail-Safe Backups** — Pristine copy saved to `data/backups/` before every edit. 7-day auto-cleanup.
 
 ---
 
@@ -116,12 +112,6 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 | 1 | **Python 3.12+** | [Download Python](https://www.python.org/downloads/) | **Windows:** check "Add Python to PATH" during install |
 | 2 | **Git** | [Download Git](https://git-scm.com/downloads) | Install with default options |
 | 3 | **uv** (recommended) | [Install uv](https://docs.astral.sh/uv/getting-started/installation/) | Fast Python package manager (optional — `pip` also works) |
-
-> **Already installed?** Open Terminal (macOS) or Command Prompt (Windows) and type:
-> ```
-> python3 --version
-> git --version
-> ```
 
 ---
 
@@ -187,78 +177,6 @@ Drop your `.xlsx` ledger files into the app and click **"Process Batch"**.
 
 ---
 
-## Project Structure
-
-```
-BOT-Exchange-Rates/
-├── main.py                      Entry point + token validation + global error handler
-├── pyproject.toml               Project metadata, dependencies, tool config
-├── requirements.txt             Pip-compatible dependency list
-├── uv.lock                      Lockfile for reproducible installs
-├── .env.example                 API credential template
-│
-├── core/                        Business Logic Layer
-│   ├── api_client.py            Async BOT API client (httpx + tenacity retry)
-│   ├── logic.py                 Zero-guess rollback engine + rate resolution
-│   ├── engine.py                Orchestrator (prescan → cache → backup → dispatch)
-│   ├── engine_factory.py        OS-aware engine router (COM vs openpyxl)
-│   ├── com_engine.py            Windows COM engine (win32com.client)
-│   ├── exrate_sheet.py          Master ExRate sheet builder
-│   ├── prescan.py               Smart date range pre-scanner
-│   ├── xls_converter.py         Native .xls → .xlsx conversion pipeline
-│   ├── database.py              Thread-safe SQLite cache (WAL mode)
-│   ├── backup_manager.py        Timestamped backup + restore
-│   ├── auto_updater.py          GitHub Releases API update checker
-│   ├── config_manager.py        JSON-backed user settings persistence
-│   └── workers/
-│       └── event_bus.py         Thread-safe push/drain event queue
-│
-├── gui/                         Presentation Layer
-│   ├── app.py                   Main application window (CustomTkinter)
-│   ├── handlers.py              Async batch processing bridge
-│   └── panels/
-│       ├── live_console.py      Real-time processing log viewer
-│       ├── settings_modal.py    User preferences modal
-│       └── control_panel.py     Drop zone + action buttons (extracted)
-│
-├── tests/                       Test Suite (140 tests)
-│   ├── test_api_client.py       API client contract tests
-│   ├── test_engine.py           Engine orchestration tests
-│   ├── test_engine_factory.py   Factory routing + contract tests
-│   ├── test_exrate_sheet.py     ExRate sheet builder tests
-│   ├── test_gui_workers.py      EventBus + Settings + Panel module tests
-│   ├── test_logic.py            Rollback engine + rate resolution tests
-│   └── test_prescan.py          Date pre-scanner tests
-│
-├── .github/
-│   └── workflows/
-│       └── v3-release.yml       CI/CD: lint → test → build → release
-│
-└── data/                        Runtime Data (auto-created, gitignored)
-    ├── cache.db                 SQLite rate/holiday cache
-    └── backups/                 Timestamped file backups
-```
-
----
-
-## Tech Stack
-
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| GUI | CustomTkinter 5.2+ | Modern Tk-based desktop UI with dark/light themes |
-| Data Engine | openpyxl 3.1+ | Direct `.xlsx` read/write (zero pandas dependency) |
-| COM Engine | win32com.client | Native Excel automation on Windows (style preservation) |
-| Network | httpx + tenacity | Async HTTP with exponential backoff retry |
-| Validation | Pydantic v2 | Strict BOT API response schema enforcement |
-| Cache | sqlite3 (built-in) | Thread-safe local rate/holiday cache (WAL mode) |
-| Backup | shutil (built-in) | Timestamped file copy + restore |
-| DnD | tkinterdnd2 | Cross-platform drag-and-drop file support |
-| Settings | JSON (built-in) | Persistent user preferences |
-| Packaging | uv + PyInstaller | Dependency management + executable builds |
-| CI/CD | GitHub Actions | Automated lint, test, build, and release pipeline |
-
----
-
 ## CI/CD Pipeline
 
 The project includes a fully automated release pipeline (`.github/workflows/v3-release.yml`):
@@ -269,7 +187,7 @@ The project includes a fully automated release pipeline (`.github/workflows/v3-r
 
 ```bash
 # To trigger a release:
-git tag v3.0.0
+git tag v3.0.20
 git push origin main --tags
 ```
 
@@ -301,6 +219,6 @@ This project is developed for internal enterprise use. All rights reserved.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.0.3*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.0.20*
 
 </div>
