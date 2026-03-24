@@ -23,7 +23,6 @@ from decimal import Decimal
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from openpyxl.cell.cell import MergedCell
-from openpyxl.utils import get_column_letter
 
 from core.api_client import BOTClient
 from core.backup_manager import BackupError, BackupManager
@@ -728,7 +727,19 @@ class LedgerEngine:
                             ).value,
                         }
 
-            # ── STEP 3: Cross-Tab VLOOKUP — Write formulas into monthly tabs ──
+            # ── STEP 3: Cross-Tab VLOOKUP — Zero-Touch Formatting Protocol ──
+            #
+            # Writes static rate values (not formulas) to the "EX Rate"
+            # column of each monthly tab.  Values are resolved by the
+            # Python _vlookup_exrate() engine which walks backwards from
+            # each date to the nearest trading day in the ExRate index
+            # (handles weekends, holidays, gaps automatically).
+            #
+            # Static values are used instead of Excel VLOOKUP/XLOOKUP
+            # formulas because:
+            #   1. Formulas break on mixed-type lookup columns (header row)
+            #   2. _xlfn.XLOOKUP prefix isn't supported in older Excel
+            #   3. Static values work in ALL Excel versions reliably
             for sheet_name, mapping in sheet_maps.items():
                 ws = wb[sheet_name]
                 cols = mapping["columns"]
@@ -763,41 +774,11 @@ class LedgerEngine:
                         self._zero_touch_write(ws, row_idx, out_col, 1)
                         continue
 
-                    # Build dual lookup formula:
-                    #   Primary:  XLOOKUP (Excel 365 / 2021+)
-                    #   Fallback: VLOOKUP (all Excel versions)
-                    #
-                    # ExRate layout (sorted by date ascending):
-                    #   A=Date, B=USD Buy, C=USD Sell,
-                    #   D=EUR Buy, E=EUR Sell
-                    #
-                    # We pull Buying TT Rate: USD→col B (idx 2),
-                    #                         EUR→col D (idx 4)
-                    #
-                    # VLOOKUP uses TRUE (approximate match) so that
-                    # weekends/holidays automatically roll back to the
-                    # nearest previous trading day.
-                    #
-                    # XLOOKUP uses match_mode -1 (exact or next smaller)
-                    # for the same rollback behavior.
-                    col_map = {"USD": ("$B", 2), "EUR": ("$D", 4)}
-                    col_info = col_map.get(ccy)
-                    if col_info is None:
-                        continue
-                    xl_col, vl_col = col_info
-
-                    # Cell reference for the date column in this sheet
-                    date_col_letter = get_column_letter(src_idx)
-                    date_ref = f"{date_col_letter}{row_idx}"
-
-                    # XLOOKUP (match_mode -1) → VLOOKUP (approx TRUE)
-                    formula = (
-                        f"=IFERROR(_xlfn.XLOOKUP({date_ref},"
-                        f"ExRate!$A:$A,ExRate!{xl_col}:{xl_col},\"\",-1),"
-                        f"IFERROR(VLOOKUP({date_ref},"
-                        f"ExRate!$A:$E,{vl_col},TRUE),\"\"))"
+                    # Resolve rate via Python rollback engine
+                    rate = self._vlookup_exrate(
+                        inv_date, ccy, exrate_index,
                     )
-                    self._zero_touch_write(ws, row_idx, out_col, formula)
+                    self._zero_touch_write(ws, row_idx, out_col, rate)
 
             # ── Save & Cleanup ───────────────────────────────────────────
             if converted:
