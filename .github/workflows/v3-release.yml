@@ -69,7 +69,7 @@ jobs:
       - name: Install dependencies
         run: |
           uv sync
-          uv pip install pyinstaller
+          uv pip install pyinstaller pillow
 
       - name: Build with PyInstaller
         shell: bash
@@ -79,8 +79,6 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             ICON_FLAG="--icon=assets/icon.ico"
             SEPARATOR=";"
-          elif [[ "$RUNNER_OS" == "macOS" ]]; then
-            ICON_FLAG="--icon=assets/icon.png"
           fi
           uv run pyinstaller \
             --name "BOT-ExRate" \
