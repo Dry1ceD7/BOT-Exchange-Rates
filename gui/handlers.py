@@ -60,7 +60,9 @@ class BatchHandler:
 
     async def _run_batch(self, file_queue: List[str], start_date: str):
         """Async batch executor."""
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=10.0),
+        ) as client:
             api = BOTClient(client)
             engine = LedgerEngine(api, event_bus=self.bus)
 
