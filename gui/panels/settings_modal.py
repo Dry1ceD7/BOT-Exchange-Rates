@@ -229,11 +229,15 @@ class SettingsModal(ctk.CTkToplevel):
         )
 
     def _download_in_app(self, version: str):
-        """Download the update installer within the app."""
-        from core.auto_updater import download_update, get_installer_asset_url
+        """Download and apply the update to the server path."""
+        from core.auto_updater import (
+            apply_update,
+            download_update,
+            get_installer_asset_url,
+        )
 
         self._btn_update.configure(state="disabled", text="Downloading...")
-        self._lbl_update.configure(text="Fetching installer...", text_color="#94A3B8")
+        self._lbl_update.configure(text="Fetching update...", text_color="#94A3B8")
         self.update_idletasks()
 
         def _worker():
@@ -250,6 +254,7 @@ class SettingsModal(ctk.CTkToplevel):
                 self.after(0, self._lbl_update.configure,
                            {"text": f"Downloading... {pct}%", "text_color": "#94A3B8"})
 
+            # Download to app's own directory (server path)
             result = download_update(
                 url=asset["url"],
                 filename=asset.get("filename"),
@@ -260,30 +265,23 @@ class SettingsModal(ctk.CTkToplevel):
                            {"text": f"Download failed: {result['error']}",
                             "text_color": "#F87171"})
                 self.after(0, self._btn_update.configure, {"state": "normal", "text": "Retry"})
+                return
+
+            # Apply in-place exe swap on server
+            apply_result = apply_update(result["path"])
+            if apply_result.get("success"):
+                self.after(0, self._lbl_update.configure,
+                           {"text": "✅ Update installed — restart to apply",
+                            "text_color": COLOR_MODAL_SUCCESS})
+                self.after(0, self._btn_update.configure,
+                           {"state": "disabled", "text": "Updated ✓"})
             else:
-                self.after(0, self._launch_update, result["path"])
+                self.after(0, self._lbl_update.configure,
+                           {"text": f"Update failed: {apply_result.get('error', '?')}",
+                            "text_color": "#F87171"})
+                self.after(0, self._btn_update.configure, {"state": "normal", "text": "Retry"})
 
         threading.Thread(target=_worker, daemon=True).start()
-
-    def _launch_update(self, path: str):
-        """Launch the downloaded installer."""
-        import platform as _platform
-        import subprocess as _subprocess
-
-        self._lbl_update.configure(
-            text="Download complete! Launching installer...",
-            text_color=COLOR_MODAL_SUCCESS,
-        )
-        self._btn_update.configure(state="disabled", text="Launching...")
-        try:
-            if _platform.system() == "Windows":
-                os.startfile(path)
-            else:
-                _subprocess.Popen(["open", path])
-        except Exception as e:
-            self._lbl_update.configure(
-                text=f"Launch failed: {e}", text_color="#F87171",
-            )
 
     def _save_and_close(self):
         self._settings["appearance"] = self._appearance_var.get()

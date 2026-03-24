@@ -952,8 +952,12 @@ class BOTExrateApp(ctk.CTk):
         ).pack(side="left")
 
     def _start_in_app_update(self, version: str):
-        """Download and install the update within the app."""
-        from core.auto_updater import download_update, get_installer_asset_url
+        """Download and install the update to the server path."""
+        from core.auto_updater import (
+            apply_update,
+            download_update,
+            get_installer_asset_url,
+        )
 
         # Update banner to show downloading state
         if hasattr(self, '_update_banner') and self._update_banner:
@@ -979,6 +983,7 @@ class BOTExrateApp(ctk.CTk):
                 pct = int(downloaded / total * 100)
                 self.after(0, self._update_dl_progress, pct)
 
+            # Download to the app's own directory (server path)
             result = download_update(
                 url=asset["url"],
                 filename=asset.get("filename"),
@@ -986,8 +991,15 @@ class BOTExrateApp(ctk.CTk):
             )
             if result.get("error"):
                 self.after(0, self._show_download_error, result["error"])
+                return
+
+            # Apply the update (in-place exe swap on server)
+            apply_result = apply_update(result["path"])
+            if apply_result.get("success"):
+                self.after(0, self._show_update_success)
             else:
-                self.after(0, self._launch_installer, result["path"])
+                self.after(0, self._show_download_error,
+                           apply_result.get("error", "Update failed"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1002,34 +1014,58 @@ class BOTExrateApp(ctk.CTk):
             self._update_banner.configure(fg_color="#DC2626")
             ctk.CTkLabel(
                 self._update_banner,
-                text=f"  Download failed: {error}",
+                text=f"  Update failed: {error}",
                 font=ctk.CTkFont(size=12, weight="bold"),
                 text_color="#FFFFFF",
             ).place(relx=0.5, rely=0.5, anchor="center")
 
-    def _launch_installer(self, path: str):
-        """Launch the downloaded installer and close the app."""
+    def _show_update_success(self):
+        """Show success banner with restart prompt."""
         if hasattr(self, '_update_banner') and self._update_banner:
             for w in self._update_banner.winfo_children():
                 w.destroy()
-            self._update_banner.configure(fg_color=COLOR_SUCCESS)
+            self._update_banner.configure(fg_color=COLOR_SUCCESS, height=38)
+
+            inner = ctk.CTkFrame(self._update_banner, fg_color="transparent")
+            inner.place(relx=0.5, rely=0.5, anchor="center")
+
             ctk.CTkLabel(
-                self._update_banner,
-                text="  Download complete! Launching installer...",
+                inner,
+                text="  ✅ Update installed! Please restart the application.",
                 font=ctk.CTkFont(size=13, weight="bold"),
                 text_color="#FFFFFF",
-            ).place(relx=0.5, rely=0.5, anchor="center")
+            ).pack(side="left")
 
+            ctk.CTkButton(
+                inner, text="Restart Now",
+                width=100, height=26,
+                fg_color="#FFFFFF", hover_color="#E2E8F0",
+                text_color="#065F46",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                corner_radius=6,
+                command=self._restart_app,
+            ).pack(side="left", padx=(12, 0))
+
+    def _restart_app(self):
+        """Close the app so the user can re-launch the updated version."""
+        import sys
+
+        logger.info("User requested restart after update")
         try:
-            if platform.system() == "Windows":
-                os.startfile(path)
+            if getattr(sys, "frozen", False):
+                # Frozen app: start the new exe and exit
+                exe_path = os.path.abspath(sys.executable)
+                if platform.system() == "Windows":
+                    os.startfile(exe_path)
+                else:
+                    subprocess.Popen([exe_path])
+                self.after(500, self.destroy)
             else:
-                subprocess.Popen(["open", path])
-            # Close app after short delay to let installer start
-            self.after(1500, self.destroy)
+                # Dev mode: just close
+                self.destroy()
         except Exception as e:
-            logger.error("Failed to launch installer: %s", e)
-            self._show_download_error(str(e))
+            logger.error("Restart failed: %s", e)
+            self._show_download_error(f"Restart failed: {e}")
 
 
 if __name__ == "__main__":
