@@ -766,10 +766,20 @@ class LedgerEngine:
                     # Build dual lookup formula:
                     #   Primary:  XLOOKUP (Excel 365 / 2021+)
                     #   Fallback: VLOOKUP (all Excel versions)
-                    # ExRate layout: A=Date, B=USD Buy, C=USD Sell,
-                    #                D=EUR Buy, E=EUR Sell
-                    # We use Buying TT Rate: USD=col B (vlookup 2),
-                    #                        EUR=col D (vlookup 4)
+                    #
+                    # ExRate layout (sorted by date ascending):
+                    #   A=Date, B=USD Buy, C=USD Sell,
+                    #   D=EUR Buy, E=EUR Sell
+                    #
+                    # We pull Buying TT Rate: USD→col B (idx 2),
+                    #                         EUR→col D (idx 4)
+                    #
+                    # VLOOKUP uses TRUE (approximate match) so that
+                    # weekends/holidays automatically roll back to the
+                    # nearest previous trading day.
+                    #
+                    # XLOOKUP uses match_mode -1 (exact or next smaller)
+                    # for the same rollback behavior.
                     col_map = {"USD": ("$B", 2), "EUR": ("$D", 4)}
                     col_info = col_map.get(ccy)
                     if col_info is None:
@@ -780,12 +790,12 @@ class LedgerEngine:
                     date_col_letter = get_column_letter(src_idx)
                     date_ref = f"{date_col_letter}{row_idx}"
 
-                    # XLOOKUP first → VLOOKUP fallback
+                    # XLOOKUP (match_mode -1) → VLOOKUP (approx TRUE)
                     formula = (
                         f"=IFERROR(_xlfn.XLOOKUP({date_ref},"
-                        f"ExRate!$A:$A,ExRate!{xl_col}:{xl_col},\"\"),"
+                        f"ExRate!$A:$A,ExRate!{xl_col}:{xl_col},\"\",-1),"
                         f"IFERROR(VLOOKUP({date_ref},"
-                        f"ExRate!$A:$E,{vl_col},FALSE),\"\"))"
+                        f"ExRate!$A:$E,{vl_col},TRUE),\"\"))"
                     )
                     self._zero_touch_write(ws, row_idx, out_col, formula)
 
