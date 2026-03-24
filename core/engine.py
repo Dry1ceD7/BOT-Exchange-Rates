@@ -10,7 +10,7 @@ Slim orchestrator. Heavy logic extracted to:
   - core/prescan.py → Smart date pre-scanner
 """
 
-import asyncio
+
 import gc
 import logging
 import os
@@ -312,10 +312,14 @@ class LedgerEngine:
                 fetch_end.strftime("%Y-%m-%d"),
             )
 
-            # ── Concurrent USD+EUR via asyncio.gather() ──────────────
-            usd_data, eur_data = await asyncio.gather(
-                self.api.get_exchange_rates(fetch_start, fetch_end, "USD"),
-                self.api.get_exchange_rates(fetch_start, fetch_end, "EUR"),
+            # ── Sequential USD then EUR to prevent 429 rate limiting ───
+            # asyncio.gather doubles request rate and triggers BOT API
+            # throttling on fresh installs with large date ranges.
+            usd_data = await self.api.get_exchange_rates(
+                fetch_start, fetch_end, "USD",
+            )
+            eur_data = await self.api.get_exchange_rates(
+                fetch_start, fetch_end, "EUR",
             )
 
             rate_cache = {}

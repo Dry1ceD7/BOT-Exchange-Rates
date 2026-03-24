@@ -76,8 +76,8 @@ class BOTClient:
         self.hol_path = "/financial-institutions-holidays/"
 
     @retry(
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=2, max=15),
+        stop=stop_after_attempt(8),
+        wait=wait_exponential(multiplier=2, min=3, max=60),
         retry=retry_if_exception_type((
             httpx.RequestError, httpx.ConnectError,
             httpx.TimeoutException, httpx.HTTPStatusError,
@@ -119,9 +119,10 @@ class BOTClient:
                 except ValidationError as e:
                     raise BOTAPIError(f"Schema mismatch! {e}")
             current_start = current_end + timedelta(days=1)
-            # Randomized jitter (0.2-0.4s) — fast but safe against rate limits
+            # Randomized jitter (0.5-1.5s) — prevents 429 rate limiting
+            # on fresh installs with large date ranges (no cache)
             import random
-            await asyncio.sleep(random.uniform(0.2, 0.4))
+            await asyncio.sleep(random.uniform(0.5, 1.5))
         return all_results
 
     async def get_holidays(self, year: int) -> List[BOTHolidayDetail]:

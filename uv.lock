@@ -26,8 +26,8 @@ wheels = [
 
 [[package]]
 name = "bot-exrate"
-version = "3.0.9"
-source = { virtual = "." }
+version = "3.0.10"
+source = { editable = "." }
 dependencies = [
     { name = "customtkinter" },
     { name = "httpx" },
