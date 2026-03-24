@@ -70,7 +70,8 @@ class BatchHandler:
 
             def progress_cb(idx, total, fname, error):
                 if error:
-                    self.bus.push({"type": "error", "msg": f"[{idx}/{total}] {fname} — SKIPPED"})
+                    self.bus.push({"type": "error", "msg": f"[{idx}/{total}] {fname} — SKIPPED: {error}"})
+                    logger.error("File SKIPPED: %s — %s", fname, error)
                 else:
                     self.bus.push({"type": "log", "msg": f"[{idx}/{total}] {fname} — OK"})
                 self.app.after(

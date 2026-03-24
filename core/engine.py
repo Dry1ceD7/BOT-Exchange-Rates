@@ -15,6 +15,8 @@ import gc
 import logging
 import os
 import re
+import time
+import traceback
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Callable, Dict, List, Optional, Set, Tuple
@@ -446,8 +448,13 @@ class LedgerEngine:
             finally:
                 if wb_scan is not None:
                     wb_scan.release_resources()
+                    del wb_scan
+                    wb_scan = None
                 if devnull_fh is not None:
                     devnull_fh.close()
+                # Release file handles before COM opens the file
+                gc.collect()
+                time.sleep(0.3)
 
         else:
             # Standard openpyxl pre-scan for .xlsx (and Mac/Linux converted files)
@@ -494,6 +501,11 @@ class LedgerEngine:
             finally:
                 if wb_scan is not None:
                     wb_scan.close()
+                    del wb_scan
+                    wb_scan = None
+                # Force Python to release file handles before COM opens it
+                gc.collect()
+                time.sleep(0.3)
 
         # ── Date hierarchy ───────────────────────────────────────────
         target_year = (
@@ -838,6 +850,10 @@ class LedgerEngine:
                 except Exception as e:
                     err_msg = f"{fname}: {e!s}"
                     errors.append(err_msg)
+                    logger.error(
+                        "File SKIPPED: %s\n%s",
+                        fname, traceback.format_exc(),
+                    )
                     if progress_cb:
                         progress_cb(idx + 1, total, fname, str(e))
         finally:

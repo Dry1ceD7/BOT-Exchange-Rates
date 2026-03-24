@@ -22,6 +22,7 @@ import logging
 import os
 import sys
 import time
+import traceback
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, Optional, Set
@@ -455,8 +456,27 @@ def process_ledger_com(
             ctx = ExcelCOM()
             excel = ctx.__enter__()
 
-        # Open the workbook
-        wb = excel.Workbooks.Open(filepath)
+        # Open the workbook — retry up to 3 times for file lock recovery
+        wb = None
+        for attempt in range(3):
+            try:
+                wb = excel.Workbooks.Open(filepath)
+                break
+            except pywintypes.com_error as open_err:
+                logger.warning(
+                    "Workbooks.Open attempt %d/3 failed: %s",
+                    attempt + 1, open_err,
+                )
+                if attempt < 2:
+                    import gc
+                    gc.collect()
+                    time.sleep(1.0)
+                else:
+                    raise RuntimeError(
+                        f"Cannot open file after 3 attempts: {os.path.basename(filepath)}\n"
+                        f"The file may be locked by another program. Close Excel/other apps and retry."
+                    ) from open_err
+
 
         # ── STEP 1: Build ExRate master sheet (vectorized) ────────
         _build_exrate_sheet_com(
@@ -593,17 +613,27 @@ def process_ledger_com(
                 "COM Engine: Saved %s via native Excel.",
                 os.path.basename(filepath),
             )
+
         # Give Excel a moment and force COM cleanup to prevent file locks
         time.sleep(0.1)
         import gc
         gc.collect()
 
     except pywintypes.com_error as ce:
-        logger.error("Excel COM error during processing: %s", ce)
+        logger.error(
+            "Excel COM error:\n%s",
+            traceback.format_exc(),
+        )
         raise RuntimeError(
             f"Microsoft Excel COM error: {ce}\n"
             "Ensure Microsoft Excel is installed on this Windows machine."
         ) from ce
+    except Exception:
+        logger.error(
+            "COM Engine processing failed:\n%s",
+            traceback.format_exc(),
+        )
+        raise
     finally:
         # ── Guaranteed workbook cleanup ───────────────────────────
         if wb is not None:
