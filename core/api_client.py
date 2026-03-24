@@ -173,8 +173,8 @@ class BOTClient:
                 except ValidationError as e:
                     raise BOTAPIError(f"Schema mismatch! {e}")
             current_start = current_end + timedelta(days=1)
-            # Inter-chunk cooldown: 1-3s prevents rate limiting
-            await asyncio.sleep(random.uniform(1.0, 3.0))
+            # Inter-chunk cooldown: 0.3-0.8s (429 handler protects against rate limiting)
+            await asyncio.sleep(random.uniform(0.3, 0.8))
         return all_results
 
     async def get_holidays(self, year: int) -> List[BOTHolidayDetail]:

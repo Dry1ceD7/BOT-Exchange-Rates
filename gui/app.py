@@ -42,30 +42,100 @@ _user_settings = _settings_mgr.load()
 ctk.set_appearance_mode(_user_settings.get("appearance", "system"))
 logger = logging.getLogger(__name__)
 
-# ── Color Palette ────────────────────────────────────────────────────────
-COLOR_BG_DARK       = "#0B1A33"
-COLOR_HEADER_BG     = "#1A365D"
-COLOR_HEADER_TEXT    = "#FFFFFF"
-COLOR_HEADER_SUB    = "#94A3B8"
-COLOR_CARD_BG       = "#FFFFFF"
-COLOR_CARD_BORDER   = "#E2E8F0"
-COLOR_DIVIDER       = "#E2E8F0"
-COLOR_SECTION_BG    = "#F8FAFC"
+# ── Theme System ─────────────────────────────────────────────────────────
+# Returns the full color palette for the current appearance mode.
+# Dark mode: navy/slate backgrounds with light text
+# Light mode: white/gray backgrounds with dark text
 
-COLOR_TEXT_PRIMARY   = "#1E293B"
-COLOR_TEXT_SECONDARY = "#64748B"
-COLOR_TEXT_MUTED     = "#94A3B8"
+def get_theme() -> dict:
+    """Return the active color palette based on customtkinter appearance mode."""
+    mode = ctk.get_appearance_mode().lower()
+    is_dark = mode == "dark" or (
+        mode == "system" and ctk.AppearanceModeTracker.detect_appearance_mode() == 1
+    )
 
-COLOR_TRUST_BLUE    = "#2563EB"
-COLOR_BLUE_HOVER    = "#1D4ED8"
-COLOR_SUCCESS       = "#16A34A"
-COLOR_SUCCESS_HOVER = "#15803D"
-COLOR_WARNING       = "#D97706"
-COLOR_WARNING_HOVER = "#B45309"
-COLOR_REVERT_BG     = "#C2410C"
-COLOR_REVERT_HOVER  = "#9A3412"
-COLOR_ERROR_TEXT     = "#DC2626"
-COLOR_PROCESS_TEXT   = "#2563EB"
+    if is_dark:
+        return {
+            "bg":           "#0B1A33",
+            "header_bg":    "#1A365D",
+            "header_text":  "#FFFFFF",
+            "header_sub":   "#94A3B8",
+            "card_bg":      "#1E293B",
+            "card_border":  "#334155",
+            "divider":      "#334155",
+            "section_bg":   "#0F172A",
+            "text_primary": "#F1F5F9",
+            "text_secondary": "#94A3B8",
+            "text_muted":   "#64748B",
+            "trust_blue":   "#3B82F6",
+            "blue_hover":   "#2563EB",
+            "success":      "#22C55E",
+            "success_hover": "#16A34A",
+            "warning":      "#F59E0B",
+            "warning_hover": "#D97706",
+            "revert_bg":    "#DC2626",
+            "revert_hover": "#B91C1C",
+            "error_text":   "#F87171",
+            "process_text": "#60A5FA",
+            "drop_border":  "#475569",
+            "combo_bg":     "#1E293B",
+            "combo_border": "#475569",
+            "switch_track": "#475569",
+            "switch_thumb": "#94A3B8",
+        }
+    else:
+        return {
+            "bg":           "#F0F4F8",
+            "header_bg":    "#1A365D",
+            "header_text":  "#FFFFFF",
+            "header_sub":   "#94A3B8",
+            "card_bg":      "#FFFFFF",
+            "card_border":  "#E2E8F0",
+            "divider":      "#E2E8F0",
+            "section_bg":   "#F8FAFC",
+            "text_primary": "#1E293B",
+            "text_secondary": "#64748B",
+            "text_muted":   "#94A3B8",
+            "trust_blue":   "#2563EB",
+            "blue_hover":   "#1D4ED8",
+            "success":      "#16A34A",
+            "success_hover": "#15803D",
+            "warning":      "#D97706",
+            "warning_hover": "#B45309",
+            "revert_bg":    "#C2410C",
+            "revert_hover": "#9A3412",
+            "error_text":   "#DC2626",
+            "process_text": "#2563EB",
+            "drop_border":  "#CBD5E1",
+            "combo_bg":     "#F8FAFC",
+            "combo_border": "#CBD5E1",
+            "switch_track": "#94A3B8",
+            "switch_thumb": "#64748B",
+        }
+
+# Legacy aliases for backward compatibility during transition
+_t = get_theme()
+COLOR_BG_DARK       = _t["bg"]
+COLOR_HEADER_BG     = _t["header_bg"]
+COLOR_HEADER_TEXT    = _t["header_text"]
+COLOR_HEADER_SUB    = _t["header_sub"]
+COLOR_CARD_BG       = _t["card_bg"]
+COLOR_CARD_BORDER   = _t["card_border"]
+COLOR_DIVIDER       = _t["divider"]
+COLOR_SECTION_BG    = _t["section_bg"]
+COLOR_TEXT_PRIMARY   = _t["text_primary"]
+COLOR_TEXT_SECONDARY = _t["text_secondary"]
+COLOR_TEXT_MUTED     = _t["text_muted"]
+COLOR_TRUST_BLUE    = _t["trust_blue"]
+COLOR_BLUE_HOVER    = _t["blue_hover"]
+COLOR_SUCCESS       = _t["success"]
+COLOR_SUCCESS_HOVER = _t["success_hover"]
+COLOR_WARNING       = _t["warning"]
+COLOR_WARNING_HOVER = _t["warning_hover"]
+COLOR_REVERT_BG     = _t["revert_bg"]
+COLOR_REVERT_HOVER  = _t["revert_hover"]
+COLOR_ERROR_TEXT     = _t["error_text"]
+COLOR_PROCESS_TEXT  = _t["process_text"]
 
 # ── Attempt tkinterdnd2 ──────────────────────────────────────────────────
 HAS_DND = False
@@ -718,13 +788,106 @@ class BOTExrateApp(ctk.CTk):
         self.console.start_polling()
 
     # ================================================================== #
-    #  V3.0: SETTINGS MODAL
+    #  V3.0: SETTINGS MODAL + THEME
     # ================================================================== #
     def _open_settings(self):
-        """Launch the settings modal window."""
+        """Launch the settings modal window. Re-apply theme when closed."""
         from gui.panels.settings_modal import SettingsModal
         modal = SettingsModal(self)
         modal.grab_set()
+        self.wait_window(modal)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        """Re-read the theme and apply colors to all major widgets."""
+        t = get_theme()
+
+        # Window background
+        self.configure(fg_color=t["bg"])
+
+        # Card
+        if hasattr(self, "card"):
+            self.card.configure(
+                fg_color=t["card_bg"],
+                border_color=t["card_border"],
+            )
+
+        # Section labels, status, and other text widgets
+        # Walk through card children and recolor
+        if hasattr(self, "lbl_status"):
+            # Status box parent
+            status_parent = self.lbl_status.master
+            if status_parent:
+                status_parent.configure(
+                    fg_color=t["section_bg"],
+                    border_color=t["card_border"],
+                )
+
+        # Drop zone
+        if hasattr(self, "drop_zone"):
+            self.drop_zone.configure(
+                fg_color=t["section_bg"],
+                border_color=t["drop_border"],
+            )
+        if hasattr(self, "dz_text"):
+            self.dz_text.configure(text_color=t["text_secondary"])
+        if hasattr(self, "dz_sub"):
+            self.dz_sub.configure(text_color=t["text_muted"])
+
+        # Auto-detect toggle
+        if hasattr(self, "toggle_auto"):
+            self.toggle_auto.configure(
+                text_color=t["text_primary"],
+                fg_color=t["switch_track"],
+                button_color=t["switch_thumb"],
+                button_hover_color=t["text_secondary"],
+                progress_color=t["trust_blue"],
+            )
+
+        # Manual "Use Today" toggle
+        if hasattr(self, "toggle_today"):
+            self.toggle_today.configure(
+                text_color=t["text_secondary"],
+                fg_color=t["switch_track"],
+                button_color=t["switch_thumb"],
+            )
+
+        # Date combo boxes
+        if hasattr(self, "_combo_widgets"):
+            for combo in self._combo_widgets:
+                combo.configure(
+                    fg_color=t["combo_bg"],
+                    border_color=t["combo_border"],
+                    text_color=t["text_primary"],
+                    dropdown_fg_color=t["card_bg"],
+                )
+
+        # Queue label
+        if hasattr(self, "lbl_queue"):
+            self.lbl_queue.configure(text_color=t["text_secondary"])
+
+        # Buttons (keep action colors, update revert)
+        if hasattr(self, "btn_process"):
+            self.btn_process.configure(
+                fg_color=t["trust_blue"],
+                hover_color=t["blue_hover"],
+            )
+        if hasattr(self, "btn_revert"):
+            self.btn_revert.configure(
+                fg_color=t["revert_bg"],
+                hover_color=t["revert_hover"],
+            )
+
+        # Dividers — recolor all 1px frames in card
+        if hasattr(self, "card"):
+            for child in self.card.winfo_children():
+                try:
+                    if child.cget("height") == 1:
+                        child.configure(fg_color=t["divider"])
+                except Exception:
+                    pass
+
+        logger.debug("Theme applied: %s mode", ctk.get_appearance_mode())
 
     # ================================================================== #
     #  V3.0: AUTO-UPDATER (background, non-blocking)
