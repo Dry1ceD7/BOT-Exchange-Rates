@@ -73,10 +73,67 @@ def convert_xls_to_xlsx(filepath: str) -> str:
         except Exception as e:
             logger.warning("LibreOffice proxy failed. %s", e)
 
-    # ── Priority 3: STRICT FORMATTING FAILSAFE (GUI ALERT) ───────────
-    error_msg = (
-        "Native Microsoft Excel or LibreOffice is required to process legacy "
-        ".xls files. Conversion aborted to protect your formatting."
-    )
-    logger.error(error_msg)
-    raise RuntimeError(error_msg)
+    # ── Priority 2: PURE PYTHON FALLBACK (xlrd → openpyxl) ─────────
+    # No external software needed — works on ALL platforms
+    logger.info("No native converter found. Using pure Python xlrd → openpyxl conversion.")
+    try:
+        import openpyxl as _openpyxl
+        import xlrd
+        from openpyxl.utils import get_column_letter as _gcl
+
+        devnull_fh = open(os.devnull, 'w')
+        try:
+            wb_xls = xlrd.open_workbook(filepath, formatting_info=False, logfile=devnull_fh)
+        finally:
+            devnull_fh.close()
+
+        wb_xlsx = _openpyxl.Workbook()
+        # Remove the default empty sheet that openpyxl creates
+        if wb_xlsx.sheetnames:
+            wb_xlsx.remove(wb_xlsx.active)
+
+        for sheet_name in wb_xls.sheet_names():
+            ws_xls = wb_xls.sheet_by_name(sheet_name)
+            ws_xlsx = wb_xlsx.create_sheet(title=sheet_name)
+
+            for row_idx in range(ws_xls.nrows):
+                for col_idx in range(ws_xls.ncols):
+                    cell_type = ws_xls.cell_type(row_idx, col_idx)
+                    cell_val = ws_xls.cell_value(row_idx, col_idx)
+
+                    # Convert xlrd types to Python types
+                    if cell_type == xlrd.XL_CELL_DATE and cell_val:
+                        try:
+                            from datetime import datetime as _dt
+                            dt_tuple = xlrd.xldate_as_tuple(cell_val, wb_xls.datemode)
+                            if dt_tuple[3:] == (0, 0, 0):
+                                cell_val = _dt(*dt_tuple[:3]).date()
+                            else:
+                                cell_val = _dt(*dt_tuple)
+                        except Exception:
+                            pass
+                    elif cell_type == xlrd.XL_CELL_BOOLEAN:
+                        cell_val = bool(cell_val)
+                    elif cell_type == xlrd.XL_CELL_EMPTY:
+                        continue
+
+                    target = ws_xlsx.cell(row=row_idx + 1, column=col_idx + 1)
+                    target.value = cell_val
+
+            # Copy column widths (approximate)
+            for col_idx in range(ws_xls.ncols):
+                col_letter = _gcl(col_idx + 1)
+                # xlrd doesn't expose column widths easily, use a sensible default
+                ws_xlsx.column_dimensions[col_letter].width = 14
+
+        wb_xls.release_resources()
+        wb_xlsx.save(temp_path)
+        wb_xlsx.close()
+        logger.info("Pure Python conversion complete: %s", os.path.basename(temp_path))
+        return temp_path
+    except Exception as e:
+        logger.error("Pure Python xlrd→openpyxl conversion failed: %s", e)
+        raise RuntimeError(
+            f"Failed to convert .xls to .xlsx: {e}\n"
+            "Install LibreOffice for better conversion, or use .xlsx files directly."
+        ) from e
