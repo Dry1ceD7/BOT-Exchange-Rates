@@ -180,12 +180,13 @@ class BOTExrateApp(ctk.CTk):
             font=ctk.CTkFont(size=11), text_color=COLOR_HEADER_SUB
         ).pack(side="left")
 
-        # Settings gear button
+        # Settings button — visible, proper button styling
         self._btn_settings = ctk.CTkButton(
-            sub_row, text="Settings", width=70, height=24,
-            fg_color="transparent", hover_color=COLOR_HEADER_BG,
-            text_color=COLOR_HEADER_SUB,
-            font=ctk.CTkFont(size=10), corner_radius=4,
+            sub_row, text="⚙  Settings", width=90, height=26,
+            fg_color="#334155", hover_color="#475569",
+            text_color="#E2E8F0",
+            font=ctk.CTkFont(size=11, weight="bold"), corner_radius=6,
+            border_width=1, border_color="#475569",
             command=self._open_settings,
         )
         self._btn_settings.pack(side="left", padx=(12, 0))
@@ -216,8 +217,10 @@ class BOTExrateApp(ctk.CTk):
             variable=self.auto_detect_var, onvalue="on", offvalue="off",
             command=self._on_auto_detect_changed,
             font=ctk.CTkFont(size=13, weight="bold"), text_color=COLOR_TEXT_PRIMARY,
-            progress_color=COLOR_TRUST_BLUE, button_color=COLOR_CARD_BG,
-            button_hover_color="#E0E7FF", fg_color="#CBD5E1"
+            progress_color=COLOR_TRUST_BLUE,
+            button_color="#64748B",
+            button_hover_color="#475569",
+            fg_color="#94A3B8",
         )
         self.toggle_auto.pack()
 
@@ -705,11 +708,129 @@ class BOTExrateApp(ctk.CTk):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _show_update_banner(self, version: str, url: str):
-        """Show a non-intrusive update notification in the header area."""
-        self.event_bus.push({
-            "type": "success",
-            "msg": f"Update available: V{version} — click 'Check for Updates' in Settings to download.",
-        })
+        """Show a visible update banner at the TOP of the app (below header)."""
+        # Remove old banner if exists
+        if hasattr(self, '_update_banner') and self._update_banner:
+            self._update_banner.destroy()
+
+        self._update_banner = ctk.CTkFrame(
+            self, fg_color="#F59E0B", corner_radius=0, height=40,
+        )
+        # Insert right after header (before card)
+        self._update_banner.pack(fill="x", before=self.card, pady=0)
+        self._update_banner.pack_propagate(False)
+
+        banner_inner = ctk.CTkFrame(self._update_banner, fg_color="transparent")
+        banner_inner.place(relx=0.5, rely=0.5, anchor="center")
+
+        ctk.CTkLabel(
+            banner_inner,
+            text=f"  Update available: V{version}",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color="#1E293B",
+        ).pack(side="left", padx=(0, 12))
+
+        self._pending_update_ver = version
+
+        ctk.CTkButton(
+            banner_inner, text="Update Now",
+            width=100, height=28,
+            fg_color="#1E293B", hover_color="#0F172A",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            corner_radius=6,
+            command=lambda: self._start_in_app_update(version),
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            banner_inner, text="✕",
+            width=28, height=28,
+            fg_color="transparent", hover_color="#D97706",
+            text_color="#1E293B",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            corner_radius=4,
+            command=lambda: self._update_banner.destroy(),
+        ).pack(side="left")
+
+    def _start_in_app_update(self, version: str):
+        """Download and install the update within the app."""
+        from core.auto_updater import download_update, get_installer_asset_url
+
+        # Update banner to show downloading state
+        if hasattr(self, '_update_banner') and self._update_banner:
+            for w in self._update_banner.winfo_children():
+                w.destroy()
+            self._dl_label = ctk.CTkLabel(
+                self._update_banner,
+                text="  Downloading update...",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color="#1E293B",
+            )
+            self._dl_label.place(relx=0.5, rely=0.5, anchor="center")
+
+        def _worker():
+            # Get the .exe asset URL
+            asset = get_installer_asset_url(version)
+            if asset.get("error") or not asset.get("url"):
+                self.after(0, self._show_download_error,
+                           asset.get("error", "No installer found"))
+                return
+
+            def _progress(downloaded, total):
+                pct = int(downloaded / total * 100)
+                self.after(0, self._update_dl_progress, pct)
+
+            result = download_update(
+                url=asset["url"],
+                filename=asset.get("filename"),
+                progress_cb=_progress,
+            )
+            if result.get("error"):
+                self.after(0, self._show_download_error, result["error"])
+            else:
+                self.after(0, self._launch_installer, result["path"])
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _update_dl_progress(self, pct: int):
+        if hasattr(self, '_dl_label'):
+            self._dl_label.configure(text=f"  Downloading update... {pct}%")
+
+    def _show_download_error(self, error: str):
+        if hasattr(self, '_update_banner') and self._update_banner:
+            for w in self._update_banner.winfo_children():
+                w.destroy()
+            self._update_banner.configure(fg_color="#DC2626")
+            ctk.CTkLabel(
+                self._update_banner,
+                text=f"  Download failed: {error}",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color="#FFFFFF",
+            ).place(relx=0.5, rely=0.5, anchor="center")
+
+    def _launch_installer(self, path: str):
+        """Launch the downloaded installer and close the app."""
+        if hasattr(self, '_update_banner') and self._update_banner:
+            for w in self._update_banner.winfo_children():
+                w.destroy()
+            self._update_banner.configure(fg_color=COLOR_SUCCESS)
+            ctk.CTkLabel(
+                self._update_banner,
+                text="  Download complete! Launching installer...",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color="#FFFFFF",
+            ).place(relx=0.5, rely=0.5, anchor="center")
+
+        try:
+            if platform.system() == "Windows":
+                os.startfile(path)
+            else:
+                subprocess.Popen(["open", path])
+            # Close app after short delay to let installer start
+            self.after(1500, self.destroy)
+        except Exception as e:
+            logger.error("Failed to launch installer: %s", e)
+            self._show_download_error(str(e))
 
 
 if __name__ == "__main__":
