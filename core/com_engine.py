@@ -21,6 +21,7 @@ CRITICAL: This module MUST ONLY be imported on sys.platform == "win32".
 import logging
 import os
 import sys
+import time
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, Optional, Set
@@ -408,7 +409,7 @@ def _vlookup_exrate(
 #  MAIN COM PIPELINE — process_ledger_com (Vectorized + Poolable)
 # =========================================================================
 
-SKIP_SHEET_NAMES = {"ExRate"}
+SKIP_SHEET_NAMES = {"ExRate", "Exrate USD", "Exrate EUR"}
 
 
 def process_ledger_com(
@@ -592,6 +593,10 @@ def process_ledger_com(
                 "COM Engine: Saved %s via native Excel.",
                 os.path.basename(filepath),
             )
+        # Give Excel a moment and force COM cleanup to prevent file locks
+        time.sleep(0.1)
+        import gc
+        gc.collect()
 
     except pywintypes.com_error as ce:
         logger.error("Excel COM error during processing: %s", ce)
@@ -607,8 +612,14 @@ def process_ledger_com(
             except Exception:
                 pass
             # Force COM to drop the object reference
-            del wb
+            try:
+                del wb
+            except Exception:
+                pass
             wb = None
+            # Force Python garbage collection to release COM references
+            import gc
+            gc.collect()
         # ── Only quit Excel if WE created it ─────────────────────
         if owns_excel and ctx is not None:
             ctx.__exit__(None, None, None)

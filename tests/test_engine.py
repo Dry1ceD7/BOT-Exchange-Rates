@@ -189,10 +189,10 @@ class TestSkipSheetNames:
     def test_contains_exrate(self):
         assert "ExRate" in SKIP_SHEET_NAMES
 
-    def test_legacy_tabs_deprecated(self):
-        """Old tabs fully deprecated — must NOT appear in skip set."""
-        assert "Exrate USD" not in SKIP_SHEET_NAMES
-        assert "Exrate EUR" not in SKIP_SHEET_NAMES
+    def test_legacy_tabs_skipped(self):
+        """Legacy Exrate tabs must be skipped (non-standard headers)."""
+        assert "Exrate USD" in SKIP_SHEET_NAMES
+        assert "Exrate EUR" in SKIP_SHEET_NAMES
 
     def test_normal_month_not_skipped(self):
         assert "January" not in SKIP_SHEET_NAMES

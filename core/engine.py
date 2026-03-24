@@ -67,10 +67,10 @@ def _get_cache() -> CacheDB:
     return _cache_singleton
 
 
-# Sheets that are reference/master and should NOT be processed as ledgers
-# Only the master ExRate tab is skipped — old "Exrate USD"/"Exrate EUR" tabs
-# are fully deprecated and no longer referenced anywhere in the codebase.
-SKIP_SHEET_NAMES = {"ExRate"}
+# Sheets that are reference/master and should NOT be processed as ledgers.
+# "Exrate USD" / "Exrate EUR" are pre-existing rate tabs in older workbooks;
+# they lack the standard Date/Cur/EX Rate header and must be skipped.
+SKIP_SHEET_NAMES = {"ExRate", "Exrate USD", "Exrate EUR"}
 
 
 # -------------------------------------------------------------------------
@@ -590,8 +590,9 @@ class LedgerEngine:
             # Handle .xls → .xlsx output path
             if converted:
                 final_path = os.path.splitext(original_path)[0] + ".xlsx"
-                # COM engine SaveAs may have already saved to the final path
-                if os.path.abspath(result) != os.path.abspath(final_path):
+                # COM engine SaveAs may have already saved to the final path.
+                # Use normcase for case-insensitive comparison on Windows.
+                if os.path.normcase(os.path.abspath(result)) != os.path.normcase(os.path.abspath(final_path)):
                     import shutil
                     shutil.move(result, final_path)
                 result = final_path
@@ -734,6 +735,8 @@ class LedgerEngine:
                 final_path = os.path.splitext(original_path)[0] + ".xlsx"
                 wb.save(final_path)
                 wb.close()
+                del wb  # release file handle immediately
+                wb = None
                 try:
                     os.remove(filepath)
                 except OSError as e:
@@ -746,16 +749,21 @@ class LedgerEngine:
             else:
                 wb.save(filepath)
                 wb.close()
+                del wb  # release file handle immediately
+                wb = None
                 logger.info(
                     "Overwritten in-place: %s",
                     os.path.basename(filepath),
                 )
         except Exception:
             # On ANY error, close the workbook to release the file lock
-            try:
-                wb.close()
-            except Exception:
-                pass
+            if wb is not None:
+                try:
+                    wb.close()
+                except Exception:
+                    pass
+                del wb
+                wb = None
             if converted and os.path.exists(filepath):
                 try:
                     os.remove(filepath)
