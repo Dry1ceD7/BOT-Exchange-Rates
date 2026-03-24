@@ -10,11 +10,11 @@ Slim orchestrator. Heavy logic extracted to:
   - core/prescan.py → Smart date pre-scanner
 """
 
-
 import gc
 import logging
 import os
 import re
+import sys
 import time
 import traceback
 from datetime import date, datetime, timedelta
@@ -30,6 +30,16 @@ from core.exrate_sheet import update_master_exrate_sheet
 from core.logic import BOTLogicEngine, safe_to_decimal
 from core.prescan import prescan_oldest_date
 from core.xls_converter import convert_xls_to_xlsx
+
+# ── Detect if pywin32 is available (COM engine optional) ─────────────────
+HAS_PYWIN32 = False
+if sys.platform == "win32":
+    try:
+        import pywintypes  # noqa: F401
+        import win32com  # noqa: F401
+        HAS_PYWIN32 = True
+    except ImportError:
+        pass
 
 logger = logging.getLogger(__name__)
 
@@ -379,7 +389,6 @@ class LedgerEngine:
         Args:
             excel: Optional shared Excel COM instance (for batch pooling).
         """
-        import sys
 
         # ── MANDATE 2: Absolute pathing for COM safety ───────────────
         filepath = os.path.abspath(filepath)
@@ -397,7 +406,8 @@ class LedgerEngine:
         if is_legacy_xls:
             converted = True
             self._emit("Converting legacy .xls to .xlsx")
-            if sys.platform != "win32":
+            if not HAS_PYWIN32:
+                # Without COM engine, convert .xls to .xlsx for openpyxl
                 filepath = convert_xls_to_xlsx(filepath)
 
         # ── Pre-scan dates for API data loading ──────────────────────
@@ -406,7 +416,7 @@ class LedgerEngine:
         self._emit("Scanning dates from workbook")
         all_target_dates: Set[date] = set()
 
-        if is_legacy_xls and sys.platform == "win32":
+        if is_legacy_xls and HAS_PYWIN32:
             # On Windows, we didn't pre-convert, so openpyxl cannot read this.
             # Use xlrd purely for the read-only pre-scan to extract dates.
             wb_scan = None
@@ -582,44 +592,55 @@ class LedgerEngine:
                     pass
 
         # ══════════════════════════════════════════════════════════════
-        #  OS-AWARE DISPATCHER: COM (Windows) vs openpyxl (Mac/Linux)
+        #  OS-AWARE DISPATCHER: COM (Windows+pywin32) vs openpyxl
         # ══════════════════════════════════════════════════════════════
-        if sys.platform == "win32":
+        if HAS_PYWIN32:
             # ── PRIMARY PATH: Native Microsoft Excel COM Engine ───────
-            from core.com_engine import process_ledger_com
-            self._emit("Dispatching to Native COM Engine (Windows)")
-            logger.info("Dispatching to Native COM Engine (Windows).")
+            try:
+                from core.com_engine import process_ledger_com
+                self._emit("Dispatching to Native COM Engine (Windows)")
+                logger.info("Dispatching to Native COM Engine (Windows).")
 
-            result = process_ledger_com(
-                filepath=filepath,
-                usd_buying=usd_buying,
-                usd_selling=usd_selling,
-                eur_buying=eur_buying,
-                eur_selling=eur_selling,
-                holidays_set=master_holidays_set,
-                holidays_names=holidays_names,
-                computed_start=computed_start,
-                target_cols=self.target_cols,
-                excel=excel,
-            )
-
-            # Handle .xls → .xlsx output path
-            if converted:
-                final_path = os.path.splitext(original_path)[0] + ".xlsx"
-                # COM engine SaveAs may have already saved to the final path.
-                # Use normcase for case-insensitive comparison on Windows.
-                if os.path.normcase(os.path.abspath(result)) != os.path.normcase(os.path.abspath(final_path)):
-                    import shutil
-                    shutil.move(result, final_path)
-                result = final_path
-                logger.info(
-                    "Saved processed output as: %s (original .xls preserved)",
-                    os.path.basename(final_path),
+                result = process_ledger_com(
+                    filepath=filepath,
+                    usd_buying=usd_buying,
+                    usd_selling=usd_selling,
+                    eur_buying=eur_buying,
+                    eur_selling=eur_selling,
+                    holidays_set=master_holidays_set,
+                    holidays_names=holidays_names,
+                    computed_start=computed_start,
+                    target_cols=self.target_cols,
+                    excel=excel,
                 )
 
-            gc.collect()
-            self._emit("File saved and memory cleaned", etype="success")
-            return result
+                # Handle .xls → .xlsx output path
+                if converted:
+                    final_path = os.path.splitext(original_path)[0] + ".xlsx"
+                    # COM engine SaveAs may have already saved to the final path.
+                    # Use normcase for case-insensitive comparison on Windows.
+                    if os.path.normcase(os.path.abspath(result)) != os.path.normcase(os.path.abspath(final_path)):
+                        import shutil
+                        shutil.move(result, final_path)
+                    result = final_path
+                    logger.info(
+                        "Saved processed output as: %s (original .xls preserved)",
+                        os.path.basename(final_path),
+                    )
+
+                gc.collect()
+                self._emit("File saved and memory cleaned", etype="success")
+                return result
+            except (ImportError, RuntimeError) as com_err:
+                # COM engine import failed — fall through to openpyxl
+                logger.warning(
+                    "COM Engine unavailable, falling back to openpyxl: %s",
+                    com_err,
+                )
+                self._emit("COM unavailable — using openpyxl engine")
+                # If .xls wasn't converted yet, convert now for openpyxl
+                if is_legacy_xls and not filepath.lower().endswith(".xlsx"):
+                    filepath = convert_xls_to_xlsx(filepath)
 
         # ══════════════════════════════════════════════════════════════
         #  FALLBACK PATH: openpyxl (macOS / Linux)
@@ -809,7 +830,6 @@ class LedgerEngine:
           entire batch queue. All files are processed inside that one
           instance. excel.Quit() fires only when the full batch finishes.
         """
-        import sys
         self.backup.cleanup_old_backups(max_age_days=7)
         total = len(filepaths)
         success = 0
@@ -818,7 +838,7 @@ class LedgerEngine:
         # ── MANDATE 3: Pool a single Excel instance for the batch ─────
         excel_instance = None
         excel_ctx = None
-        if sys.platform == "win32":
+        if HAS_PYWIN32:
             try:
                 from core.com_engine import ExcelCOM
                 excel_ctx = ExcelCOM()
