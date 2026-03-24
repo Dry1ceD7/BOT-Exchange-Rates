@@ -50,13 +50,19 @@ class BatchHandler:
             asyncio.run(self._run_batch(file_queue, start_date))
         except (httpx.ConnectError, httpx.TimeoutException):
             self.bus.push({"type": "error", "msg": "Network error — check your internet connection."})
-            self.app.after(
-                0, self.app._show_error,
-                "Network error — please check your internet connection.",
-            )
+            try:
+                self.app.after(
+                    100, self.app._show_error,
+                    "Network error — please check your internet connection.",
+                )
+            except Exception:
+                pass
         except Exception as e:
             self.bus.push({"type": "error", "msg": str(e)})
-            self.app.after(0, self.app._show_error, str(e))
+            try:
+                self.app.after(100, self.app._show_error, str(e))
+            except Exception:
+                pass
 
     async def _run_batch(self, file_queue: List[str], start_date: str):
         """Async batch executor."""
@@ -74,10 +80,13 @@ class BatchHandler:
                     logger.error("File SKIPPED: %s — %s", fname, error)
                 else:
                     self.bus.push({"type": "log", "msg": f"[{idx}/{total}] {fname} — OK"})
-                self.app.after(
-                    0, self.app._update_progress,
-                    idx, total, fname, error,
-                )
+                try:
+                    self.app.after(
+                        100, self.app._update_progress,
+                        idx, total, fname, error,
+                    )
+                except Exception:
+                    pass
 
             success, fail, errors = await engine.process_batch(
                 file_queue, start_date=start_date, progress_cb=progress_cb,
@@ -86,9 +95,12 @@ class BatchHandler:
                 "type": "success",
                 "msg": f"Batch complete: {success} succeeded, {fail} failed.",
             })
-            self.app.after(
-                0, self.app._show_batch_complete, success, fail, errors,
-            )
+            try:
+                self.app.after(
+                    200, self.app._show_batch_complete, success, fail, errors,
+                )
+            except Exception:
+                pass
 
     def start_revert(self, filepath: str):
         """Launch the revert operation in a background thread."""

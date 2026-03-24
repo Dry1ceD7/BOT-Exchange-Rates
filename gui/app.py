@@ -702,12 +702,15 @@ class BOTExrateApp(ctk.CTk):
         if self.file_queue:
             self.last_processed_path = self.file_queue[-1]
             self.btn_reveal.pack(pady=(12, 14))
+        # Force UI refresh so the user sees the updated state immediately
+        self.update_idletasks()
 
     def _show_error(self, msg: str):
         self.progressbar.set(0)
         self.lbl_status.configure(text=f"Error:  {msg}", text_color=COLOR_ERROR_TEXT)
         self.btn_process.configure(state="normal")
         self.btn_revert.configure(state="normal")
+        self.update_idletasks()
 
     # ================================================================== #
     #  REVERT
