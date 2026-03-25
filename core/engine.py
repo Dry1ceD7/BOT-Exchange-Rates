@@ -60,6 +60,41 @@ class MissingColumnError(Exception):
 
 
 # -------------------------------------------------------------------------
+# EXCEL TMP FILE CLEANUP
+# -------------------------------------------------------------------------
+# Microsoft Excel COM creates UUID-named .tmp files (e.g.
+# "b2fb6ef1-6f57-43d5-88a6-49d88bc3cc9c.tmp") in the same directory as
+# the workbook being edited. These are recovery/lock files that should be
+# auto-cleaned by Excel on close, but often linger if the COM process
+# doesn't shut down cleanly.
+
+_UUID_TMP_PATTERN = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$',
+    re.IGNORECASE,
+)
+
+
+def _cleanup_excel_tmp_files(directory: str) -> int:
+    """Remove UUID-named .tmp files left behind by Excel COM in *directory*.
+    Returns the number of files removed."""
+    if not os.path.isdir(directory):
+        return 0
+    removed = 0
+    for fname in os.listdir(directory):
+        if _UUID_TMP_PATTERN.match(fname):
+            fpath = os.path.join(directory, fname)
+            try:
+                os.remove(fpath)
+                removed += 1
+                logger.debug("Cleaned up Excel tmp: %s", fname)
+            except OSError:
+                pass
+    if removed:
+        logger.info("Cleaned up %d Excel tmp file(s) in %s", removed, directory)
+    return removed
+
+
+# -------------------------------------------------------------------------
 # MODULE-LEVEL SINGLETONS (persist across batch clicks)
 # -------------------------------------------------------------------------
 _backup_singleton = None
@@ -911,6 +946,8 @@ class LedgerEngine:
                     pass
             raise
         gc.collect()
+        # Clean up any UUID .tmp files left by Excel COM
+        _cleanup_excel_tmp_files(os.path.dirname(os.path.abspath(filepath)))
         self._emit("File saved and memory cleaned", etype="success")
         return filepath
 
@@ -984,6 +1021,13 @@ class LedgerEngine:
             if excel_ctx is not None:
                 excel_ctx.__exit__(None, None, None)
                 logger.info("Batch: Pooled Excel COM instance terminated.")
+            # Clean up any lingering UUID .tmp files from Excel COM
+            cleaned_dirs: Set[str] = set()
+            for fp in filepaths:
+                d = os.path.dirname(os.path.abspath(fp))
+                if d not in cleaned_dirs:
+                    _cleanup_excel_tmp_files(d)
+                    cleaned_dirs.add(d)
 
         return success, total - success, errors
 

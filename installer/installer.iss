@@ -6,6 +6,7 @@
 ;   - Desktop shortcut (optional checkbox)
 ;   - Start Menu folder with app + uninstaller
 ;   - Registered uninstaller in Add/Remove Programs
+;   - Icon cache flush for crisp HD icons
 ;
 ; Build: iscc installer/installer.iss
 ; Expects PyInstaller output in dist\BOT-ExRate\
@@ -42,7 +43,7 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
-UninstallDisplayIcon={app}\{#MyAppExeName}
+UninstallDisplayIcon={app}\assets\icon.ico
 ArchitecturesInstallIn64BitMode=x64compatible
 
 [Languages]
@@ -54,15 +55,20 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 ; Include entire PyInstaller --onedir output
 Source: "..\dist\BOT-ExRate\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Ensure HD icon files are explicitly included (belt-and-suspenders)
+Source: "..\assets\icon.ico"; DestDir: "{app}\assets"; Flags: ignoreversion
+Source: "..\assets\icon.png"; DestDir: "{app}\assets"; Flags: ignoreversion
 
 [Icons]
-; Start Menu
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+; Start Menu — explicitly reference the HD icon
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\icon.ico"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
-; Desktop (only if user checked the box)
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+; Desktop (only if user checked the box) — explicitly reference the HD icon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\icon.ico"; Tasks: desktopicon
 
 [Run]
+; Flush Windows icon cache so the new HD icon is immediately visible
+Filename: "{sys}\ie4uinit.exe"; Parameters: "-show"; Flags: runhidden nowait
 ; Option to launch app after install
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
@@ -70,3 +76,4 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 ; Clean up any runtime-generated files
 Type: filesandordirs; Name: "{app}\__pycache__"
 Type: filesandordirs; Name: "{app}\*.log"
+
