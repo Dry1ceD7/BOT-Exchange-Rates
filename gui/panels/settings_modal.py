@@ -437,9 +437,64 @@ class SettingsModal(ctk.CTkToplevel):
         if success:
             self._btn_update.configure(state="disabled", text="Updated ✓")
             self._btn_dl_version.configure(state="disabled")
+            # Show restart confirmation dialog
+            self._show_restart_dialog()
         else:
             self._btn_update.configure(state="normal")
             self._btn_dl_version.configure(state="normal")
+
+    def _show_restart_dialog(self):
+        """Show a restart confirmation popup after successful update."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Update Installed")
+        dialog.geometry("340x180")
+        dialog.resizable(False, False)
+        dialog.configure(fg_color=COLOR_MODAL_BG)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        # Center on screen
+        dialog.update_idletasks()
+        sx = (dialog.winfo_screenwidth() - 340) // 2
+        sy = (dialog.winfo_screenheight() - 180) // 2
+        dialog.geometry(f"340x180+{sx}+{sy}")
+
+        ctk.CTkLabel(
+            dialog, text="✅ Update Installed",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLOR_MODAL_TEXT,
+        ).pack(pady=(24, 8))
+
+        ctk.CTkLabel(
+            dialog,
+            text="Restart the application to\napply the update.",
+            font=ctk.CTkFont(size=13),
+            text_color="#94A3B8",
+        ).pack(pady=(0, 16))
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=24)
+
+        ctk.CTkButton(
+            btn_frame, text="Restart Later",
+            fg_color="#475569", hover_color="#64748B",
+            font=ctk.CTkFont(size=13), corner_radius=8,
+            height=36, width=130,
+            command=dialog.destroy,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            btn_frame, text="Restart Now",
+            fg_color=COLOR_MODAL_SUCCESS, hover_color="#16A34A",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            corner_radius=8, height=36, width=130,
+            command=self._do_restart,
+        ).pack(side="right")
+
+    def _do_restart(self):
+        """Restart the application."""
+        from core.auto_updater import restart_app
+        restart_app()
 
     # ================================================================== #
     #  SAVE & CLOSE

@@ -295,3 +295,24 @@ def apply_update(new_exe_path: str) -> dict:
 
     return result
 
+
+def restart_app() -> None:
+    """
+    Restart the application by launching the executable again
+    and exiting the current process.
+
+    For frozen (PyInstaller) apps: re-launches sys.executable.
+    For dev mode: re-launches with python + sys.argv.
+    """
+    import subprocess
+    import sys
+
+    if getattr(sys, "frozen", False):
+        # Frozen app — launch the exe directly
+        subprocess.Popen([sys.executable])
+    else:
+        # Dev mode — re-run with python
+        subprocess.Popen([sys.executable] + sys.argv)
+
+    # Exit current process
+    sys.exit(0)

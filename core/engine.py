@@ -730,19 +730,23 @@ class LedgerEngine:
 
             # ── STEP 3: Cross-Tab Lookup — Write formulas into monthly tabs ──
             #
-            # Writes VLOOKUP + XLOOKUP formulas to the "EX Rate" column.
+            # Writes a SINGLE IFS formula per row to the "EX Rate" column
+            # that dynamically checks the Cur column for the currency.
+            #
+            # This means:
+            #   - Formula can be dragged down without breaking
+            #   - Currency is checked inside the formula via IFS()
+            #   - THB → 1, USD → ExRate col B, EUR → ExRate col D
             #
             # CRITICAL: Date Normalization
             # Monthly tab dates may be stored as TEXT STRINGS (e.g.,
-            # "10/03/2025") which VLOOKUP cannot match against the
-            # DATE SERIAL NUMBERS in ExRate.  We normalize by writing
-            # the parsed date object back to the cell before the
-            # lookup formula, ensuring type parity.
+            # "10/03/2025") which lookups cannot match against the
+            # DATE SERIAL NUMBERS in ExRate. We normalize by writing
+            # the parsed date object back to the cell.
             #
-            # Formula strategy (bounded ranges, header excluded):
-            #   XLOOKUP (Excel 365/2021+) with match_mode -1 = primary
-            #   VLOOKUP (all versions) with TRUE (approx match) = fallback
-            #   Both auto-rollback to nearest previous trading day.
+            # Formula strategy (exact match):
+            #   XLOOKUP match_mode 0 = exact match (primary)
+            #   VLOOKUP FALSE = exact match (fallback for older Excel)
             #
             # ExRate layout (data starts at row 2, sorted ascending):
             #   A=Date, B=USD Buy, C=USD Sell, D=EUR Buy, E=EUR Sell
@@ -759,9 +763,15 @@ class LedgerEngine:
                 src_idx = cols["source"] + 1
                 cur_idx = cols.get("currency")
                 out_rate_idx = cols.get("out_rate")
-                if out_rate_idx is None:
+                if out_rate_idx is None or cur_idx is None:
                     continue
                 out_col = out_rate_idx + 1  # 1-indexed
+                cur_col = cur_idx + 1       # 1-indexed
+
+                # Column letters for cell references in formulas
+                date_letter = get_column_letter(src_idx)
+                cur_letter = get_column_letter(cur_col)
+                N = exrate_last_row  # last data row in ExRate
 
                 for row_idx in range(
                     mapping["header_row"] + 1, ws.max_row + 1
@@ -777,52 +787,51 @@ class LedgerEngine:
                     # If the cell contains a text string (not a proper
                     # date/datetime), replace it with the parsed date
                     # object so Excel stores it as a date serial number.
-                    # This is REQUIRED for VLOOKUP to match dates
-                    # between the monthly tab and ExRate tab.
                     if isinstance(src_cell.value, str):
                         src_cell.value = inv_date
                         src_cell.number_format = "DD MMM YYYY"
 
-                    # Determine currency for this row
-                    ccy = ""
-                    if cur_idx is not None:
-                        cur_cell = ws.cell(
-                            row=row_idx, column=cur_idx + 1
-                        )
-                        if not isinstance(cur_cell, MergedCell):
-                            raw = cur_cell.value
-                            ccy = str(raw).strip().upper() if raw else ""
+                    # Cell references for this row
+                    date_ref = f"{date_letter}{row_idx}"
+                    cur_ref = f"{cur_letter}{row_idx}"
 
-                    if ccy == "THB":
-                        self._zero_touch_write(ws, row_idx, out_col, 1)
-                        continue
-
-                    # ExRate column mapping:
-                    #   USD Buying TT Rate → col B (VLOOKUP idx 2)
-                    #   EUR Buying TT Rate → col D (VLOOKUP idx 4)
-                    col_map = {"USD": ("$B", 2), "EUR": ("$D", 4)}
-                    col_info = col_map.get(ccy)
-                    if col_info is None:
-                        continue
-                    xl_col, vl_col = col_info
-
-                    # Cell reference for the date in this monthly row
-                    date_col_letter = get_column_letter(src_idx)
-                    date_ref = f"{date_col_letter}{row_idx}"
-                    N = exrate_last_row  # last data row in ExRate
-
-                    # BOUNDED ranges — excludes header row 1:
-                    #   $A$2:$A${N}  for date lookup column
-                    #   $B$2:$B${N}  or $D$2:$D${N} for rate return
-                    #   $A$2:$E${N}  for VLOOKUP table array
+                    # IFS formula that checks Cur column dynamically:
+                    #   THB → 1
+                    #   USD → XLOOKUP(exact) with VLOOKUP(exact) fallback
+                    #   EUR → XLOOKUP(exact) with VLOOKUP(exact) fallback
+                    #   else → ""
+                    #
+                    # Uses _xlfn.IFS and _xlfn.XLOOKUP for Excel compat.
+                    # XLOOKUP match_mode 0 = exact match
+                    # VLOOKUP FALSE = exact match
                     formula = (
-                        f"=IFERROR(_xlfn.XLOOKUP({date_ref},"
+                        f"=_xlfn.IFS("
+                        f"{cur_ref}=\"THB\",1,"
+                        f"{cur_ref}=\"USD\","
+                        f"IFERROR(_xlfn.XLOOKUP({date_ref},"
                         f"ExRate!$A$2:$A${N},"
-                        f"ExRate!{xl_col}$2:{xl_col}${N},\"\",-1),"
+                        f"ExRate!$B$2:$B${N},\"\",0),"
                         f"IFERROR(VLOOKUP({date_ref},"
-                        f"ExRate!$A$2:$E${N},{vl_col},TRUE),\"\"))"
+                        f"ExRate!$A$2:$E${N},2,FALSE),\"\")),"
+                        f"{cur_ref}=\"EUR\","
+                        f"IFERROR(_xlfn.XLOOKUP({date_ref},"
+                        f"ExRate!$A$2:$A${N},"
+                        f"ExRate!$D$2:$D${N},\"\",0),"
+                        f"IFERROR(VLOOKUP({date_ref},"
+                        f"ExRate!$A$2:$E${N},4,FALSE),\"\")),"
+                        f"TRUE,\"\")"
                     )
                     self._zero_touch_write(ws, row_idx, out_col, formula)
+
+                # ── Pre-format Date column for manual entry ───────────
+                # Apply "DD MMM YYYY" to the entire Date column including
+                # blank rows below data, so dates typed manually by the
+                # user will automatically display in the correct format.
+                max_preformat = max(ws.max_row + 500, 1000)
+                for r in range(mapping["header_row"] + 1, max_preformat + 1):
+                    cell = ws.cell(row=r, column=src_idx)
+                    if not isinstance(cell, MergedCell):
+                        cell.number_format = "DD MMM YYYY"
 
             # ── Save & Cleanup ───────────────────────────────────────────
             if converted:
