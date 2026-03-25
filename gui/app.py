@@ -469,7 +469,16 @@ class BOTExrateApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
             corner_radius=10, command=self._on_revert_click
         )
-        self.btn_revert.pack(side="left")
+        self.btn_revert.pack(side="left", padx=(0, 12))
+
+        self.btn_export_exrate = ctk.CTkButton(
+            btn_row, text="ExRate Sheet",
+            height=48, width=160,
+            fg_color="#6366F1", hover_color="#4F46E5",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            corner_radius=10, command=self._on_export_exrate
+        )
+        self.btn_export_exrate.pack(side="left")
 
         # ── 4. STATUS BOX ────────────────────────────────────────────────
         status_box = ctk.CTkFrame(
@@ -711,6 +720,64 @@ class BOTExrateApp(ctk.CTk):
         self.btn_process.configure(state="normal")
         self.btn_revert.configure(state="normal")
         self.update_idletasks()
+
+    # ================================================================== #
+    #  EXRATE SHEET — CREATE NEW / UPDATE STANDALONE
+    # ================================================================== #
+    def _on_export_exrate(self):
+        """Create a new standalone ExRate .xlsx with rates from the BOT API."""
+        dest = filedialog.asksaveasfilename(
+            title="Create New ExRate File",
+            initialfile="ExRate.xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            defaultextension=".xlsx",
+        )
+        if not dest:
+            return
+
+        self.btn_export_exrate.configure(state="disabled")
+        self.lbl_status.configure(
+            text="Creating ExRate file...", text_color=COLOR_TEXT_SECONDARY,
+        )
+        self.update_idletasks()
+
+        def _status_cb(msg: str):
+            self.after(100, self.lbl_status.configure,
+                       {"text": msg, "text_color": COLOR_TEXT_SECONDARY})
+
+        def _worker():
+            import asyncio
+
+            from openpyxl import Workbook
+
+            # Create a blank workbook with an ExRate sheet
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "ExRate"
+            wb.save(dest)
+            wb.close()
+
+            # Now update it with fresh rates
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(
+                    self.engine.update_exrate_standalone(
+                        dest, progress_cb=_status_cb,
+                    )
+                )
+                self.after(100, self.lbl_status.configure,
+                           {"text": f"✓ ExRate created: {os.path.basename(dest)}",
+                            "text_color": COLOR_SUCCESS})
+            except Exception as e:
+                self.after(100, self.lbl_status.configure,
+                           {"text": f"Failed: {e}",
+                            "text_color": COLOR_ERROR_TEXT})
+            finally:
+                loop.close()
+                self.after(100, self.btn_export_exrate.configure,
+                           {"state": "normal"})
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ================================================================== #
     #  REVERT

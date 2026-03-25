@@ -397,6 +397,42 @@ class LedgerEngine:
         self.backup.create_backup(filepath)
         self._emit("Backup created")
 
+        # ── Standalone ExRate detection ────────────────────────────────
+        # If the file contains an ExRate sheet but no month tabs with
+        # Date/Cur columns, treat it as a standalone ExRate file.
+        if filepath.lower().endswith(".xlsx"):
+            try:
+                import openpyxl as _opx
+                _wb_check = _opx.load_workbook(filepath, read_only=True)
+                has_exrate = "ExRate" in _wb_check.sheetnames
+                has_month_tabs = False
+                for sn in _wb_check.sheetnames:
+                    if sn in SKIP_SHEET_NAMES:
+                        continue
+                    ws_check = _wb_check[sn]
+                    for row in ws_check.iter_rows(
+                        min_row=1, max_row=5, values_only=True,
+                    ):
+                        row_strs = [
+                            str(c).strip() if c is not None else ""
+                            for c in row
+                        ]
+                        if (
+                            self.target_cols["source_date"] in row_strs
+                            and self.target_cols["currency"] in row_strs
+                        ):
+                            has_month_tabs = True
+                            break
+                    if has_month_tabs:
+                        break
+                _wb_check.close()
+
+                if has_exrate and not has_month_tabs:
+                    self._emit("Standalone ExRate file detected — updating rates")
+                    return await self.update_exrate_standalone(filepath)
+            except Exception:
+                pass  # Fall through to normal pipeline
+
         # ── .xls Auto-Conversion ─────────────────────────────────────
         original_path = filepath
         converted = False
@@ -949,3 +985,116 @@ class LedgerEngine:
                 logger.info("Batch: Pooled Excel COM instance terminated.")
 
         return success, total - success, errors
+
+    # ================================================================== #
+    #  STANDALONE EXRATE UPDATE
+    # ================================================================== #
+    async def update_exrate_standalone(
+        self,
+        filepath: str,
+        progress_cb: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """
+        Update a standalone ExRate .xlsx file with fresh exchange rates.
+
+        Opens the file, fetches rates from the BOT API, and writes them
+        using update_master_exrate_sheet(). No monthly tab processing.
+
+        Args:
+            filepath: Path to the standalone ExRate .xlsx file.
+            progress_cb: Optional status callback(message).
+
+        Returns:
+            Path to the saved file.
+        """
+        import re
+
+        import openpyxl
+
+        from core.exrate_sheet import update_master_exrate_sheet
+
+        def _status(msg: str):
+            if progress_cb:
+                progress_cb(msg)
+            self._emit(msg)
+
+        _status("Opening ExRate file...")
+        wb = openpyxl.load_workbook(filepath)
+
+        if "ExRate" not in wb.sheetnames:
+            wb.close()
+            raise ValueError("No ExRate sheet found in the selected file.")
+
+        # Read existing dates from ExRate sheet to determine date range
+        ws_ex = wb["ExRate"]
+        existing_dates = set()
+        for row_idx in range(2, (ws_ex.max_row or 1) + 1):
+            cell_val = ws_ex.cell(row=row_idx, column=1).value
+            parsed = self._parse_date(cell_val)
+            if parsed:
+                existing_dates.add(parsed)
+
+        # Determine date range
+        if existing_dates:
+            target_year = min(existing_dates).year
+        else:
+            target_year = date.today().year
+
+        start_date_str = f"{target_year - 1}-12-20"
+        all_target_dates = existing_dates | {date.today()}
+
+        _status("Fetching exchange rates from BOT API...")
+        (
+            logic_engine, usd_selling, eur_selling,
+            usd_buying, eur_buying, _usd_data, _eur_data,
+        ) = await self._preload_api_data(all_target_dates, start_date_str)
+
+        computed_start = self.compute_year_start_date(
+            target_year, logic_engine.holidays
+        )
+
+        # Build holiday names lookup
+        sub_pattern = re.compile(r'^Substitution for (.*)\((.*?)\)$')
+        holidays_names: Dict[date, str] = {}
+        master_holidays_set = set(logic_engine.holidays)
+
+        for year in {
+            d.year
+            for d in (all_target_dates | {computed_start, date.today()})
+        }:
+            cached_hols = self.cache.get_holidays(year)
+            for h_str, h_name in cached_hols:
+                try:
+                    h_obj = datetime.strptime(h_str, "%Y-%m-%d").date()
+                    holidays_names[h_obj] = h_name
+                    m = sub_pattern.search(h_name)
+                    if m:
+                        real_name = m.group(1).strip()
+                        date_str = m.group(2).strip()
+                        date_str_clean = re.sub(
+                            r'(\d+)(st|nd|rd|th)', r'\1', date_str
+                        )
+                        date_str_clean = re.sub(
+                            r'^[A-Za-z]+\s+', '', date_str_clean
+                        )
+                        try:
+                            real_dt = datetime.strptime(
+                                date_str_clean, '%d %B %Y'
+                            ).date()
+                            holidays_names[real_dt] = real_name
+                            master_holidays_set.add(real_dt)
+                        except (ValueError, TypeError):
+                            pass
+                except (ValueError, TypeError):
+                    pass
+
+        _status("Writing exchange rate data...")
+        update_master_exrate_sheet(
+            wb, usd_buying, usd_selling, eur_buying, eur_selling,
+            sorted(master_holidays_set), holidays_names, computed_start,
+        )
+
+        wb.save(filepath)
+        wb.close()
+        _status(f"✓ ExRate updated: {os.path.basename(filepath)}")
+        return filepath

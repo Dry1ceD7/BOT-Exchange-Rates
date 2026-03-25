@@ -226,72 +226,81 @@ def download_update(
 
 def apply_update(new_exe_path: str) -> dict:
     """
-    Replace the running executable with the downloaded update.
+    Install the downloaded update silently.
 
-    Steps:
-      1. Rename current exe → current.exe.bak (backup)
-      2. Rename downloaded exe → current exe name (in-place swap)
-      3. Return success status — caller should prompt restart
+    For Inno Setup installers (BOT-ExRate-Setup.exe):
+      Runs the installer with /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+      /DIR=<current_app_dir> to install behind the scenes.
 
-    This works because PyInstaller unpacks to a temp dir at launch,
-    so the original .exe file is not locked on Windows.
+    For portable single-file builds:
+      Falls back to atomic exe swap (rename current → .bak, rename new → current).
 
     Args:
-        new_exe_path: Absolute path to the downloaded new .exe
+        new_exe_path: Absolute path to the downloaded installer/exe.
 
     Returns:
-        {"success": bool, "backup_path": str | None, "error": str | None}
+        {"success": bool, "error": str | None}
     """
+    import subprocess
     import sys
 
-    result = {"success": False, "backup_path": None, "error": None}
+    result = {"success": False, "error": None}
 
     if not getattr(sys, "frozen", False):
         result["error"] = "In-place update only works for frozen (packaged) apps"
         return result
 
     current_exe = os.path.abspath(sys.executable)
-    backup_path = current_exe + ".bak"
+    app_dir = os.path.dirname(current_exe)
+    filename = os.path.basename(new_exe_path).lower()
 
     try:
-        # Remove old backup if it exists
-        if os.path.exists(backup_path):
-            os.remove(backup_path)
-
-        # Step 1: Current exe → backup
-        os.rename(current_exe, backup_path)
-        result["backup_path"] = backup_path
-        logger.info("Backed up current exe: %s → %s", current_exe, backup_path)
-
-        # Step 2: New exe → current exe name
-        os.rename(new_exe_path, current_exe)
-        logger.info("Replaced with new exe: %s → %s", new_exe_path, current_exe)
-
-        result["success"] = True
+        if "setup" in filename:
+            # Inno Setup installer — run silently
+            logger.info("Running silent installer: %s → %s", new_exe_path, app_dir)
+            proc = subprocess.run(
+                [
+                    new_exe_path,
+                    "/VERYSILENT",
+                    "/SUPPRESSMSGBOXES",
+                    "/NORESTART",
+                    f"/DIR={app_dir}",
+                ],
+                timeout=120,
+                capture_output=True,
+            )
+            if proc.returncode == 0:
+                result["success"] = True
+                logger.info("Silent install completed successfully")
+                # Clean up the installer file
+                try:
+                    os.remove(new_exe_path)
+                except OSError:
+                    pass
+            else:
+                result["error"] = (
+                    f"Installer exited with code {proc.returncode}"
+                )
+        else:
+            # Portable exe — atomic swap
+            backup_path = current_exe + ".bak"
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
+            os.rename(current_exe, backup_path)
+            os.rename(new_exe_path, current_exe)
+            result["success"] = True
+            logger.info("Atomic exe swap completed")
     except PermissionError:
-        logger.error(
-            "Permission denied — cannot write to app directory. "
-            "The server share may be read-only for this user."
-        )
+        logger.error("Permission denied — cannot write to app directory.")
         result["error"] = (
             "Permission denied. Please ask your IT admin to update "
             "the application on the server."
         )
-        # Try to rollback if we already renamed the current exe
-        if not os.path.exists(current_exe) and os.path.exists(backup_path):
-            try:
-                os.rename(backup_path, current_exe)
-            except OSError:
-                pass
+    except subprocess.TimeoutExpired:
+        result["error"] = "Installer timed out after 120 seconds"
     except Exception as e:
         logger.error("Update apply failed: %s", e)
         result["error"] = str(e)
-        # Try to rollback
-        if not os.path.exists(current_exe) and os.path.exists(backup_path):
-            try:
-                os.rename(backup_path, current_exe)
-            except OSError:
-                pass
 
     return result
 
@@ -300,19 +309,14 @@ def restart_app() -> None:
     """
     Restart the application by launching the executable again
     and exiting the current process.
-
-    For frozen (PyInstaller) apps: re-launches sys.executable.
-    For dev mode: re-launches with python + sys.argv.
     """
     import subprocess
     import sys
 
     if getattr(sys, "frozen", False):
-        # Frozen app — launch the exe directly
         subprocess.Popen([sys.executable])
     else:
-        # Dev mode — re-run with python
         subprocess.Popen([sys.executable] + sys.argv)
 
-    # Exit current process
     sys.exit(0)
+
