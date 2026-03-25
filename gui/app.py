@@ -1292,52 +1292,92 @@ class BOTExrateApp(ctk.CTk):
             ).place(relx=0.5, rely=0.5, anchor="center")
 
     def _show_update_success(self):
-        """Show success banner with restart prompt."""
+        """Show success banner with Restart Now / Restart Later options."""
         if hasattr(self, '_update_banner') and self._update_banner:
             for w in self._update_banner.winfo_children():
                 w.destroy()
-            self._update_banner.configure(fg_color=COLOR_SUCCESS, height=38)
+            self._update_banner.configure(fg_color="#059669", height=44)
 
             inner = ctk.CTkFrame(self._update_banner, fg_color="transparent")
             inner.place(relx=0.5, rely=0.5, anchor="center")
 
             ctk.CTkLabel(
                 inner,
-                text="  ✅ Update installed! Please restart the application.",
+                text="  ✅ Update installed successfully!",
                 font=ctk.CTkFont(size=13, weight="bold"),
                 text_color="#FFFFFF",
-            ).pack(side="left")
+            ).pack(side="left", padx=(0, 16))
 
             ctk.CTkButton(
                 inner, text="Restart Now",
-                width=100, height=26,
-                fg_color="#FFFFFF", hover_color="#E2E8F0",
+                width=110, height=28,
+                fg_color="#FFFFFF", hover_color="#D1FAE5",
                 text_color="#065F46",
-                font=ctk.CTkFont(size=11, weight="bold"),
+                font=ctk.CTkFont(size=12, weight="bold"),
                 corner_radius=6,
                 command=self._restart_app,
-            ).pack(side="left", padx=(12, 0))
+            ).pack(side="left", padx=(0, 8))
+
+            ctk.CTkButton(
+                inner, text="Restart Later",
+                width=110, height=28,
+                fg_color="transparent", hover_color="#047857",
+                text_color="#FFFFFF",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                corner_radius=6,
+                border_width=1, border_color="#FFFFFF",
+                command=self._dismiss_update_banner,
+            ).pack(side="left")
+
+    def _dismiss_update_banner(self):
+        """Dismiss the update banner — update is installed, will take effect on next launch."""
+        if hasattr(self, '_update_banner') and self._update_banner:
+            self._update_banner.destroy()
+            self._update_banner = None
+        # Show a subtle status message
+        if hasattr(self, 'lbl_status'):
+            self.lbl_status.configure(
+                text="Update installed — will apply on next restart.",
+                text_color=COLOR_SUCCESS,
+            )
 
     def _restart_app(self):
-        """Close the app so the user can re-launch the updated version."""
+        """Restart the application — launch new exe and exit current process."""
+        import subprocess
         import sys
 
         logger.info("User requested restart after update")
         try:
             if getattr(sys, "frozen", False):
-                # Frozen app: start the new exe and exit
+                # Frozen app: launch the updated exe as a detached process
                 exe_path = os.path.abspath(sys.executable)
                 if platform.system() == "Windows":
-                    os.startfile(exe_path)
+                    # Use DETACHED_PROCESS flag for clean separation
+                    DETACHED_PROCESS = 0x00000008
+                    subprocess.Popen(
+                        [exe_path],
+                        creationflags=DETACHED_PROCESS,
+                        close_fds=True,
+                    )
                 else:
                     subprocess.Popen([exe_path])
-                self.after(500, self.destroy)
+                # Give the new process a moment to start, then exit
+                self.after(500, self._exit_for_restart)
             else:
                 # Dev mode: just close
                 self.destroy()
         except Exception as e:
             logger.error("Restart failed: %s", e)
             self._show_download_error(f"Restart failed: {e}")
+
+    def _exit_for_restart(self):
+        """Clean exit for restart — destroy window and exit process."""
+        import sys
+        try:
+            self.destroy()
+        except Exception:
+            pass
+        sys.exit(0)
 
 
 if __name__ == "__main__":
