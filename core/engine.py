@@ -1049,6 +1049,7 @@ class LedgerEngine:
         progress_cb: Optional[Callable[[str], None]] = None,
         currencies: Optional[List[str]] = None,
         rate_types: Optional[Dict[str, str]] = None,
+        date_range: Optional[Tuple[date, date]] = None,
     ) -> str:
         """
         Update a standalone ExRate .xlsx file with fresh exchange rates.
@@ -1114,8 +1115,15 @@ class LedgerEngine:
             else:
                 target_year = date.today().year
 
-            start_date_str = f"{target_year - 1}-12-20"
-            all_target_dates = existing_dates | {date.today()}
+            # Override with manual date_range if provided
+            if date_range:
+                dr_start, dr_end = date_range
+                target_year = dr_start.year
+                all_target_dates = {dr_start, dr_end, date.today()}
+                start_date_str = f"{dr_start.year - 1}-12-20"
+            else:
+                start_date_str = f"{target_year - 1}-12-20"
+                all_target_dates = existing_dates | {date.today()}
 
             _status("Fetching exchange rates from BOT API...")
             (
@@ -1175,9 +1183,12 @@ class LedgerEngine:
         _status(f"Fetching rates for {', '.join(currencies)}...")
 
         # Fetch from API for each currency
-        target_year = date.today().year
-        start_dt = date(target_year - 1, 12, 20)
-        end_dt = date.today()
+        if date_range:
+            start_dt, end_dt = date_range
+        else:
+            target_year = date.today().year
+            start_dt = date(target_year - 1, 12, 20)
+            end_dt = date.today()
 
         # rate_data[currency][api_field][date] = value
         rate_data: Dict[str, Dict[str, Dict[date, float]]] = {}

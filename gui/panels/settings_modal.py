@@ -30,8 +30,9 @@ _RELEASES_URL = (
     "https://api.github.com/repos/Dry1ceD7/BOT-Exchange-Rates/releases"
 )
 _BOT_API_PING = (
-    "https://gateway.api.bot.or.th/bot/public/Stat-ExchangeRate/v2/"
-    "DAILY_AVG_EXG_RATE/?start_period=2025-01-01&end_period=2025-01-02&currency=USD"
+    "https://gateway.api.bot.or.th"
+    "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
+    "?start_period=2025-01-01&end_period=2025-01-02&currency=USD"
 )
 
 
@@ -201,6 +202,10 @@ class SettingsModal(ctk.CTkToplevel):
 
     def _on_appearance_change(self, value: str):
         ctk.set_appearance_mode(value)
+        # Immediately apply theme to the parent app window
+        parent = self.master
+        if hasattr(parent, '_apply_theme'):
+            parent._apply_theme()
 
     def _on_manage_keys(self):
         from core.paths import get_project_root
@@ -231,7 +236,8 @@ class SettingsModal(ctk.CTkToplevel):
                 if token:
                     headers["X-IBM-Client-Id"] = token
                 resp = httpx.get(_BOT_API_PING, headers=headers, timeout=8.0)
-                if resp.status_code == 200:
+                if resp.status_code in (200, 401):
+                    # 200 = authenticated OK, 401 = server reachable but needs token
                     self.after(0, self._ping_done,
                                f"✓ BOT API reachable (HTTP {resp.status_code})",
                                COLOR_MODAL_SUCCESS)

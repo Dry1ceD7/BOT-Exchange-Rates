@@ -657,30 +657,39 @@ class BOTExrateApp(ctk.CTk):
                 text=f"Scanning {total} ledger{'s' if total != 1 else ''} for date range...",
                 text_color=COLOR_PROCESS_TEXT
             )
-            self.update_idletasks()
+            # Run prescan in background thread to prevent UI freeze
+            def _prescan_and_batch():
+                from core.engine import LedgerEngine
+                oldest_date, was_detected = LedgerEngine.prescan_oldest_date(self.file_queue)
+                start_date_str = oldest_date.strftime("%Y-%m-%d")
 
-            from core.engine import LedgerEngine
-            oldest_date, was_detected = LedgerEngine.prescan_oldest_date(self.file_queue)
-            start_date_str = oldest_date.strftime("%Y-%m-%d")
+                def _update_ui_and_start():
+                    if was_detected:
+                        self.lbl_auto_hint.configure(
+                            text=f"Detected: {oldest_date.strftime('%d %b %Y')} → {date.today().strftime('%d %b %Y')}",
+                            text_color=COLOR_SUCCESS
+                        )
+                        self.lbl_status.configure(
+                            text=(
+                                f"Connecting to BOT API...  range: "
+                                f"{oldest_date.strftime('%d %b %Y')} → today  (0 of {total})"
+                            ),
+                            text_color=COLOR_PROCESS_TEXT
+                        )
+                    else:
+                        self.lbl_auto_hint.configure(
+                            text=f"No dates found — using fallback: {oldest_date.strftime('%d %b %Y')}",
+                            text_color=COLOR_WARNING
+                        )
+                        self.lbl_status.configure(
+                            text=f"Connecting to BOT API...  fallback range  (0 of {total})",
+                            text_color=COLOR_WARNING
+                        )
+                    self.batch_handler.start_batch(self.file_queue, start_date_str)
 
-            if was_detected:
-                self.lbl_auto_hint.configure(
-                    text=f"Detected: {oldest_date.strftime('%d %b %Y')} → {date.today().strftime('%d %b %Y')}",
-                    text_color=COLOR_SUCCESS
-                )
-                self.lbl_status.configure(
-                    text=f"Connecting to BOT API...  range: {oldest_date.strftime('%d %b %Y')} → today  (0 of {total})",
-                    text_color=COLOR_PROCESS_TEXT
-                )
-            else:
-                self.lbl_auto_hint.configure(
-                    text=f"No dates found — using fallback: {oldest_date.strftime('%d %b %Y')}",
-                    text_color=COLOR_WARNING
-                )
-                self.lbl_status.configure(
-                    text=f"Connecting to BOT API...  fallback range  (0 of {total})",
-                    text_color=COLOR_WARNING
-                )
+                self.after(0, _update_ui_and_start)
+
+            threading.Thread(target=_prescan_and_batch, daemon=True).start()
         else:
             # ── Manual mode ──────────────────────────────────────────
             start_date_str = self._assemble_start_date()
@@ -692,8 +701,7 @@ class BOTExrateApp(ctk.CTk):
                 text=f"Connecting to BOT API...  (0 of {total})",
                 text_color=COLOR_PROCESS_TEXT
             )
-
-        self.batch_handler.start_batch(self.file_queue, start_date_str)
+            self.batch_handler.start_batch(self.file_queue, start_date_str)
 
     def _update_progress(self, idx: int, total: int, fname: str, error):
         self.progressbar.set(idx / total)
@@ -753,7 +761,7 @@ class BOTExrateApp(ctk.CTk):
         """Show an options dialog for creating a new ExRate sheet."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Create ExRate File")
-        dialog.geometry("440x520")
+        dialog.geometry("440x680")
         dialog.resizable(False, False)
         dialog.configure(fg_color="#1E293B")
         dialog.transient(self)
@@ -761,8 +769,8 @@ class BOTExrateApp(ctk.CTk):
 
         dialog.update_idletasks()
         sx = (dialog.winfo_screenwidth() - 440) // 2
-        sy = (dialog.winfo_screenheight() - 520) // 2
-        dialog.geometry(f"440x520+{sx}+{sy}")
+        sy = (dialog.winfo_screenheight() - 680) // 2
+        dialog.geometry(f"440x680+{sx}+{sy}")
 
         ctk.CTkLabel(
             dialog, text="ExRate Sheet Options",
@@ -822,6 +830,96 @@ class BOTExrateApp(ctk.CTk):
                 width=180,
             ).pack(side="left", padx=4, pady=2)
 
+        # ── Date Range ─────────────────────────────────────────────
+        ctk.CTkLabel(
+            dialog, text="Date Range",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="#94A3B8",
+        ).pack(anchor="w", padx=24, pady=(0, 4))
+
+        date_range_frame = ctk.CTkFrame(dialog, fg_color="#0F172A", corner_radius=8)
+        date_range_frame.pack(fill="x", padx=24, pady=(0, 16))
+
+        # Auto/Manual toggle
+        date_mode_var = ctk.StringVar(value="auto")
+        today = date.today()
+
+        auto_label = ctk.CTkLabel(
+            date_range_frame,
+            text=f"  Auto: {today.year}-01-01 → {today.strftime('%Y-%m-%d')}",
+            font=ctk.CTkFont(size=12),
+            text_color="#94A3B8",
+        )
+
+        ctk.CTkSwitch(
+            date_range_frame,
+            text="  Select dates manually",
+            variable=date_mode_var,
+            onvalue="manual", offvalue="auto",
+            font=ctk.CTkFont(size=13),
+            text_color="#F1F5F9",
+            progress_color="#6366F1",
+            command=lambda: _toggle_date_mode(),
+        ).pack(anchor="w", padx=12, pady=(8, 0))
+
+        auto_label.pack(anchor="w", padx=12, pady=(2, 8))
+
+        # Manual date inputs (initially hidden)
+        manual_frame = ctk.CTkFrame(date_range_frame, fg_color="transparent")
+        years = [str(y) for y in range(today.year - 5, today.year + 2)]
+        months = [f"{m:02d}" for m in range(1, 13)]
+        days = [f"{d:02d}" for d in range(1, 32)]
+
+        # Start date row
+        start_row = ctk.CTkFrame(manual_frame, fg_color="transparent")
+        start_row.pack(fill="x", padx=8, pady=2)
+        ctk.CTkLabel(start_row, text="Start:", font=ctk.CTkFont(size=12),
+                     text_color="#94A3B8", width=40).pack(side="left")
+        start_year = ctk.CTkComboBox(start_row, values=years, width=80,
+                                     font=ctk.CTkFont(size=12),
+                                     fg_color="#1E293B", border_color="#475569")
+        start_year.set(str(today.year))
+        start_year.pack(side="left", padx=2)
+        start_month = ctk.CTkComboBox(start_row, values=months, width=60,
+                                      font=ctk.CTkFont(size=12),
+                                      fg_color="#1E293B", border_color="#475569")
+        start_month.set("01")
+        start_month.pack(side="left", padx=2)
+        start_day = ctk.CTkComboBox(start_row, values=days, width=60,
+                                    font=ctk.CTkFont(size=12),
+                                    fg_color="#1E293B", border_color="#475569")
+        start_day.set("01")
+        start_day.pack(side="left", padx=2)
+
+        # End date row
+        end_row = ctk.CTkFrame(manual_frame, fg_color="transparent")
+        end_row.pack(fill="x", padx=8, pady=2)
+        ctk.CTkLabel(end_row, text="End:", font=ctk.CTkFont(size=12),
+                     text_color="#94A3B8", width=40).pack(side="left")
+        end_year = ctk.CTkComboBox(end_row, values=years, width=80,
+                                   font=ctk.CTkFont(size=12),
+                                   fg_color="#1E293B", border_color="#475569")
+        end_year.set(str(today.year))
+        end_year.pack(side="left", padx=2)
+        end_month = ctk.CTkComboBox(end_row, values=months, width=60,
+                                    font=ctk.CTkFont(size=12),
+                                    fg_color="#1E293B", border_color="#475569")
+        end_month.set(f"{today.month:02d}")
+        end_month.pack(side="left", padx=2)
+        end_day = ctk.CTkComboBox(end_row, values=days, width=60,
+                                  font=ctk.CTkFont(size=12),
+                                  fg_color="#1E293B", border_color="#475569")
+        end_day.set(f"{today.day:02d}")
+        end_day.pack(side="left", padx=2)
+
+        def _toggle_date_mode():
+            if date_mode_var.get() == "manual":
+                auto_label.pack_forget()
+                manual_frame.pack(fill="x", pady=(0, 8))
+            else:
+                manual_frame.pack_forget()
+                auto_label.pack(anchor="w", padx=12, pady=(2, 8))
+
         # ── Create Button ─────────────────────────────────────────
         def _on_create():
             # Collect selections
@@ -844,8 +942,27 @@ class BOTExrateApp(ctk.CTk):
                     font=ctk.CTkFont(size=12),
                 ).pack(pady=(0, 4))
                 return
+
+            # Get date range
+            if date_mode_var.get() == "manual":
+                try:
+                    s_date = date(int(start_year.get()), int(start_month.get()),
+                                  int(start_day.get()))
+                    e_date = date(int(end_year.get()), int(end_month.get()),
+                                  int(end_day.get()))
+                except ValueError:
+                    ctk.CTkLabel(
+                        dialog, text="Invalid date entered",
+                        text_color="#EF4444",
+                        font=ctk.CTkFont(size=12),
+                    ).pack(pady=(0, 4))
+                    return
+                date_range = (s_date, e_date)
+            else:
+                date_range = None  # auto = current year
+
             dialog.destroy()
-            self._create_exrate_file(currencies, rate_types)
+            self._create_exrate_file(currencies, rate_types, date_range=date_range)
 
         ctk.CTkButton(
             dialog, text="Create ExRate File",
@@ -855,7 +972,7 @@ class BOTExrateApp(ctk.CTk):
             command=_on_create,
         ).pack(padx=24, fill="x", pady=(0, 12))
 
-    def _create_exrate_file(self, currencies, rate_types):
+    def _create_exrate_file(self, currencies, rate_types, date_range=None):
         """Create a new standalone ExRate file — fully independent, pulls from BOT API."""
         dest = filedialog.asksaveasfilename(
             title="Save ExRate File",
@@ -924,6 +1041,7 @@ class BOTExrateApp(ctk.CTk):
                             progress_cb=_status_cb,
                             currencies=currencies,
                             rate_types=rate_types,
+                            date_range=date_range,
                         )
 
                 loop = asyncio.new_event_loop()
