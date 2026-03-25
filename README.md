@@ -20,17 +20,19 @@ The **BOT Exchange Rate Processor** is a standalone desktop application that aut
 
 It replaces a fragmented, error-prone multi-script workflow with a single, production-grade GUI application — built for **zero-downtime corporate environments**, legacy office hardware (4GB RAM, low-resolution monitors), and strict Thai accounting compliance.
 
-### What's New in V3.0 (up to v3.0.20)
+### What's New in V3.0 (up to v3.0.43)
 
 | Feature | Description |
 |---------|-------------|
-| **True Dark & Light Themes** | Dynamic recoloring of all UI elements with 28 customized color tokens for a premium aesthetic |
+| **True Dark & Light Themes** | Dynamic adaptive UI with instantaneous switching based on OS preferences |
+| **DD/MM/YYYY Native** | Smart date parser automatically prioritizes and enforces standard DD/MM/YYYY formats |
 | **High-Speed Concurrent API** | Uses `asyncio.gather` for parallel USD & EUR fetching with 0.3s-0.8s micro-cooldowns (~3-5x faster) |
+| **Skip-If-Correct Optimizer** | Batch engine skips rows with existing IFS formulas, radically accelerating differential runs |
 | **In-Place File Processing** | Modifies files directly with hidden background backups for zero duplication |
 | **Instant One-Click Revert** | "Revert Previous Edit" button instantly unwinds the last file change using the backup manager |
 | **100% Formatting Preservation** | Pure Python `.xls` fallback fully preserves all fonts, cell sizes, background colors, and borders |
 | **Auto-Detect Date Range** | Opt-in toggle to automatically parse the oldest required dates directly from dropped ledgers |
-| **In-App Auto-Updater** | Built-in GitHub Releases updater with progress bar and automatic installer launching |
+| **In-App Auto-Updater** | Built-in GitHub Releases updater with background download and deferred installer launching |
 | **Native App Icon & UI Polishing** | Crisp multi-resolution `.ico`/`.icns` embedded deeply into the OS taskbar and app windows |
 
 ---
@@ -86,7 +88,7 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 - **Decimal Precision** — All rates written as `Decimal` values quantized to 4 decimal places (Thai accounting standard).
 - **Smart Date Pre-Scanner** — Scans all queued Excel files to find the oldest date, then fetches only the necessary API range.
 
-### Desktop Application (V3.0.20)
+### Desktop Application (V3.0.43)
 - **API Token Registration Dialog** — License-key-style popup on first launch to enter BOT API keys.
 - **Dynamic Themes** — True Light and Dark modes (`get_theme` engine deeply coloring all CTk panels).
 - **Live Processing Console** — EventBus-driven, read-only terminal log with color-coded status messages.
@@ -187,7 +189,7 @@ The project includes a fully automated release pipeline (`.github/workflows/v3-r
 
 ```bash
 # To trigger a release:
-git tag v3.0.20
+git tag v3.0.43
 git push origin main --tags
 ```
 
@@ -219,6 +221,6 @@ This project is developed for internal enterprise use. All rights reserved.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.0.20*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.0.43*
 
 </div>
