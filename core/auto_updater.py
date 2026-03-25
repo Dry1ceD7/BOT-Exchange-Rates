@@ -256,31 +256,35 @@ def apply_update(new_exe_path: str) -> dict:
 
     try:
         if "setup" in filename:
-            # Inno Setup installer — run silently
-            logger.info("Running silent installer: %s → %s", new_exe_path, app_dir)
-            proc = subprocess.run(
-                [
-                    new_exe_path,
-                    "/VERYSILENT",
-                    "/SUPPRESSMSGBOXES",
-                    "/NORESTART",
-                    f"/DIR={app_dir}",
-                ],
-                timeout=120,
-                capture_output=True,
-            )
-            if proc.returncode == 0:
-                result["success"] = True
-                logger.info("Silent install completed successfully")
-                # Clean up the installer file
-                try:
-                    os.remove(new_exe_path)
-                except OSError:
-                    pass
-            else:
-                result["error"] = (
-                    f"Installer exited with code {proc.returncode}"
+            # Inno Setup installer — run via detached batch script
+            # This allows the Python process to exit fully before the installer runs,
+            # preventing "Code 5: Access Denied" file lock errors.
+            logger.info("Preparing detached installer script...")
+            import tempfile
+
+            bat_path = os.path.join(tempfile.gettempdir(), "bot_exrate_updater.bat")
+            with open(bat_path, "w") as f:
+                f.write("@echo off\n")
+                f.write("timeout /t 2 /nobreak > NUL\n")  # Wait 2s for app to exit
+                f.write(f'"{new_exe_path}" /VERYSILENT /SUPPRESSMSGBOXES /DIR="{app_dir}"\n')
+                f.write(f'start "" "{current_exe}"\n')     # Relaunch the app
+                f.write('del "%~f0"\n')                   # Self-delete batch file
+
+            if sys.platform == "win32":
+                flags = 0x00000008  # DETACHED_PROCESS
+                subprocess.Popen(
+                    ["cmd.exe", "/c", bat_path],
+                    creationflags=flags,
+                    close_fds=True,
                 )
+            else:
+                subprocess.Popen(
+                    ["sh", "-c", f"sleep 2 && '{new_exe_path}' /VERYSILENT /DIR='{app_dir}' && open '{current_exe}'"],
+                    start_new_session=True,
+                )
+
+            result["success"] = True
+            logger.info("Detached updater script launched successfully")
         else:
             # Portable exe — atomic swap
             backup_path = current_exe + ".bak"

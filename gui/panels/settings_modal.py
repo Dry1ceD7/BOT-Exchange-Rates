@@ -518,6 +518,8 @@ class SettingsModal(ctk.CTkToplevel):
 
     def _do_restart(self):
         """Apply pending installer (if any) then restart via main app."""
+        import sys
+
         from core.auto_updater import apply_update
 
         parent = self.master
@@ -540,9 +542,12 @@ class SettingsModal(ctk.CTkToplevel):
                     parent.after(0, parent._show_download_error,
                                  f"Install failed: {result.get('error')}")
                 return
+            # If installer launched successfully, exit this app immediately
+            # so the installer can overwrite the executable.
+            parent.destroy()
+            sys.exit(0)
 
-        # Route through main app's _restart_app which does
-        # DETACHED_PROCESS launch and clean exit
+        # Normal restart (no installer)
         if hasattr(parent, '_restart_app'):
             parent._restart_app()
         else:

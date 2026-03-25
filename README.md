@@ -4,7 +4,7 @@
 
 **Enterprise Desktop Application for Bank of Thailand Exchange Rate Automation**
 
-Version 3.0.43  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
+Version 3.0.44  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
@@ -20,7 +20,7 @@ The **BOT Exchange Rate Processor** is a standalone desktop application that aut
 
 It replaces a fragmented, error-prone multi-script workflow with a single, production-grade GUI application — built for **zero-downtime corporate environments**, legacy office hardware (4GB RAM, low-resolution monitors), and strict Thai accounting compliance.
 
-### What's New in V3.0 (up to v3.0.43)
+### What's New in V3.0 (up to v3.0.44)
 
 | Feature | Description |
 |---------|-------------|
@@ -88,7 +88,7 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 - **Decimal Precision** — All rates written as `Decimal` values quantized to 4 decimal places (Thai accounting standard).
 - **Smart Date Pre-Scanner** — Scans all queued Excel files to find the oldest date, then fetches only the necessary API range.
 
-### Desktop Application (V3.0.43)
+### Desktop Application (V3.0.44)
 - **API Token Registration Dialog** — License-key-style popup on first launch to enter BOT API keys.
 - **Dynamic Themes** — True Light and Dark modes (`get_theme` engine deeply coloring all CTk panels).
 - **Live Processing Console** — EventBus-driven, read-only terminal log with color-coded status messages.
@@ -189,7 +189,7 @@ The project includes a fully automated release pipeline (`.github/workflows/v3-r
 
 ```bash
 # To trigger a release:
-git tag v3.0.43
+git tag v3.0.44
 git push origin main --tags
 ```
 
@@ -221,6 +221,6 @@ This project is developed for internal enterprise use. All rights reserved.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.0.43*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.0.44*
 
 </div>
