@@ -759,11 +759,13 @@ class BOTExrateApp(ctk.CTk):
 
     def _on_export_exrate(self):
         """Show an options dialog for creating a new ExRate sheet."""
+        t = get_theme()  # read current palette
+
         dialog = ctk.CTkToplevel(self)
         dialog.title("Create ExRate File")
         dialog.geometry("440x680")
         dialog.resizable(False, False)
-        dialog.configure(fg_color="#1E293B")
+        dialog.configure(fg_color=t["card_bg"])
         dialog.transient(self)
         dialog.grab_set()
 
@@ -775,17 +777,19 @@ class BOTExrateApp(ctk.CTk):
         ctk.CTkLabel(
             dialog, text="ExRate Sheet Options",
             font=ctk.CTkFont(size=18, weight="bold"),
-            text_color="#F1F5F9",
+            text_color=t["text_primary"],
         ).pack(pady=(16, 12))
 
         # ── Currencies ────────────────────────────────────────────
         ctk.CTkLabel(
             dialog, text="Currencies",
             font=ctk.CTkFont(size=14, weight="bold"),
-            text_color="#94A3B8",
+            text_color=t["text_secondary"],
         ).pack(anchor="w", padx=24, pady=(0, 4))
 
-        cur_frame = ctk.CTkFrame(dialog, fg_color="#0F172A", corner_radius=8)
+        cur_frame = ctk.CTkFrame(
+            dialog, fg_color=t["section_bg"], corner_radius=8,
+        )
         cur_frame.pack(fill="x", padx=24, pady=(0, 12))
 
         cur_vars = {}
@@ -800,6 +804,7 @@ class BOTExrateApp(ctk.CTk):
             ctk.CTkCheckBox(
                 row_frame, text=ccy, variable=var,
                 font=ctk.CTkFont(size=13),
+                text_color=t["text_primary"],
                 fg_color="#6366F1", hover_color="#4F46E5",
                 width=120,
             ).pack(side="left", padx=4, pady=2)
@@ -808,10 +813,12 @@ class BOTExrateApp(ctk.CTk):
         ctk.CTkLabel(
             dialog, text="Rate Types",
             font=ctk.CTkFont(size=14, weight="bold"),
-            text_color="#94A3B8",
+            text_color=t["text_secondary"],
         ).pack(anchor="w", padx=24, pady=(0, 4))
 
-        rate_frame = ctk.CTkFrame(dialog, fg_color="#0F172A", corner_radius=8)
+        rate_frame = ctk.CTkFrame(
+            dialog, fg_color=t["section_bg"], corner_radius=8,
+        )
         rate_frame.pack(fill="x", padx=24, pady=(0, 16))
 
         rate_vars = {}
@@ -826,6 +833,7 @@ class BOTExrateApp(ctk.CTk):
             ctk.CTkCheckBox(
                 row_frame2, text=label, variable=var,
                 font=ctk.CTkFont(size=13),
+                text_color=t["text_primary"],
                 fg_color="#6366F1", hover_color="#4F46E5",
                 width=180,
             ).pack(side="left", padx=4, pady=2)
@@ -834,10 +842,12 @@ class BOTExrateApp(ctk.CTk):
         ctk.CTkLabel(
             dialog, text="Date Range",
             font=ctk.CTkFont(size=14, weight="bold"),
-            text_color="#94A3B8",
+            text_color=t["text_secondary"],
         ).pack(anchor="w", padx=24, pady=(0, 4))
 
-        date_range_frame = ctk.CTkFrame(dialog, fg_color="#0F172A", corner_radius=8)
+        date_range_frame = ctk.CTkFrame(
+            dialog, fg_color=t["section_bg"], corner_radius=8,
+        )
         date_range_frame.pack(fill="x", padx=24, pady=(0, 16))
 
         # Auto/Manual toggle
@@ -848,7 +858,7 @@ class BOTExrateApp(ctk.CTk):
             date_range_frame,
             text=f"  Auto: {today.year}-01-01 → {today.strftime('%Y-%m-%d')}",
             font=ctk.CTkFont(size=12),
-            text_color="#94A3B8",
+            text_color=t["text_secondary"],
         )
 
         ctk.CTkSwitch(
@@ -857,7 +867,7 @@ class BOTExrateApp(ctk.CTk):
             variable=date_mode_var,
             onvalue="manual", offvalue="auto",
             font=ctk.CTkFont(size=13),
-            text_color="#F1F5F9",
+            text_color=t["text_primary"],
             progress_color="#6366F1",
             command=lambda: _toggle_date_mode(),
         ).pack(anchor="w", padx=12, pady=(8, 0))
@@ -874,20 +884,29 @@ class BOTExrateApp(ctk.CTk):
         start_row = ctk.CTkFrame(manual_frame, fg_color="transparent")
         start_row.pack(fill="x", padx=8, pady=2)
         ctk.CTkLabel(start_row, text="Start:", font=ctk.CTkFont(size=12),
-                     text_color="#94A3B8", width=40).pack(side="left")
-        start_year = ctk.CTkComboBox(start_row, values=years, width=80,
-                                     font=ctk.CTkFont(size=12),
-                                     fg_color="#1E293B", border_color="#475569")
+                     text_color=t["text_secondary"], width=40).pack(side="left")
+        start_year = ctk.CTkComboBox(
+            start_row, values=years, width=80,
+            font=ctk.CTkFont(size=12),
+            fg_color=t["combo_bg"], border_color=t["combo_border"],
+            text_color=t["text_primary"],
+        )
         start_year.set(str(today.year))
         start_year.pack(side="left", padx=2)
-        start_month = ctk.CTkComboBox(start_row, values=months, width=60,
-                                      font=ctk.CTkFont(size=12),
-                                      fg_color="#1E293B", border_color="#475569")
+        start_month = ctk.CTkComboBox(
+            start_row, values=months, width=60,
+            font=ctk.CTkFont(size=12),
+            fg_color=t["combo_bg"], border_color=t["combo_border"],
+            text_color=t["text_primary"],
+        )
         start_month.set("01")
         start_month.pack(side="left", padx=2)
-        start_day = ctk.CTkComboBox(start_row, values=days, width=60,
-                                    font=ctk.CTkFont(size=12),
-                                    fg_color="#1E293B", border_color="#475569")
+        start_day = ctk.CTkComboBox(
+            start_row, values=days, width=60,
+            font=ctk.CTkFont(size=12),
+            fg_color=t["combo_bg"], border_color=t["combo_border"],
+            text_color=t["text_primary"],
+        )
         start_day.set("01")
         start_day.pack(side="left", padx=2)
 
@@ -895,20 +914,29 @@ class BOTExrateApp(ctk.CTk):
         end_row = ctk.CTkFrame(manual_frame, fg_color="transparent")
         end_row.pack(fill="x", padx=8, pady=2)
         ctk.CTkLabel(end_row, text="End:", font=ctk.CTkFont(size=12),
-                     text_color="#94A3B8", width=40).pack(side="left")
-        end_year = ctk.CTkComboBox(end_row, values=years, width=80,
-                                   font=ctk.CTkFont(size=12),
-                                   fg_color="#1E293B", border_color="#475569")
+                     text_color=t["text_secondary"], width=40).pack(side="left")
+        end_year = ctk.CTkComboBox(
+            end_row, values=years, width=80,
+            font=ctk.CTkFont(size=12),
+            fg_color=t["combo_bg"], border_color=t["combo_border"],
+            text_color=t["text_primary"],
+        )
         end_year.set(str(today.year))
         end_year.pack(side="left", padx=2)
-        end_month = ctk.CTkComboBox(end_row, values=months, width=60,
-                                    font=ctk.CTkFont(size=12),
-                                    fg_color="#1E293B", border_color="#475569")
+        end_month = ctk.CTkComboBox(
+            end_row, values=months, width=60,
+            font=ctk.CTkFont(size=12),
+            fg_color=t["combo_bg"], border_color=t["combo_border"],
+            text_color=t["text_primary"],
+        )
         end_month.set(f"{today.month:02d}")
         end_month.pack(side="left", padx=2)
-        end_day = ctk.CTkComboBox(end_row, values=days, width=60,
-                                  font=ctk.CTkFont(size=12),
-                                  fg_color="#1E293B", border_color="#475569")
+        end_day = ctk.CTkComboBox(
+            end_row, values=days, width=60,
+            font=ctk.CTkFont(size=12),
+            fg_color=t["combo_bg"], border_color=t["combo_border"],
+            text_color=t["text_primary"],
+        )
         end_day.set(f"{today.day:02d}")
         end_day.pack(side="left", padx=2)
 

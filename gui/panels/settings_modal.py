@@ -237,9 +237,13 @@ class SettingsModal(ctk.CTkToplevel):
         def _ping_worker():
             try:
                 token = os.environ.get("BOT_TOKEN_EXG", "")
-                headers = {"Accept": "application/json"}
+                headers = {"accept": "application/json"}
                 if token:
-                    headers["X-IBM-Client-Id"] = token
+                    # Match the real api_client.py header format:
+                    # both X-IBM-Client-Id AND Authorization: Bearer
+                    clean_token = token.removeprefix("Bearer ").strip()
+                    headers["X-IBM-Client-Id"] = clean_token
+                    headers["Authorization"] = f"Bearer {clean_token}"
                 resp = httpx.get(_BOT_API_PING, headers=headers, timeout=8.0)
                 if resp.status_code == 200:
                     self.after(0, self._ping_done,
