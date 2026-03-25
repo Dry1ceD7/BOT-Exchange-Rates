@@ -71,6 +71,17 @@ jobs:
           uv sync
           uv pip install pyinstaller pillow
 
+      - name: Regenerate HD icon.ico from icon.png
+        shell: bash
+        run: |
+          uv run python -c "
+          from PIL import Image
+          png = Image.open('assets/icon.png').convert('RGBA')
+          sizes = [(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)]
+          png.save('assets/icon.ico', format='ICO', sizes=sizes)
+          print('ICO regenerated with sizes:', sizes)
+          "
+
       - name: Build with PyInstaller
         shell: bash
         run: |

@@ -7,7 +7,7 @@ include = ["core*", "gui*"]
 
 [project]
 name = "bot-exrate"
-version = "3.0.33"
+version = "3.0.34"
 description = "BOT Exchange Rate Processor — Enterprise Desktop Application"
 requires-python = ">=3.12"
 readme = "README.md"
