@@ -298,7 +298,7 @@ def _build_exrate_sheet_com(
 
     # Date column formatting
     date_col_range = ws.Range(ws.Cells(2, 1), ws.Cells(num_rows + 1, 1))
-    date_col_range.NumberFormat = "DD MMM YYYY"
+    date_col_range.NumberFormat = "DD/MM/YYYY"
     date_col_range.HorizontalAlignment = -4108  # xlCenter
 
     # Rate columns number format (columns B-E)

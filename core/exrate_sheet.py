@@ -204,7 +204,7 @@ def _write_merged_data(ws, merged, holidays_set, thin_border, start_row):
         is_holiday = d in holidays_set
 
         cell_date = ws.cell(row=current_row, column=1, value=d)
-        cell_date.number_format = "DD MMM YYYY"
+        cell_date.number_format = "DD/MM/YYYY"
         cell_date.font = data_font
         cell_date.alignment = date_align
         cell_date.border = thin_border

@@ -825,7 +825,7 @@ class LedgerEngine:
                     # object so Excel stores it as a date serial number.
                     if isinstance(src_cell.value, str):
                         src_cell.value = inv_date
-                        src_cell.number_format = "DD MMM YYYY"
+                        src_cell.number_format = "DD/MM/YYYY"
 
                     # Cell references for this row
                     date_ref = f"{date_letter}{row_idx}"
@@ -860,14 +860,14 @@ class LedgerEngine:
                     self._zero_touch_write(ws, row_idx, out_col, formula)
 
                 # ── Pre-format Date column for manual entry ───────────
-                # Apply "DD MMM YYYY" to the entire Date column including
+                # Apply "DD/MM/YYYY" to the entire Date column including
                 # blank rows below data, so dates typed manually by the
                 # user will automatically display in the correct format.
                 max_preformat = max(ws.max_row + 500, 1000)
                 for r in range(mapping["header_row"] + 1, max_preformat + 1):
                     cell = ws.cell(row=r, column=src_idx)
                     if not isinstance(cell, MergedCell):
-                        cell.number_format = "DD MMM YYYY"
+                        cell.number_format = "DD/MM/YYYY"
 
             # ── Save & Cleanup ───────────────────────────────────────────
             if converted:
