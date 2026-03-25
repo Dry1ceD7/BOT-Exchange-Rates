@@ -167,8 +167,9 @@ class LedgerEngine:
             if not val or val.lower() in ("nan", "null"):
                 return None
             formats = [
-                "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y",
+                "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d",
                 "%d %b %Y", "%d %B %Y", "%Y%m%d",
+                "%m/%d/%Y", "%m-%d-%Y",
             ]
             for fmt in formats:
                 try:
@@ -862,7 +863,7 @@ class LedgerEngine:
                     # Skip if already a proper date/datetime.
                     if isinstance(src_cell.value, str):
                         src_cell.value = inv_date
-                        src_cell.number_format = "DD MMM YYYY"
+                        src_cell.number_format = "DD/MM/YYYY"
 
                     # ── Skip-if-correct: don't rewrite formulas ───
                     # If the EX Rate cell already has an IFS formula,
@@ -912,12 +913,12 @@ class LedgerEngine:
                     )
 
                 # ── Pre-format Date column for manual entry ───────────
-                # Apply "DD MMM YYYY" to a small buffer zone below data
+                # Apply "DD/MM/YYYY" to a small buffer zone below data
                 max_preformat = ws.max_row + 50
                 for r in range(mapping["header_row"] + 1, max_preformat + 1):
                     cell = ws.cell(row=r, column=src_idx)
                     if not isinstance(cell, MergedCell):
-                        cell.number_format = "DD MMM YYYY"
+                        cell.number_format = "DD/MM/YYYY"
 
             # ── Save & Cleanup ───────────────────────────────────────────
             if converted:

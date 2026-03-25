@@ -196,13 +196,16 @@ class SettingsModal(ctk.CTkToplevel):
         self._btn_dl_version.pack(side="right")
 
         # ── Save & Close ─────────────────────────────────────────────
-        ctk.CTkButton(
+        # Packed LAST so it stays at the very bottom of the modal.
+        # The version_frame is shown/hidden dynamically above this.
+        self._btn_save_close = ctk.CTkButton(
             self, text="Save and Close",
             fg_color=COLOR_MODAL_SUCCESS,
             font=ctk.CTkFont(size=14, weight="bold"),
             corner_radius=8, height=42,
             command=self._save_and_close,
-        ).pack(padx=30, fill="x", pady=(12, 20))
+        )
+        self._btn_save_close.pack(padx=30, fill="x", pady=(12, 20), side="bottom")
 
     def _on_appearance_change(self, value: str):
         ctk.set_appearance_mode(value)
@@ -401,9 +404,8 @@ class SettingsModal(ctk.CTkToplevel):
     # ================================================================== #
 
     def _download_in_app(self, version: str):
-        """Download and apply the update to the server path."""
+        """Download the update installer (does NOT run it yet)."""
         from core.auto_updater import (
-            apply_update,
             download_update,
             get_installer_asset_url,
         )
@@ -441,25 +443,25 @@ class SettingsModal(ctk.CTkToplevel):
                                "#F87171", False)
                     return
 
-                apply_result = apply_update(result["path"])
-                if apply_result.get("success"):
-                    self.after(0, self._dl_done,
-                               "✅ Update installed — restart to apply",
-                               COLOR_MODAL_SUCCESS, True)
-                else:
-                    self.after(0, self._dl_done,
-                               f"Failed: {apply_result.get('error', '?')}",
-                               "#F87171", False)
+                # Don't run the installer yet — just save the path.
+                # The installer will run when user clicks "Restart Now".
+                installer_path = result.get("path", "")
+                self.after(0, self._dl_done,
+                           "✅ Downloaded — restart to install",
+                           COLOR_MODAL_SUCCESS, True, installer_path)
             except Exception as e:
                 self.after(0, self._dl_done, f"Error: {e}", "#F87171", False)
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _dl_done(self, text: str, color: str, success: bool):
+    def _dl_done(self, text: str, color: str, success: bool,
+                 installer_path: str = None):
         self._lbl_update.configure(text=text, text_color=color)
         if success:
             self._btn_update.configure(state="disabled", text="Updated ✓")
             self._btn_dl_version.configure(state="disabled")
+            # Save installer path for deferred execution
+            self._pending_installer = installer_path
             # Show restart confirmation dialog
             self._show_restart_dialog()
         else:
@@ -515,14 +517,30 @@ class SettingsModal(ctk.CTkToplevel):
         ).pack(side="right")
 
     def _do_restart(self):
-        """Restart through the main app's proper restart flow."""
+        """Apply pending installer (if any) then restart via main app."""
+        from core.auto_updater import apply_update
+
         parent = self.master
-        # Close the settings modal and restart dialog first
+        installer = getattr(self, "_pending_installer", None)
+
+        # Close the settings modal first
         try:
             self.grab_release()
         except Exception:
             pass
         self.destroy()
+
+        # Run the installer silently if we have a downloaded file
+        if installer and os.path.isfile(installer):
+            result = apply_update(installer)
+            if not result.get("success"):
+                logger.error("Installer failed: %s", result.get("error"))
+                # Still try to restart — user might need to update manually
+                if hasattr(parent, '_show_download_error'):
+                    parent.after(0, parent._show_download_error,
+                                 f"Install failed: {result.get('error')}")
+                return
+
         # Route through main app's _restart_app which does
         # DETACHED_PROCESS launch and clean exit
         if hasattr(parent, '_restart_app'):
