@@ -845,6 +845,8 @@ class LedgerEngine:
                 cur_letter = get_column_letter(cur_col)
                 N = exrate_last_row  # last data row in ExRate
 
+                skipped = 0
+                written = 0
                 for row_idx in range(
                     mapping["header_row"] + 1, ws.max_row + 1
                 ):
@@ -856,26 +858,29 @@ class LedgerEngine:
                         continue
 
                     # ── Date Normalization ─────────────────────────
-                    # If the cell contains a text string (not a proper
-                    # date/datetime), replace it with the parsed date
-                    # object so Excel stores it as a date serial number.
+                    # Only normalize text strings to date objects.
+                    # Skip if already a proper date/datetime.
                     if isinstance(src_cell.value, str):
                         src_cell.value = inv_date
                         src_cell.number_format = "DD MMM YYYY"
+
+                    # ── Skip-if-correct: don't rewrite formulas ───
+                    # If the EX Rate cell already has an IFS formula,
+                    # the data is already correct — skip this row.
+                    existing_val = ws.cell(
+                        row=row_idx, column=out_col,
+                    ).value
+                    if (
+                        isinstance(existing_val, str)
+                        and existing_val.startswith("=_xlfn.IFS(")
+                    ):
+                        skipped += 1
+                        continue
 
                     # Cell references for this row
                     date_ref = f"{date_letter}{row_idx}"
                     cur_ref = f"{cur_letter}{row_idx}"
 
-                    # IFS formula that checks Cur column dynamically:
-                    #   THB → 1
-                    #   USD → XLOOKUP(exact) with VLOOKUP(exact) fallback
-                    #   EUR → XLOOKUP(exact) with VLOOKUP(exact) fallback
-                    #   else → ""
-                    #
-                    # Uses _xlfn.IFS and _xlfn.XLOOKUP for Excel compat.
-                    # XLOOKUP match_mode 0 = exact match
-                    # VLOOKUP FALSE = exact match
                     formula = (
                         f"=_xlfn.IFS("
                         f"{cur_ref}=\"THB\",1,"
@@ -894,12 +899,21 @@ class LedgerEngine:
                         f"TRUE,\"\")"
                     )
                     self._zero_touch_write(ws, row_idx, out_col, formula)
+                    written += 1
+
+                if skipped:
+                    logger.info(
+                        "Sheet '%s': %d rows skipped (already correct), "
+                        "%d rows updated",
+                        sheet_name, skipped, written,
+                    )
+                    self._emit(
+                        f"{sheet_name}: {skipped} skipped, {written} updated"
+                    )
 
                 # ── Pre-format Date column for manual entry ───────────
-                # Apply "DD MMM YYYY" to the entire Date column including
-                # blank rows below data, so dates typed manually by the
-                # user will automatically display in the correct format.
-                max_preformat = max(ws.max_row + 500, 1000)
+                # Apply "DD MMM YYYY" to a small buffer zone below data
+                max_preformat = ws.max_row + 50
                 for r in range(mapping["header_row"] + 1, max_preformat + 1):
                     cell = ws.cell(row=r, column=src_idx)
                     if not isinstance(cell, MergedCell):

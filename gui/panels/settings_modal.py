@@ -20,10 +20,11 @@ from core.config_manager import SettingsManager
 
 logger = logging.getLogger(__name__)
 
-COLOR_MODAL_BG = "#1E293B"
-COLOR_MODAL_TEXT = "#F1F5F9"
+COLOR_MODAL_BG = ("#F5F7FA", "#1E293B")      # (light, dark)
+COLOR_MODAL_TEXT = ("#1A202C", "#F1F5F9")
 COLOR_MODAL_ACCENT = "#3B82F6"
 COLOR_MODAL_SUCCESS = "#22C55E"
+COLOR_MODAL_MUTED = ("#4A5568", "#94A3B8")
 
 # GitHub API endpoints
 _RELEASES_URL = (
@@ -78,7 +79,7 @@ class SettingsModal(ctk.CTkToplevel):
         ctk.CTkLabel(
             self, text="APPEARANCE",
             font=ctk.CTkFont(size=11, weight="bold"),
-            text_color="#94A3B8",
+            text_color=COLOR_MODAL_MUTED,
         ).pack(anchor="w", padx=30)
 
         self._appearance_var = ctk.StringVar(
@@ -160,7 +161,7 @@ class SettingsModal(ctk.CTkToplevel):
 
         self._lbl_versions = ctk.CTkLabel(
             self, text="", font=ctk.CTkFont(size=11),
-            text_color="#94A3B8",
+            text_color=COLOR_MODAL_MUTED,
         )
         self._lbl_versions.pack(pady=(0, 4))
 
@@ -172,10 +173,13 @@ class SettingsModal(ctk.CTkToplevel):
             variable=self._selected_version,
             values=["Loading..."],
             font=ctk.CTkFont(size=12),
-            fg_color="#334155", button_color="#475569",
-            button_hover_color="#64748B",
-            dropdown_fg_color="#1E293B",
-            dropdown_hover_color="#334155",
+            fg_color=("#E2E8F0", "#334155"),
+            button_color=("#CBD5E1", "#475569"),
+            button_hover_color=("#94A3B8", "#64748B"),
+            text_color=("#1A202C", "#F1F5F9"),
+            dropdown_fg_color=("#FFFFFF", "#1E293B"),
+            dropdown_hover_color=("#E2E8F0", "#334155"),
+            dropdown_text_color=("#1A202C", "#F1F5F9"),
             corner_radius=6, height=32,
             command=self._on_version_selected,
         )
@@ -202,10 +206,11 @@ class SettingsModal(ctk.CTkToplevel):
 
     def _on_appearance_change(self, value: str):
         ctk.set_appearance_mode(value)
-        # Immediately apply theme to the parent app window
+        # Delay: CTk batches mode changes — _apply_theme must read
+        # the NEW mode, so wait for CTk's event loop to process it.
         parent = self.master
         if hasattr(parent, '_apply_theme'):
-            parent._apply_theme()
+            self.after(150, parent._apply_theme)
 
     def _on_manage_keys(self):
         from core.paths import get_project_root
@@ -225,7 +230,7 @@ class SettingsModal(ctk.CTkToplevel):
     # ================================================================== #
 
     def _on_ping_api(self):
-        self._lbl_ping.configure(text="Testing...", text_color="#94A3B8")
+        self._lbl_ping.configure(text="Testing...", text_color=COLOR_MODAL_MUTED)
         self._btn_ping.configure(state="disabled")
         self.update_idletasks()
 
@@ -236,15 +241,23 @@ class SettingsModal(ctk.CTkToplevel):
                 if token:
                     headers["X-IBM-Client-Id"] = token
                 resp = httpx.get(_BOT_API_PING, headers=headers, timeout=8.0)
-                if resp.status_code in (200, 401):
-                    # 200 = authenticated OK, 401 = server reachable but needs token
+                if resp.status_code == 200:
                     self.after(0, self._ping_done,
-                               f"✓ BOT API reachable (HTTP {resp.status_code})",
+                               "✓ API connected & authenticated",
                                COLOR_MODAL_SUCCESS)
+                elif resp.status_code == 401:
+                    if token:
+                        self.after(0, self._ping_done,
+                                   "⚠ API reachable but token is invalid",
+                                   "#F59E0B")
+                    else:
+                        self.after(0, self._ping_done,
+                                   "⚠ API reachable — no token configured",
+                                   "#F59E0B")
                 else:
                     self.after(0, self._ping_done,
                                f"API returned HTTP {resp.status_code}",
-                               "#F59E0B")
+                               "#F87171")
             except Exception as e:
                 self.after(0, self._ping_done, f"✗ {e}", "#F87171")
 
@@ -262,7 +275,7 @@ class SettingsModal(ctk.CTkToplevel):
         from core.auto_updater import check_for_update
         from core.version import __version__
 
-        self._lbl_update.configure(text="Checking...", text_color="#94A3B8")
+        self._lbl_update.configure(text="Checking...", text_color=COLOR_MODAL_MUTED)
         self._btn_update.configure(state="disabled")
         self.update_idletasks()
 
@@ -311,7 +324,7 @@ class SettingsModal(ctk.CTkToplevel):
 
     def _on_browse_versions(self):
         self._lbl_versions.configure(
-            text="Fetching versions...", text_color="#94A3B8",
+            text="Fetching versions...", text_color=COLOR_MODAL_MUTED,
         )
         self._btn_versions.configure(state="disabled")
         self.update_idletasks()
@@ -352,7 +365,7 @@ class SettingsModal(ctk.CTkToplevel):
         labels = [v[1] for v in versions]
         self._lbl_versions.configure(
             text=f"{len(versions)} versions available — select to download:",
-            text_color="#94A3B8",
+            text_color=COLOR_MODAL_MUTED,
         )
         self._selected_version.set(labels[0])
         self._version_menu.configure(values=labels)
@@ -394,7 +407,7 @@ class SettingsModal(ctk.CTkToplevel):
         self._btn_update.configure(state="disabled")
         self._btn_dl_version.configure(state="disabled")
         self._lbl_update.configure(
-            text=f"Downloading V{version}...", text_color="#94A3B8",
+            text=f"Downloading V{version}...", text_color=COLOR_MODAL_MUTED,
         )
         self.update_idletasks()
 
@@ -411,7 +424,7 @@ class SettingsModal(ctk.CTkToplevel):
                     pct = int(downloaded / total * 100)
                     self.after(0, self._lbl_update.configure,
                                {"text": f"Downloading V{version}... {pct}%",
-                                "text_color": "#94A3B8"})
+                                "text_color": COLOR_MODAL_MUTED})
 
                 result = download_update(
                     url=asset["url"],
@@ -475,7 +488,7 @@ class SettingsModal(ctk.CTkToplevel):
             dialog,
             text="Restart the application to\napply the update.",
             font=ctk.CTkFont(size=13),
-            text_color="#94A3B8",
+            text_color=COLOR_MODAL_MUTED,
         ).pack(pady=(0, 16))
 
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
@@ -498,9 +511,21 @@ class SettingsModal(ctk.CTkToplevel):
         ).pack(side="right")
 
     def _do_restart(self):
-        """Restart the application."""
-        from core.auto_updater import restart_app
-        restart_app()
+        """Restart through the main app's proper restart flow."""
+        parent = self.master
+        # Close the settings modal and restart dialog first
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+        # Route through main app's _restart_app which does
+        # DETACHED_PROCESS launch and clean exit
+        if hasattr(parent, '_restart_app'):
+            parent._restart_app()
+        else:
+            from core.auto_updater import restart_app
+            restart_app()
 
     # ================================================================== #
     #  SAVE & CLOSE
