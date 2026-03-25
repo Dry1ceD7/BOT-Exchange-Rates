@@ -30,8 +30,8 @@ _RELEASES_URL = (
     "https://api.github.com/repos/Dry1ceD7/BOT-Exchange-Rates/releases"
 )
 _BOT_API_PING = (
-    "https://apigw1.bot.or.th/bot/public/v2/Stat/DailyFXRateAvg/v1/"
-    "?start_period=2025-01-01&end_period=2025-01-02"
+    "https://gateway.api.bot.or.th/bot/public/Stat-ExchangeRate/v2/"
+    "DAILY_AVG_EXG_RATE/?start_period=2025-01-01&end_period=2025-01-02"
 )
 
 

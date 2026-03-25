@@ -267,24 +267,26 @@ class BOTExrateApp(ctk.CTk):
     #  HEADER
     # ================================================================== #
     def _build_header(self):
-        hdr = ctk.CTkFrame(self, fg_color=COLOR_HEADER_BG, corner_radius=0, height=80)
-        hdr.pack(fill="x")
-        hdr.pack_propagate(False)
+        self.hdr_frame = ctk.CTkFrame(self, fg_color=COLOR_HEADER_BG, corner_radius=0, height=80)
+        self.hdr_frame.pack(fill="x")
+        self.hdr_frame.pack_propagate(False)
 
-        inner = ctk.CTkFrame(hdr, fg_color="transparent")
+        inner = ctk.CTkFrame(self.hdr_frame, fg_color="transparent")
         inner.place(relx=0.5, rely=0.5, anchor="center")
 
-        ctk.CTkLabel(
+        self.lbl_header_title = ctk.CTkLabel(
             inner, text="Bank of Thailand  —  Ledger Processor",
             font=ctk.CTkFont(size=22, weight="bold"), text_color=COLOR_HEADER_TEXT
-        ).pack()
+        )
+        self.lbl_header_title.pack()
 
         sub_row = ctk.CTkFrame(inner, fg_color="transparent")
         sub_row.pack(pady=(2, 0))
-        ctk.CTkLabel(
+        self.lbl_header_sub = ctk.CTkLabel(
             sub_row, text=f"Enterprise Desktop Edition  |  V{APP_VERSION}",
             font=ctk.CTkFont(size=11), text_color=COLOR_HEADER_SUB
-        ).pack(side="left")
+        )
+        self.lbl_header_sub.pack(side="left")
 
         # Settings button — visible, proper button styling
         self._btn_settings = ctk.CTkButton(
@@ -308,10 +310,11 @@ class BOTExrateApp(ctk.CTk):
         self.card.pack(pady=22, padx=36, fill="both", expand=True)
 
         # ── 1. DATE SECTION ──────────────────────────────────────────────
-        ctk.CTkLabel(
+        self.lbl_date_section = ctk.CTkLabel(
             self.card, text="RATE EXTRACTION DATE",
             font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_TEXT_SECONDARY
-        ).pack(pady=(20, 0))
+        )
+        self.lbl_date_section.pack(pady=(20, 0))
 
         # ── V2.4: Auto-Detect Toggle (primary) ───────────────────────────
         auto_row = ctk.CTkFrame(self.card, fg_color="transparent")
@@ -397,10 +400,11 @@ class BOTExrateApp(ctk.CTk):
         ctk.CTkFrame(self.card, fg_color=COLOR_DIVIDER, height=1).pack(fill="x", padx=50, pady=(16, 0))
 
         # ── 2. DROP ZONE ─────────────────────────────────────────────────
-        ctk.CTkLabel(
+        self.lbl_input_section = ctk.CTkLabel(
             self.card, text="LEDGER INPUT",
             font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_TEXT_SECONDARY
-        ).pack(pady=(14, 0))
+        )
+        self.lbl_input_section.pack(pady=(14, 0))
 
         self.drop_zone = ctk.CTkFrame(
             self.card, fg_color=COLOR_SECTION_BG, corner_radius=12,
@@ -842,7 +846,7 @@ class BOTExrateApp(ctk.CTk):
         ).pack(padx=24, fill="x", pady=(0, 12))
 
     def _create_exrate_file(self, currencies, rate_types):
-        """Create a new ExRate file with the chosen currencies and rate types."""
+        """Create a new standalone ExRate file — fully independent, pulls from BOT API."""
         dest = filedialog.asksaveasfilename(
             title="Save ExRate File",
             initialfile="ExRate.xlsx",
@@ -852,50 +856,71 @@ class BOTExrateApp(ctk.CTk):
         if not dest:
             return
 
+        # Disable button and start progress bar
         self.btn_export_exrate.configure(state="disabled")
         self.lbl_status.configure(
             text="Creating ExRate file...", text_color=COLOR_TEXT_SECONDARY,
         )
+        self.progressbar.configure(mode="indeterminate")
+        self.progressbar.start()
         self.update_idletasks()
 
         def _status_cb(msg: str):
-            self.after(100, self.lbl_status.configure,
+            self.after(0, self.lbl_status.configure,
                        {"text": msg, "text_color": COLOR_TEXT_SECONDARY})
+
+        def _done(success: bool, message: str):
+            """Main-thread callback to restore UI state."""
+            self.progressbar.stop()
+            self.progressbar.configure(mode="determinate")
+            if success:
+                self.progressbar.set(1)
+                self.lbl_status.configure(
+                    text=message, text_color=COLOR_SUCCESS,
+                )
+                self.last_processed_path = dest
+                self.btn_reveal.pack(pady=(12, 14))
+            else:
+                self.progressbar.set(0)
+                self.lbl_status.configure(
+                    text=message, text_color=COLOR_ERROR_TEXT,
+                )
+            self.btn_export_exrate.configure(state="normal")
 
         def _worker():
             import asyncio
 
             from openpyxl import Workbook
 
-            # Create a blank workbook with an ExRate sheet
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "ExRate"
-            wb.save(dest)
-            wb.close()
-
-            # Update with fresh rates — pass currency/rate options
-            loop = asyncio.new_event_loop()
             try:
-                loop.run_until_complete(
-                    self.engine.update_exrate_standalone(
-                        dest,
-                        progress_cb=_status_cb,
-                        currencies=currencies,
-                        rate_types=rate_types,
+                # Create a blank workbook with an ExRate sheet
+                wb = Workbook()
+                ws = wb.active
+                ws.title = "ExRate"
+                wb.save(dest)
+                wb.close()
+
+                # Update with fresh rates from BOT API (fully independent)
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(
+                        self.engine.update_exrate_standalone(
+                            dest,
+                            progress_cb=_status_cb,
+                            currencies=currencies,
+                            rate_types=rate_types,
+                        )
                     )
-                )
-                self.after(100, self.lbl_status.configure,
-                           {"text": f"✓ ExRate created: {os.path.basename(dest)}",
-                            "text_color": COLOR_SUCCESS})
+                    self.after(0, _done, True,
+                               f"✓ ExRate created: {os.path.basename(dest)}")
+                except Exception as e:
+                    logger.error("ExRate standalone failed: %s", e)
+                    self.after(0, _done, False, f"Failed: {e}")
+                finally:
+                    loop.close()
             except Exception as e:
-                self.after(100, self.lbl_status.configure,
-                           {"text": f"Failed: {e}",
-                            "text_color": COLOR_ERROR_TEXT})
-            finally:
-                loop.close()
-                self.after(100, self.btn_export_exrate.configure,
-                           {"state": "normal"})
+                logger.error("ExRate file creation failed: %s", e)
+                self.after(0, _done, False, f"Failed: {e}")
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -989,31 +1014,77 @@ class BOTExrateApp(ctk.CTk):
         self._apply_theme()
 
     def _apply_theme(self):
-        """Re-read the theme and apply colors to all major widgets."""
+        """Re-read the theme and apply colors to ALL widgets."""
         t = get_theme()
 
-        # Window background
+        # ── Window background ─────────────────────────────────────────
         self.configure(fg_color=t["bg"])
 
-        # Card
+        # ── Header ────────────────────────────────────────────────────
+        if hasattr(self, "hdr_frame"):
+            self.hdr_frame.configure(fg_color=t["header_bg"])
+        if hasattr(self, "lbl_header_title"):
+            self.lbl_header_title.configure(text_color=t["header_text"])
+        if hasattr(self, "lbl_header_sub"):
+            self.lbl_header_sub.configure(text_color=t["header_sub"])
+
+        # ── Card ──────────────────────────────────────────────────────
         if hasattr(self, "card"):
             self.card.configure(
                 fg_color=t["card_bg"],
                 border_color=t["card_border"],
             )
 
-        # Section labels, status, and other text widgets
-        # Walk through card children and recolor
-        if hasattr(self, "lbl_status"):
-            # Status box parent
-            status_parent = self.lbl_status.master
-            if status_parent:
-                status_parent.configure(
-                    fg_color=t["section_bg"],
-                    border_color=t["card_border"],
-                )
+        # ── Section title labels ──────────────────────────────────────
+        for attr in ("lbl_date_section", "lbl_input_section"):
+            widget = getattr(self, attr, None)
+            if widget:
+                widget.configure(text_color=t["text_secondary"])
 
-        # Drop zone
+        # ── Auto-detect hint ──────────────────────────────────────────
+        if hasattr(self, "lbl_auto_hint"):
+            # Keep its dynamic color (blue/warning) — just ensure it's
+            # visible against the new background
+            pass
+
+        # ── Auto-detect toggle ────────────────────────────────────────
+        if hasattr(self, "toggle_auto"):
+            self.toggle_auto.configure(
+                text_color=t["text_primary"],
+                fg_color=t["switch_track"],
+                button_color=t["switch_thumb"],
+                button_hover_color=t["text_secondary"],
+                progress_color=t["trust_blue"],
+            )
+
+        # ── Manual "Use Today" toggle ─────────────────────────────────
+        if hasattr(self, "toggle_today"):
+            self.toggle_today.configure(
+                text_color=t["text_secondary"],
+                fg_color=t["switch_track"],
+                button_color=t["switch_thumb"],
+            )
+
+        # ── Date combo boxes ──────────────────────────────────────────
+        if hasattr(self, "_combo_widgets"):
+            for combo in self._combo_widgets:
+                combo.configure(
+                    fg_color=t["combo_bg"],
+                    border_color=t["combo_border"],
+                    text_color=t["text_primary"],
+                    dropdown_fg_color=t["card_bg"],
+                    button_color=t["trust_blue"],
+                    button_hover_color=t["blue_hover"],
+                )
+        # Date combo labels (Year, Month, Day)
+        if hasattr(self, "manual_date_frame"):
+            for child in self.manual_date_frame.winfo_children():
+                for sub in child.winfo_children():
+                    for label in sub.winfo_children():
+                        if isinstance(label, ctk.CTkLabel):
+                            label.configure(text_color=t["text_secondary"])
+
+        # ── Drop zone ────────────────────────────────────────────────
         if hasattr(self, "drop_zone"):
             self.drop_zone.configure(
                 fg_color=t["section_bg"],
@@ -1024,39 +1095,24 @@ class BOTExrateApp(ctk.CTk):
         if hasattr(self, "dz_sub"):
             self.dz_sub.configure(text_color=t["text_muted"])
 
-        # Auto-detect toggle
-        if hasattr(self, "toggle_auto"):
-            self.toggle_auto.configure(
-                text_color=t["text_primary"],
-                fg_color=t["switch_track"],
-                button_color=t["switch_thumb"],
-                button_hover_color=t["text_secondary"],
-                progress_color=t["trust_blue"],
-            )
-
-        # Manual "Use Today" toggle
-        if hasattr(self, "toggle_today"):
-            self.toggle_today.configure(
-                text_color=t["text_secondary"],
-                fg_color=t["switch_track"],
-                button_color=t["switch_thumb"],
-            )
-
-        # Date combo boxes
-        if hasattr(self, "_combo_widgets"):
-            for combo in self._combo_widgets:
-                combo.configure(
-                    fg_color=t["combo_bg"],
-                    border_color=t["combo_border"],
-                    text_color=t["text_primary"],
-                    dropdown_fg_color=t["card_bg"],
-                )
-
-        # Queue label
+        # ── Queue label ───────────────────────────────────────────────
         if hasattr(self, "lbl_queue"):
             self.lbl_queue.configure(text_color=t["text_secondary"])
 
-        # Buttons (keep action colors, update revert)
+        # ── Status box ────────────────────────────────────────────────
+        if hasattr(self, "lbl_status"):
+            status_parent = self.lbl_status.master
+            if status_parent:
+                status_parent.configure(
+                    fg_color=t["section_bg"],
+                    border_color=t["card_border"],
+                )
+
+        # ── Progress bar ──────────────────────────────────────────────
+        if hasattr(self, "progressbar"):
+            self.progressbar.configure(progress_color=t["trust_blue"])
+
+        # ── Buttons ───────────────────────────────────────────────────
         if hasattr(self, "btn_process"):
             self.btn_process.configure(
                 fg_color=t["trust_blue"],
@@ -1067,8 +1123,13 @@ class BOTExrateApp(ctk.CTk):
                 fg_color=t["revert_bg"],
                 hover_color=t["revert_hover"],
             )
+        if hasattr(self, "btn_reveal"):
+            self.btn_reveal.configure(
+                fg_color=t["warning"],
+                hover_color=t["warning_hover"],
+            )
 
-        # Dividers — recolor all 1px frames in card
+        # ── Dividers — recolor all 1px height frames in card ─────────
         if hasattr(self, "card"):
             for child in self.card.winfo_children():
                 try:
@@ -1076,6 +1137,9 @@ class BOTExrateApp(ctk.CTk):
                         child.configure(fg_color=t["divider"])
                 except Exception:
                     pass
+
+        # ── Live console keeps its dark terminal aesthetic ────────────
+        # (intentionally not themed — it stays dark in both modes)
 
         logger.debug("Theme applied: %s mode", ctk.get_appearance_mode())
 

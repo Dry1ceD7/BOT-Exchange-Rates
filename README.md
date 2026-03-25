@@ -4,7 +4,7 @@
 
 **Enterprise Desktop Application for Bank of Thailand Exchange Rate Automation**
 
-Version 3.0.35  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
+Version 3.0.36  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
