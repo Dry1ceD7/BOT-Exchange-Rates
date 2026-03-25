@@ -124,6 +124,29 @@ class SettingsModal(ctk.CTkToplevel):
         )
         self._lbl_ping.pack(pady=(0, 12))
 
+        # ── Update Channel Toggle ────────────────────────────────────
+        channel_frame = ctk.CTkFrame(self, fg_color="transparent")
+        channel_frame.pack(padx=30, fill="x", pady=(0, 6))
+
+        ctk.CTkLabel(
+            channel_frame, text="Update Channel:",
+            font=ctk.CTkFont(size=12), text_color="#94A3B8",
+        ).pack(side="left", padx=(0, 8))
+
+        self._channel_var = ctk.StringVar(value=self._settings.get("update_channel", "Stable"))
+        self._channel_toggle = ctk.CTkSegmentedButton(
+            channel_frame,
+            values=["Stable", "Beta"],
+            variable=self._channel_var,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            selected_color="#2563EB",
+            selected_hover_color="#1D4ED8",
+            unselected_color="#334155",
+            unselected_hover_color="#475569",
+            corner_radius=6, height=32,
+        )
+        self._channel_toggle.pack(side="left", expand=True, fill="x")
+
         # ── Check for Updates ─────────────────────────────────────────
         self._btn_update = ctk.CTkButton(
             self, text="Check for Updates",
@@ -165,64 +188,87 @@ class SettingsModal(ctk.CTkToplevel):
         )
         self.wait_window(dialog)
 
+    # ================================================================== #
+    #  API CONNECTIVITY CHECK
+    # ================================================================== #
+
     def _on_ping_api(self):
-        self._lbl_ping.configure(text="Pinging...", text_color="#94A3B8")
+        from core.api_client import BOTClient
+
+        self._lbl_ping.configure(text="Testing...", text_color="#94A3B8")
         self._btn_ping.configure(state="disabled")
         self.update_idletasks()
 
-        def _worker():
+        def _ping_worker():
             try:
-                resp = httpx.get(
-                    "https://apigw1.bot.or.th/bot/public/v2/Stat/DailyFXRateAvg/v1/",
-                    timeout=8.0,
-                )
-                self.after(0, self._lbl_ping.configure,
-                           {"text": f"API responded: HTTP {resp.status_code}",
-                            "text_color": COLOR_MODAL_SUCCESS})
+                with httpx.Client(timeout=8.0) as client:
+                    api = BOTClient(client)
+                    ok = api.ping()
+                if ok:
+                    self.after(0, self._lbl_ping.configure,
+                               {"text": "✓ BOT API is reachable",
+                                "text_color": COLOR_MODAL_SUCCESS})
+                else:
+                    self.after(0, self._lbl_ping.configure,
+                               {"text": "✗ API returned unexpected response",
+                                "text_color": "#F87171"})
             except Exception as e:
                 self.after(0, self._lbl_ping.configure,
-                           {"text": f"Connection failed: {e}",
-                            "text_color": "#F87171"})
+                           {"text": f"✗ {e}", "text_color": "#F87171"})
             finally:
                 self.after(0, self._btn_ping.configure, {"state": "normal"})
 
-        threading.Thread(target=_worker, daemon=True).start()
+        threading.Thread(target=_ping_worker, daemon=True).start()
+
+    # ================================================================== #
+    #  AUTO-UPDATE CHECK
+    # ================================================================== #
 
     def _on_check_update(self):
         from core.auto_updater import check_for_update
         from core.version import __version__
 
-        self._lbl_update.configure(text="Checking...", text_color="#94A3B8")
+        include_beta = self._channel_var.get() == "Beta"
+        self._lbl_update.configure(
+            text=f"Checking {'beta' if include_beta else 'stable'} channel...",
+            text_color="#94A3B8",
+        )
         self._btn_update.configure(state="disabled")
         self.update_idletasks()
 
         def _worker():
-            result = check_for_update(current_version=__version__)
+            result = check_for_update(
+                current_version=__version__,
+                include_prerelease=include_beta,
+            )
             if result.get("update_available"):
                 ver = result.get("latest_version", "?")
                 url = result.get("download_url", "")
-                self.after(0, self._show_update_available, ver, url)
+                is_beta = result.get("is_prerelease", False)
+                self.after(0, self._show_update_available, ver, url, is_beta)
             elif result.get("error"):
                 self.after(0, self._lbl_update.configure,
                            {"text": f"Check failed: {result['error']}",
                             "text_color": "#F87171"})
                 self.after(0, self._btn_update.configure, {"state": "normal"})
             else:
+                channel = "beta" if include_beta else "stable"
                 self.after(0, self._lbl_update.configure,
-                           {"text": f"✓ Up to date (V{__version__})",
+                           {"text": f"✓ Up to date ({channel}: V{__version__})",
                             "text_color": COLOR_MODAL_SUCCESS})
                 self.after(0, self._btn_update.configure, {"state": "normal"})
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _show_update_available(self, version: str, url: str):
+    def _show_update_available(self, version: str, url: str, is_beta: bool = False):
         self._pending_ver = version
+        beta_tag = " [BETA]" if is_beta else ""
         self._lbl_update.configure(
-            text=f"Update available: V{version}",
+            text=f"Update available: V{version}{beta_tag}",
             text_color="#F59E0B",
         )
         self._btn_update.configure(
-            text=f"Download V{version}",
+            text=f"Download V{version}{beta_tag}",
             fg_color="#F59E0B", hover_color="#D97706",
             state="normal",
             command=lambda: self._download_in_app(version),
@@ -286,5 +332,6 @@ class SettingsModal(ctk.CTkToplevel):
     def _save_and_close(self):
         self._settings["appearance"] = self._appearance_var.get()
         self._settings["auto_update"] = self._auto_update_var.get() == "on"
+        self._settings["update_channel"] = self._channel_var.get()
         self._mgr.save(self._settings)
         self.destroy()

@@ -731,10 +731,15 @@ class LedgerEngine:
             # ── STEP 3: Cross-Tab Lookup — Write formulas into monthly tabs ──
             #
             # Writes VLOOKUP + XLOOKUP formulas to the "EX Rate" column.
-            # Uses BOUNDED ranges ($A$2:$E${N}) to exclude the header row,
-            # which previously broke VLOOKUP approximate match.
             #
-            # Formula strategy:
+            # CRITICAL: Date Normalization
+            # Monthly tab dates may be stored as TEXT STRINGS (e.g.,
+            # "10/03/2025") which VLOOKUP cannot match against the
+            # DATE SERIAL NUMBERS in ExRate.  We normalize by writing
+            # the parsed date object back to the cell before the
+            # lookup formula, ensuring type parity.
+            #
+            # Formula strategy (bounded ranges, header excluded):
             #   XLOOKUP (Excel 365/2021+) with match_mode -1 = primary
             #   VLOOKUP (all versions) with TRUE (approx match) = fallback
             #   Both auto-rollback to nearest previous trading day.
@@ -767,6 +772,16 @@ class LedgerEngine:
                     inv_date = self._parse_date(src_cell.value)
                     if not inv_date:
                         continue
+
+                    # ── Date Normalization ─────────────────────────
+                    # If the cell contains a text string (not a proper
+                    # date/datetime), replace it with the parsed date
+                    # object so Excel stores it as a date serial number.
+                    # This is REQUIRED for VLOOKUP to match dates
+                    # between the monthly tab and ExRate tab.
+                    if isinstance(src_cell.value, str):
+                        src_cell.value = inv_date
+                        src_cell.number_format = "DD MMM YYYY"
 
                     # Determine currency for this row
                     ccy = ""

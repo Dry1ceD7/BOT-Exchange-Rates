@@ -23,10 +23,14 @@ logger = logging.getLogger(__name__)
 GITHUB_RELEASES_URL = (
     "https://api.github.com/repos/Dry1ceD7/BOT-Exchange-Rates/releases/latest"
 )
+GITHUB_ALL_RELEASES_URL = (
+    "https://api.github.com/repos/Dry1ceD7/BOT-Exchange-Rates/releases"
+)
 
 
 def check_for_update(
     current_version: Optional[str] = None,
+    include_prerelease: bool = False,
 ) -> dict:
     """
     Check whether a newer release is available on GitHub.
@@ -34,12 +38,14 @@ def check_for_update(
     Args:
         current_version: The running app version (e.g., "2.6.1").
                          If None, reads from pyproject.toml or defaults.
+        include_prerelease: If True, also considers pre-release/beta versions.
 
     Returns:
         {
             "update_available": bool,
             "latest_version": str | None,
             "download_url": str | None,
+            "is_prerelease": bool,
             "error": str | None,
         }
     """
@@ -47,6 +53,7 @@ def check_for_update(
         "update_available": False,
         "latest_version": None,
         "download_url": None,
+        "is_prerelease": False,
         "error": None,
     }
 
@@ -54,13 +61,29 @@ def check_for_update(
         current_version = "0.0.0"
 
     try:
-        resp = httpx.get(
-            GITHUB_RELEASES_URL,
-            headers={"Accept": "application/vnd.github+json"},
-            timeout=8.0,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        if include_prerelease:
+            # Fetch all releases and find the newest one
+            resp = httpx.get(
+                GITHUB_ALL_RELEASES_URL,
+                headers={"Accept": "application/vnd.github+json"},
+                timeout=8.0,
+                params={"per_page": 10},
+            )
+            resp.raise_for_status()
+            releases = resp.json()
+            if not releases:
+                result["error"] = "No releases found"
+                return result
+            # First release is the most recent
+            data = releases[0]
+        else:
+            resp = httpx.get(
+                GITHUB_RELEASES_URL,
+                headers={"Accept": "application/vnd.github+json"},
+                timeout=8.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
 
         tag = data.get("tag_name", "")
         # Strip leading 'v' if present (e.g., "v3.0.0" -> "3.0.0")
@@ -68,6 +91,7 @@ def check_for_update(
 
         result["latest_version"] = tag_clean
         result["download_url"] = data.get("html_url")
+        result["is_prerelease"] = data.get("prerelease", False)
 
         try:
             remote = Version(tag_clean)
