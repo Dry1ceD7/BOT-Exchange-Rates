@@ -2,12 +2,10 @@
 """
 gui/panels/settings_modal.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.8) — Settings Modal Panel
+BOT Exchange Rate Processor — Settings Modal Panel
 ---------------------------------------------------------------------------
 Popup window for user preferences backed by core/config_manager.py.
-Controls: Appearance (Dark/Light/System), Auto-Update toggle, API keys, API ping.
-
-SFFB: Strict < 200 lines.
+Controls: Appearance, Auto-Update, API keys, API ping, Version browser.
 """
 
 import logging
@@ -27,6 +25,15 @@ COLOR_MODAL_TEXT = "#F1F5F9"
 COLOR_MODAL_ACCENT = "#3B82F6"
 COLOR_MODAL_SUCCESS = "#22C55E"
 
+# GitHub API endpoints
+_RELEASES_URL = (
+    "https://api.github.com/repos/Dry1ceD7/BOT-Exchange-Rates/releases"
+)
+_BOT_API_PING = (
+    "https://apigw1.bot.or.th/bot/public/v2/Stat/DailyFXRateAvg/v1/"
+    "?start_period=2025-01-01&end_period=2025-01-02"
+)
+
 
 class SettingsModal(ctk.CTkToplevel):
     """
@@ -41,7 +48,7 @@ class SettingsModal(ctk.CTkToplevel):
         super().__init__(master, **kwargs)
 
         self.title("Settings")
-        self.geometry("420x540")
+        self.geometry("420x620")
         self.resizable(False, False)
         self.configure(fg_color=COLOR_MODAL_BG)
 
@@ -53,7 +60,7 @@ class SettingsModal(ctk.CTkToplevel):
 
     def _center(self):
         self.update_idletasks()
-        w, h = 420, 540
+        w, h = 420, 620
         sx = (self.winfo_screenwidth() - w) // 2
         sy = (self.winfo_screenheight() - h) // 2
         self.geometry(f"{w}x{h}+{sx}+{sy}")
@@ -116,7 +123,7 @@ class SettingsModal(ctk.CTkToplevel):
             corner_radius=8, height=38,
             command=self._on_ping_api,
         )
-        self._btn_ping.pack(padx=30, fill="x", pady=(0, 8))
+        self._btn_ping.pack(padx=30, fill="x", pady=(0, 4))
 
         self._lbl_ping = ctk.CTkLabel(
             self, text="", font=ctk.CTkFont(size=11),
@@ -124,30 +131,7 @@ class SettingsModal(ctk.CTkToplevel):
         )
         self._lbl_ping.pack(pady=(0, 12))
 
-        # ── Update Channel Toggle ────────────────────────────────────
-        channel_frame = ctk.CTkFrame(self, fg_color="transparent")
-        channel_frame.pack(padx=30, fill="x", pady=(0, 6))
-
-        ctk.CTkLabel(
-            channel_frame, text="Update Channel:",
-            font=ctk.CTkFont(size=12), text_color="#94A3B8",
-        ).pack(side="left", padx=(0, 8))
-
-        self._channel_var = ctk.StringVar(value=self._settings.get("update_channel", "Stable"))
-        self._channel_toggle = ctk.CTkSegmentedButton(
-            channel_frame,
-            values=["Stable", "Beta"],
-            variable=self._channel_var,
-            font=ctk.CTkFont(size=12, weight="bold"),
-            selected_color="#2563EB",
-            selected_hover_color="#1D4ED8",
-            unselected_color="#334155",
-            unselected_hover_color="#475569",
-            corner_radius=6, height=32,
-        )
-        self._channel_toggle.pack(side="left", expand=True, fill="x")
-
-        # ── Check for Updates ─────────────────────────────────────────
+        # ── Check for Stable Updates ─────────────────────────────────
         self._btn_update = ctk.CTkButton(
             self, text="Check for Updates",
             fg_color="#475569", hover_color="#64748B",
@@ -161,7 +145,50 @@ class SettingsModal(ctk.CTkToplevel):
             self, text="", font=ctk.CTkFont(size=11),
             text_color=COLOR_MODAL_SUCCESS,
         )
-        self._lbl_update.pack(pady=(0, 16))
+        self._lbl_update.pack(pady=(0, 8))
+
+        # ── Version Browser ──────────────────────────────────────────
+        self._btn_versions = ctk.CTkButton(
+            self, text="Versions",
+            fg_color="#334155", hover_color="#475569",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            corner_radius=8, height=38,
+            command=self._on_browse_versions,
+        )
+        self._btn_versions.pack(padx=30, fill="x", pady=(0, 4))
+
+        self._lbl_versions = ctk.CTkLabel(
+            self, text="", font=ctk.CTkFont(size=11),
+            text_color="#94A3B8",
+        )
+        self._lbl_versions.pack(pady=(0, 4))
+
+        # Version option menu (hidden until versions loaded)
+        self._version_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._selected_version = ctk.StringVar(value="")
+        self._version_menu = ctk.CTkOptionMenu(
+            self._version_frame,
+            variable=self._selected_version,
+            values=["Loading..."],
+            font=ctk.CTkFont(size=12),
+            fg_color="#334155", button_color="#475569",
+            button_hover_color="#64748B",
+            dropdown_fg_color="#1E293B",
+            dropdown_hover_color="#334155",
+            corner_radius=6, height=32,
+            command=self._on_version_selected,
+        )
+        self._version_menu.pack(side="left", expand=True, fill="x", padx=(0, 8))
+
+        self._btn_dl_version = ctk.CTkButton(
+            self._version_frame, text="Download",
+            fg_color="#F59E0B", hover_color="#D97706",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            corner_radius=6, height=32, width=100,
+            state="disabled",
+            command=self._on_download_selected_version,
+        )
+        self._btn_dl_version.pack(side="right")
 
         # ── Save & Close ─────────────────────────────────────────────
         ctk.CTkButton(
@@ -170,7 +197,7 @@ class SettingsModal(ctk.CTkToplevel):
             font=ctk.CTkFont(size=14, weight="bold"),
             corner_radius=8, height=42,
             command=self._save_and_close,
-        ).pack(padx=30, fill="x", pady=(0, 20))
+        ).pack(padx=30, fill="x", pady=(12, 20))
 
     def _on_appearance_change(self, value: str):
         ctk.set_appearance_mode(value)
@@ -189,90 +216,166 @@ class SettingsModal(ctk.CTkToplevel):
         self.wait_window(dialog)
 
     # ================================================================== #
-    #  API CONNECTIVITY CHECK
+    #  API CONNECTIVITY CHECK — simple HTTP ping (no BOTClient needed)
     # ================================================================== #
 
     def _on_ping_api(self):
-        from core.api_client import BOTClient
-
         self._lbl_ping.configure(text="Testing...", text_color="#94A3B8")
         self._btn_ping.configure(state="disabled")
         self.update_idletasks()
 
         def _ping_worker():
             try:
-                with httpx.Client(timeout=8.0) as client:
-                    api = BOTClient(client)
-                    ok = api.ping()
-                if ok:
-                    self.after(0, self._lbl_ping.configure,
-                               {"text": "✓ BOT API is reachable",
-                                "text_color": COLOR_MODAL_SUCCESS})
+                token = os.environ.get("BOT_TOKEN_EXG", "")
+                headers = {"Accept": "application/json"}
+                if token:
+                    headers["X-IBM-Client-Id"] = token
+                resp = httpx.get(_BOT_API_PING, headers=headers, timeout=8.0)
+                if resp.status_code == 200:
+                    self.after(0, self._ping_done,
+                               f"✓ BOT API reachable (HTTP {resp.status_code})",
+                               COLOR_MODAL_SUCCESS)
                 else:
-                    self.after(0, self._lbl_ping.configure,
-                               {"text": "✗ API returned unexpected response",
-                                "text_color": "#F87171"})
+                    self.after(0, self._ping_done,
+                               f"API returned HTTP {resp.status_code}",
+                               "#F59E0B")
             except Exception as e:
-                self.after(0, self._lbl_ping.configure,
-                           {"text": f"✗ {e}", "text_color": "#F87171"})
-            finally:
-                self.after(0, self._btn_ping.configure, {"state": "normal"})
+                self.after(0, self._ping_done, f"✗ {e}", "#F87171")
 
         threading.Thread(target=_ping_worker, daemon=True).start()
 
+    def _ping_done(self, text: str, color: str):
+        self._lbl_ping.configure(text=text, text_color=color)
+        self._btn_ping.configure(state="normal")
+
     # ================================================================== #
-    #  AUTO-UPDATE CHECK
+    #  CHECK FOR STABLE UPDATES
     # ================================================================== #
 
     def _on_check_update(self):
         from core.auto_updater import check_for_update
         from core.version import __version__
 
-        include_beta = self._channel_var.get() == "Beta"
-        self._lbl_update.configure(
-            text=f"Checking {'beta' if include_beta else 'stable'} channel...",
-            text_color="#94A3B8",
-        )
+        self._lbl_update.configure(text="Checking...", text_color="#94A3B8")
         self._btn_update.configure(state="disabled")
         self.update_idletasks()
 
         def _worker():
-            result = check_for_update(
-                current_version=__version__,
-                include_prerelease=include_beta,
-            )
-            if result.get("update_available"):
-                ver = result.get("latest_version", "?")
-                url = result.get("download_url", "")
-                is_beta = result.get("is_prerelease", False)
-                self.after(0, self._show_update_available, ver, url, is_beta)
-            elif result.get("error"):
-                self.after(0, self._lbl_update.configure,
-                           {"text": f"Check failed: {result['error']}",
-                            "text_color": "#F87171"})
-                self.after(0, self._btn_update.configure, {"state": "normal"})
-            else:
-                channel = "beta" if include_beta else "stable"
-                self.after(0, self._lbl_update.configure,
-                           {"text": f"✓ Up to date ({channel}: V{__version__})",
-                            "text_color": COLOR_MODAL_SUCCESS})
-                self.after(0, self._btn_update.configure, {"state": "normal"})
+            try:
+                result = check_for_update(current_version=__version__)
+                if result.get("update_available"):
+                    ver = result.get("latest_version", "?")
+                    self.after(0, self._update_done,
+                               f"Update available: V{ver}", "#F59E0B",
+                               ver)
+                elif result.get("error"):
+                    self.after(0, self._update_done,
+                               f"Check failed: {result['error']}",
+                               "#F87171", None)
+                else:
+                    self.after(0, self._update_done,
+                               f"✓ Up to date (V{__version__})",
+                               COLOR_MODAL_SUCCESS, None)
+            except Exception as e:
+                self.after(0, self._update_done,
+                           f"Error: {e}", "#F87171", None)
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _show_update_available(self, version: str, url: str, is_beta: bool = False):
-        self._pending_ver = version
-        beta_tag = " [BETA]" if is_beta else ""
-        self._lbl_update.configure(
-            text=f"Update available: V{version}{beta_tag}",
-            text_color="#F59E0B",
+    def _update_done(self, text: str, color: str, version):
+        self._lbl_update.configure(text=text, text_color=color)
+        if version:
+            self._btn_update.configure(
+                text=f"Download V{version}",
+                fg_color="#F59E0B", hover_color="#D97706",
+                state="normal",
+                command=lambda: self._download_in_app(version),
+            )
+        else:
+            self._btn_update.configure(
+                text="Check for Updates",
+                fg_color="#475569", hover_color="#64748B",
+                state="normal",
+                command=self._on_check_update,
+            )
+
+    # ================================================================== #
+    #  VERSION BROWSER — lists all releases (stable + beta)
+    # ================================================================== #
+
+    def _on_browse_versions(self):
+        self._lbl_versions.configure(
+            text="Fetching versions...", text_color="#94A3B8",
         )
-        self._btn_update.configure(
-            text=f"Download V{version}{beta_tag}",
-            fg_color="#F59E0B", hover_color="#D97706",
-            state="normal",
-            command=lambda: self._download_in_app(version),
+        self._btn_versions.configure(state="disabled")
+        self.update_idletasks()
+
+        def _worker():
+            try:
+                resp = httpx.get(
+                    _RELEASES_URL,
+                    headers={"Accept": "application/vnd.github+json"},
+                    timeout=10.0,
+                    params={"per_page": 20},
+                )
+                resp.raise_for_status()
+                releases = resp.json()
+
+                versions = []
+                for rel in releases:
+                    tag = rel.get("tag_name", "").lstrip("vV")
+                    is_pre = rel.get("prerelease", False)
+                    label = f"v{tag} [BETA]" if is_pre else f"v{tag}"
+                    versions.append((tag, label, is_pre))
+
+                self.after(0, self._show_versions, versions)
+            except Exception as e:
+                self.after(0, self._versions_error, str(e))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_versions(self, versions):
+        self._btn_versions.configure(state="normal")
+        if not versions:
+            self._lbl_versions.configure(
+                text="No releases found", text_color="#F87171",
+            )
+            return
+
+        self._version_list = versions
+        labels = [v[1] for v in versions]
+        self._lbl_versions.configure(
+            text=f"{len(versions)} versions available — select to download:",
+            text_color="#94A3B8",
         )
+        self._selected_version.set(labels[0])
+        self._version_menu.configure(values=labels)
+        self._version_frame.pack(padx=30, fill="x", pady=(0, 8))
+        self._btn_dl_version.configure(state="normal")
+
+    def _versions_error(self, msg: str):
+        self._btn_versions.configure(state="normal")
+        self._lbl_versions.configure(
+            text=f"Error: {msg}", text_color="#F87171",
+        )
+
+    def _on_version_selected(self, label: str):
+        self._btn_dl_version.configure(state="normal")
+
+    def _on_download_selected_version(self):
+        label = self._selected_version.get()
+        # Find the actual version tag from label
+        version = None
+        for tag, lbl, _ in getattr(self, "_version_list", []):
+            if lbl == label:
+                version = tag
+                break
+        if version:
+            self._download_in_app(version)
+
+    # ================================================================== #
+    #  DOWNLOAD + APPLY UPDATE (server-centric)
+    # ================================================================== #
 
     def _download_in_app(self, version: str):
         """Download and apply the update to the server path."""
@@ -282,56 +385,68 @@ class SettingsModal(ctk.CTkToplevel):
             get_installer_asset_url,
         )
 
-        self._btn_update.configure(state="disabled", text="Downloading...")
-        self._lbl_update.configure(text="Fetching update...", text_color="#94A3B8")
+        self._btn_update.configure(state="disabled")
+        self._btn_dl_version.configure(state="disabled")
+        self._lbl_update.configure(
+            text=f"Downloading V{version}...", text_color="#94A3B8",
+        )
         self.update_idletasks()
 
         def _worker():
-            asset = get_installer_asset_url(version)
-            if asset.get("error") or not asset.get("url"):
-                self.after(0, self._lbl_update.configure,
-                           {"text": f"Error: {asset.get('error', 'No installer found')}",
-                            "text_color": "#F87171"})
-                self.after(0, self._btn_update.configure, {"state": "normal", "text": "Retry"})
-                return
+            try:
+                asset = get_installer_asset_url(version)
+                if asset.get("error") or not asset.get("url"):
+                    self.after(0, self._dl_done,
+                               f"Error: {asset.get('error', 'No installer')}",
+                               "#F87171", False)
+                    return
 
-            def _progress(downloaded, total):
-                pct = int(downloaded / total * 100)
-                self.after(0, self._lbl_update.configure,
-                           {"text": f"Downloading... {pct}%", "text_color": "#94A3B8"})
+                def _progress(downloaded, total):
+                    pct = int(downloaded / total * 100)
+                    self.after(0, self._lbl_update.configure,
+                               {"text": f"Downloading V{version}... {pct}%",
+                                "text_color": "#94A3B8"})
 
-            # Download to app's own directory (server path)
-            result = download_update(
-                url=asset["url"],
-                filename=asset.get("filename"),
-                progress_cb=_progress,
-            )
-            if result.get("error"):
-                self.after(0, self._lbl_update.configure,
-                           {"text": f"Download failed: {result['error']}",
-                            "text_color": "#F87171"})
-                self.after(0, self._btn_update.configure, {"state": "normal", "text": "Retry"})
-                return
+                result = download_update(
+                    url=asset["url"],
+                    filename=asset.get("filename"),
+                    progress_cb=_progress,
+                )
+                if result.get("error"):
+                    self.after(0, self._dl_done,
+                               f"Download failed: {result['error']}",
+                               "#F87171", False)
+                    return
 
-            # Apply in-place exe swap on server
-            apply_result = apply_update(result["path"])
-            if apply_result.get("success"):
-                self.after(0, self._lbl_update.configure,
-                           {"text": "✅ Update installed — restart to apply",
-                            "text_color": COLOR_MODAL_SUCCESS})
-                self.after(0, self._btn_update.configure,
-                           {"state": "disabled", "text": "Updated ✓"})
-            else:
-                self.after(0, self._lbl_update.configure,
-                           {"text": f"Update failed: {apply_result.get('error', '?')}",
-                            "text_color": "#F87171"})
-                self.after(0, self._btn_update.configure, {"state": "normal", "text": "Retry"})
+                apply_result = apply_update(result["path"])
+                if apply_result.get("success"):
+                    self.after(0, self._dl_done,
+                               "✅ Update installed — restart to apply",
+                               COLOR_MODAL_SUCCESS, True)
+                else:
+                    self.after(0, self._dl_done,
+                               f"Failed: {apply_result.get('error', '?')}",
+                               "#F87171", False)
+            except Exception as e:
+                self.after(0, self._dl_done, f"Error: {e}", "#F87171", False)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _dl_done(self, text: str, color: str, success: bool):
+        self._lbl_update.configure(text=text, text_color=color)
+        if success:
+            self._btn_update.configure(state="disabled", text="Updated ✓")
+            self._btn_dl_version.configure(state="disabled")
+        else:
+            self._btn_update.configure(state="normal")
+            self._btn_dl_version.configure(state="normal")
+
+    # ================================================================== #
+    #  SAVE & CLOSE
+    # ================================================================== #
 
     def _save_and_close(self):
         self._settings["appearance"] = self._appearance_var.get()
         self._settings["auto_update"] = self._auto_update_var.get() == "on"
-        self._settings["update_channel"] = self._channel_var.get()
         self._mgr.save(self._settings)
         self.destroy()
