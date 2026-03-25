@@ -36,7 +36,9 @@ class BOTRateDetail(BaseModel):
     period: str
     currency: str = Field(alias="currency_id")
     buying_transfer: Optional[float] = None
+    buying_sight: Optional[float] = None
     selling: Optional[float] = None
+    mid_rate: Optional[float] = None
 
 class BOTRateData(BaseModel):
     data_detail: List[BOTRateDetail]

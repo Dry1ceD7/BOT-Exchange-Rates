@@ -722,12 +722,129 @@ class BOTExrateApp(ctk.CTk):
         self.update_idletasks()
 
     # ================================================================== #
-    #  EXRATE SHEET — CREATE NEW / UPDATE STANDALONE
+    #  EXRATE SHEET — CREATE NEW WITH OPTIONS
     # ================================================================== #
+    # Available currencies and rate types from the BOT API
+    EXRATE_CURRENCIES = [
+        "USD", "EUR", "GBP", "JPY", "CNY", "HKD", "SGD", "AUD", "CHF",
+    ]
+    EXRATE_RATE_TYPES = {
+        "Buying TT":    "buying_transfer",
+        "Buying Sight": "buying_sight",
+        "Selling":      "selling",
+        "Mid Rate":     "mid_rate",
+    }
+
     def _on_export_exrate(self):
-        """Create a new standalone ExRate .xlsx with rates from the BOT API."""
+        """Show an options dialog for creating a new ExRate sheet."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Create ExRate File")
+        dialog.geometry("440x520")
+        dialog.resizable(False, False)
+        dialog.configure(fg_color="#1E293B")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        dialog.update_idletasks()
+        sx = (dialog.winfo_screenwidth() - 440) // 2
+        sy = (dialog.winfo_screenheight() - 520) // 2
+        dialog.geometry(f"440x520+{sx}+{sy}")
+
+        ctk.CTkLabel(
+            dialog, text="ExRate Sheet Options",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color="#F1F5F9",
+        ).pack(pady=(16, 12))
+
+        # ── Currencies ────────────────────────────────────────────
+        ctk.CTkLabel(
+            dialog, text="Currencies",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="#94A3B8",
+        ).pack(anchor="w", padx=24, pady=(0, 4))
+
+        cur_frame = ctk.CTkFrame(dialog, fg_color="#0F172A", corner_radius=8)
+        cur_frame.pack(fill="x", padx=24, pady=(0, 12))
+
+        cur_vars = {}
+        DEFAULTS_ON = {"USD", "EUR"}
+        row_frame = None
+        for i, ccy in enumerate(self.EXRATE_CURRENCIES):
+            if i % 3 == 0:
+                row_frame = ctk.CTkFrame(cur_frame, fg_color="transparent")
+                row_frame.pack(fill="x", padx=8, pady=2)
+            var = ctk.BooleanVar(value=ccy in DEFAULTS_ON)
+            cur_vars[ccy] = var
+            ctk.CTkCheckBox(
+                row_frame, text=ccy, variable=var,
+                font=ctk.CTkFont(size=13),
+                fg_color="#6366F1", hover_color="#4F46E5",
+                width=120,
+            ).pack(side="left", padx=4, pady=2)
+
+        # ── Rate Types ────────────────────────────────────────────
+        ctk.CTkLabel(
+            dialog, text="Rate Types",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="#94A3B8",
+        ).pack(anchor="w", padx=24, pady=(0, 4))
+
+        rate_frame = ctk.CTkFrame(dialog, fg_color="#0F172A", corner_radius=8)
+        rate_frame.pack(fill="x", padx=24, pady=(0, 16))
+
+        rate_vars = {}
+        RATE_DEFAULTS = {"Buying TT", "Selling"}
+        row_frame2 = None
+        for i, (label, _) in enumerate(self.EXRATE_RATE_TYPES.items()):
+            if i % 2 == 0:
+                row_frame2 = ctk.CTkFrame(rate_frame, fg_color="transparent")
+                row_frame2.pack(fill="x", padx=8, pady=2)
+            var = ctk.BooleanVar(value=label in RATE_DEFAULTS)
+            rate_vars[label] = var
+            ctk.CTkCheckBox(
+                row_frame2, text=label, variable=var,
+                font=ctk.CTkFont(size=13),
+                fg_color="#6366F1", hover_color="#4F46E5",
+                width=180,
+            ).pack(side="left", padx=4, pady=2)
+
+        # ── Create Button ─────────────────────────────────────────
+        def _on_create():
+            # Collect selections
+            currencies = [c for c, v in cur_vars.items() if v.get()]
+            rate_types = {
+                lbl: self.EXRATE_RATE_TYPES[lbl]
+                for lbl, v in rate_vars.items() if v.get()
+            }
+            if not currencies:
+                ctk.CTkLabel(
+                    dialog, text="Select at least one currency",
+                    text_color="#EF4444",
+                    font=ctk.CTkFont(size=12),
+                ).pack(pady=(0, 4))
+                return
+            if not rate_types:
+                ctk.CTkLabel(
+                    dialog, text="Select at least one rate type",
+                    text_color="#EF4444",
+                    font=ctk.CTkFont(size=12),
+                ).pack(pady=(0, 4))
+                return
+            dialog.destroy()
+            self._create_exrate_file(currencies, rate_types)
+
+        ctk.CTkButton(
+            dialog, text="Create ExRate File",
+            fg_color="#6366F1", hover_color="#4F46E5",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            corner_radius=10, height=44,
+            command=_on_create,
+        ).pack(padx=24, fill="x", pady=(0, 12))
+
+    def _create_exrate_file(self, currencies, rate_types):
+        """Create a new ExRate file with the chosen currencies and rate types."""
         dest = filedialog.asksaveasfilename(
-            title="Create New ExRate File",
+            title="Save ExRate File",
             initialfile="ExRate.xlsx",
             filetypes=[("Excel files", "*.xlsx")],
             defaultextension=".xlsx",
@@ -757,12 +874,15 @@ class BOTExrateApp(ctk.CTk):
             wb.save(dest)
             wb.close()
 
-            # Now update it with fresh rates
+            # Update with fresh rates — pass currency/rate options
             loop = asyncio.new_event_loop()
             try:
                 loop.run_until_complete(
                     self.engine.update_exrate_standalone(
-                        dest, progress_cb=_status_cb,
+                        dest,
+                        progress_cb=_status_cb,
+                        currencies=currencies,
+                        rate_types=rate_types,
                     )
                 )
                 self.after(100, self.lbl_status.configure,

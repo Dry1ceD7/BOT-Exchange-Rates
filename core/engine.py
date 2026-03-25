@@ -22,10 +22,11 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
+import httpx
 from openpyxl.cell.cell import MergedCell
 from openpyxl.utils import get_column_letter
 
-from core.api_client import BOTClient
+from core.api_client import CLIENT_TIMEOUT, BOTClient
 from core.backup_manager import BackupError, BackupManager
 from core.database import CacheDB
 from core.exrate_sheet import update_master_exrate_sheet
@@ -825,7 +826,7 @@ class LedgerEngine:
                     # object so Excel stores it as a date serial number.
                     if isinstance(src_cell.value, str):
                         src_cell.value = inv_date
-                        src_cell.number_format = "DD/MM/YYYY"
+                        src_cell.number_format = "DD MMM YYYY"
 
                     # Cell references for this row
                     date_ref = f"{date_letter}{row_idx}"
@@ -860,14 +861,14 @@ class LedgerEngine:
                     self._zero_touch_write(ws, row_idx, out_col, formula)
 
                 # ── Pre-format Date column for manual entry ───────────
-                # Apply "DD/MM/YYYY" to the entire Date column including
+                # Apply "DD MMM YYYY" to the entire Date column including
                 # blank rows below data, so dates typed manually by the
                 # user will automatically display in the correct format.
                 max_preformat = max(ws.max_row + 500, 1000)
                 for r in range(mapping["header_row"] + 1, max_preformat + 1):
                     cell = ws.cell(row=r, column=src_idx)
                     if not isinstance(cell, MergedCell):
-                        cell.number_format = "DD/MM/YYYY"
+                        cell.number_format = "DD MMM YYYY"
 
             # ── Save & Cleanup ───────────────────────────────────────────
             if converted:
@@ -989,20 +990,32 @@ class LedgerEngine:
     # ================================================================== #
     #  STANDALONE EXRATE UPDATE
     # ================================================================== #
+
+    # Mapping from rate_type API field → human-readable label suffix
+    _RATE_LABELS = {
+        "buying_transfer": "Buying TT",
+        "buying_sight":    "Buying Sight",
+        "selling":         "Selling",
+        "mid_rate":        "Mid Rate",
+    }
+
     async def update_exrate_standalone(
         self,
         filepath: str,
         progress_cb: Optional[Callable[[str], None]] = None,
+        currencies: Optional[List[str]] = None,
+        rate_types: Optional[Dict[str, str]] = None,
     ) -> str:
         """
         Update a standalone ExRate .xlsx file with fresh exchange rates.
 
-        Opens the file, fetches rates from the BOT API, and writes them
-        using update_master_exrate_sheet(). No monthly tab processing.
-
         Args:
             filepath: Path to the standalone ExRate .xlsx file.
             progress_cb: Optional status callback(message).
+            currencies: List of currency codes (e.g. ["USD","EUR","GBP"]).
+                         Defaults to ["USD","EUR"] if not provided.
+            rate_types: Dict {label: api_field} of rate types to include.
+                         Defaults to Buying TT + Selling if not provided.
 
         Returns:
             Path to the saved file.
@@ -1010,8 +1023,23 @@ class LedgerEngine:
         import re
 
         import openpyxl
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
-        from core.exrate_sheet import update_master_exrate_sheet
+        # ── Defaults ──────────────────────────────────────────────────
+        if not currencies:
+            currencies = ["USD", "EUR"]
+        if not rate_types:
+            rate_types = {
+                "Buying TT": "buying_transfer",
+                "Selling": "selling",
+            }
+
+        # If standard USD+EUR with Buying TT + Selling, use the original
+        # function for backward compatibility with ledger processing.
+        is_standard = (
+            set(currencies) == {"USD", "EUR"}
+            and set(rate_types.values()) == {"buying_transfer", "selling"}
+        )
 
         def _status(msg: str):
             if progress_cb:
@@ -1025,76 +1053,242 @@ class LedgerEngine:
             wb.close()
             raise ValueError("No ExRate sheet found in the selected file.")
 
-        # Read existing dates from ExRate sheet to determine date range
-        ws_ex = wb["ExRate"]
-        existing_dates = set()
-        for row_idx in range(2, (ws_ex.max_row or 1) + 1):
-            cell_val = ws_ex.cell(row=row_idx, column=1).value
-            parsed = self._parse_date(cell_val)
-            if parsed:
-                existing_dates.add(parsed)
+        # ── Standard path (backward compatible) ───────────────────────
+        if is_standard:
+            from core.exrate_sheet import update_master_exrate_sheet
 
-        # Determine date range
-        if existing_dates:
-            target_year = min(existing_dates).year
-        else:
-            target_year = date.today().year
+            ws_ex = wb["ExRate"]
+            existing_dates = set()
+            for row_idx in range(2, (ws_ex.max_row or 1) + 1):
+                cell_val = ws_ex.cell(row=row_idx, column=1).value
+                parsed = self._parse_date(cell_val)
+                if parsed:
+                    existing_dates.add(parsed)
 
-        start_date_str = f"{target_year - 1}-12-20"
-        all_target_dates = existing_dates | {date.today()}
+            if existing_dates:
+                target_year = min(existing_dates).year
+            else:
+                target_year = date.today().year
 
-        _status("Fetching exchange rates from BOT API...")
+            start_date_str = f"{target_year - 1}-12-20"
+            all_target_dates = existing_dates | {date.today()}
+
+            _status("Fetching exchange rates from BOT API...")
+            (
+                logic_engine, usd_selling, eur_selling,
+                usd_buying, eur_buying, _usd_data, _eur_data,
+            ) = await self._preload_api_data(all_target_dates, start_date_str)
+
+            computed_start = self.compute_year_start_date(
+                target_year, logic_engine.holidays
+            )
+
+            sub_pattern = re.compile(r'^Substitution for (.*)\\((.*?)\\)$')
+            holidays_names: Dict[date, str] = {}
+            master_holidays_set = set(logic_engine.holidays)
+
+            for year in {
+                d.year
+                for d in (all_target_dates | {computed_start, date.today()})
+            }:
+                cached_hols = self.cache.get_holidays(year)
+                for h_str, h_name in cached_hols:
+                    try:
+                        h_obj = datetime.strptime(h_str, "%Y-%m-%d").date()
+                        holidays_names[h_obj] = h_name
+                        m = sub_pattern.search(h_name)
+                        if m:
+                            real_name = m.group(1).strip()
+                            date_str = m.group(2).strip()
+                            date_str_clean = re.sub(
+                                r'(\d+)(st|nd|rd|th)', r'\1', date_str
+                            )
+                            date_str_clean = re.sub(
+                                r'^[A-Za-z]+\s+', '', date_str_clean
+                            )
+                            try:
+                                real_dt = datetime.strptime(
+                                    date_str_clean, '%d %B %Y'
+                                ).date()
+                                holidays_names[real_dt] = real_name
+                                master_holidays_set.add(real_dt)
+                            except (ValueError, TypeError):
+                                pass
+                    except (ValueError, TypeError):
+                        pass
+
+            _status("Writing exchange rate data...")
+            update_master_exrate_sheet(
+                wb, usd_buying, usd_selling, eur_buying, eur_selling,
+                sorted(master_holidays_set), holidays_names, computed_start,
+            )
+            wb.save(filepath)
+            wb.close()
+            _status(f"✓ ExRate updated: {os.path.basename(filepath)}")
+            return filepath
+
+        # ── Custom path (any currencies / rate types) ─────────────────
+        _status(f"Fetching rates for {', '.join(currencies)}...")
+
+        # Fetch from API for each currency
+        target_year = date.today().year
+        start_dt = date(target_year - 1, 12, 20)
+        end_dt = date.today()
+
+        # rate_data[currency][api_field][date] = value
+        rate_data: Dict[str, Dict[str, Dict[date, float]]] = {}
+
+        async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT) as http:
+            from core.api_client import BOTClient
+
+            client = BOTClient(http)
+
+            for ccy in currencies:
+                _status(f"Fetching {ccy} rates...")
+                raw_results = await client.get_exchange_rates(
+                    start_dt, end_dt, ccy,
+                )
+                rate_data[ccy] = {}
+                for label, api_field in rate_types.items():
+                    rate_data[ccy][api_field] = {}
+
+                for rec in raw_results:
+                    try:
+                        rec_date = datetime.strptime(
+                            rec.period, "%Y-%m-%d"
+                        ).date()
+                    except (ValueError, TypeError):
+                        continue
+                    for label, api_field in rate_types.items():
+                        val = getattr(rec, api_field, None)
+                        if val is not None:
+                            rate_data[ccy][api_field][rec_date] = val
+
+        # Fetch holidays
+        _status("Fetching holidays...")
+        all_target_dates = {date.today()}
         (
-            logic_engine, usd_selling, eur_selling,
-            usd_buying, eur_buying, _usd_data, _eur_data,
-        ) = await self._preload_api_data(all_target_dates, start_date_str)
+            logic_engine, _, _, _, _, _, _,
+        ) = await self._preload_api_data(all_target_dates, str(start_dt))
 
-        computed_start = self.compute_year_start_date(
-            target_year, logic_engine.holidays
-        )
-
-        # Build holiday names lookup
-        sub_pattern = re.compile(r'^Substitution for (.*)\((.*?)\)$')
-        holidays_names: Dict[date, str] = {}
-        master_holidays_set = set(logic_engine.holidays)
-
-        for year in {
-            d.year
-            for d in (all_target_dates | {computed_start, date.today()})
-        }:
-            cached_hols = self.cache.get_holidays(year)
-            for h_str, h_name in cached_hols:
+        holidays_set = set(logic_engine.holidays)
+        holidays_names_map: Dict[date, str] = {}
+        for year in {start_dt.year, end_dt.year}:
+            for h_str, h_name in self.cache.get_holidays(year):
                 try:
-                    h_obj = datetime.strptime(h_str, "%Y-%m-%d").date()
-                    holidays_names[h_obj] = h_name
-                    m = sub_pattern.search(h_name)
-                    if m:
-                        real_name = m.group(1).strip()
-                        date_str = m.group(2).strip()
-                        date_str_clean = re.sub(
-                            r'(\d+)(st|nd|rd|th)', r'\1', date_str
-                        )
-                        date_str_clean = re.sub(
-                            r'^[A-Za-z]+\s+', '', date_str_clean
-                        )
-                        try:
-                            real_dt = datetime.strptime(
-                                date_str_clean, '%d %B %Y'
-                            ).date()
-                            holidays_names[real_dt] = real_name
-                            master_holidays_set.add(real_dt)
-                        except (ValueError, TypeError):
-                            pass
+                    holidays_names_map[
+                        datetime.strptime(h_str, "%Y-%m-%d").date()
+                    ] = h_name
                 except (ValueError, TypeError):
                     pass
 
-        _status("Writing exchange rate data...")
-        update_master_exrate_sheet(
-            wb, usd_buying, usd_selling, eur_buying, eur_selling,
-            sorted(master_holidays_set), holidays_names, computed_start,
+        # Build column headers: Date + (CCY RateType)... + Holidays
+        headers = ["Date"]
+        col_specs = []  # (currency, api_field) per data column
+        for ccy in currencies:
+            for label, api_field in rate_types.items():
+                headers.append(f"{ccy} {label}")
+                col_specs.append((ccy, api_field))
+        headers.append("Holidays/Weekend")
+
+        # Build date range
+        all_dates = []
+        d = start_dt
+        while d <= end_dt:
+            all_dates.append(d)
+            d += timedelta(days=1)
+        all_dates.sort()
+
+        # ── Write to sheet ────────────────────────────────────────────
+        ws = wb["ExRate"]
+        _status("Writing custom ExRate data...")
+
+        # Styles
+        header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+        header_fill = PatternFill(
+            start_color="1A365D", end_color="1A365D", fill_type="solid"
         )
+        header_align = Alignment(horizontal="center", vertical="center")
+        data_font = Font(name="Calibri", size=10)
+        date_align = Alignment(horizontal="center")
+        thin_border = Border(
+            left=Side(style="thin"), right=Side(style="thin"),
+            top=Side(style="thin"), bottom=Side(style="thin"),
+        )
+        holiday_fill = PatternFill(
+            start_color="FFF3CD", end_color="FFF3CD", fill_type="solid",
+        )
+        weekend_fill = PatternFill(
+            start_color="E8E8E8", end_color="E8E8E8", fill_type="solid",
+        )
+
+        # Clear existing content
+        for row_idx in range(1, max(ws.max_row or 1, 1) + 1):
+            for col_idx in range(1, max(ws.max_column or 1, 1) + 1):
+                ws.cell(row=row_idx, column=col_idx).value = None
+
+        # Write headers
+        for col_idx, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=h)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
+            cell.border = thin_border
+
+        # Set column widths
+        ws.column_dimensions["A"].width = 14
+        for i in range(len(col_specs)):
+            col_letter = openpyxl.utils.get_column_letter(i + 2)
+            ws.column_dimensions[col_letter].width = 18
+        last_col_letter = openpyxl.utils.get_column_letter(len(headers))
+        ws.column_dimensions[last_col_letter].width = 40
+
+        # Write data rows
+        for row_offset, d in enumerate(all_dates):
+            row_idx = row_offset + 2
+            is_weekend = d.weekday() >= 5
+            is_holiday = d in holidays_set
+
+            # Date
+            cell_date = ws.cell(row=row_idx, column=1, value=d)
+            cell_date.number_format = "DD/MM/YYYY"
+            cell_date.font = data_font
+            cell_date.alignment = date_align
+            cell_date.border = thin_border
+
+            # Rate columns
+            for col_offset, (ccy, api_field) in enumerate(col_specs):
+                val = rate_data.get(ccy, {}).get(api_field, {}).get(d)
+                cell = ws.cell(row=row_idx, column=col_offset + 2, value=val)
+                cell.number_format = "0.0000"
+                cell.font = data_font
+                cell.border = thin_border
+
+            # Holiday/Weekend label
+            if is_weekend and is_holiday:
+                label = f"Weekend; {holidays_names_map.get(d, 'Holiday')}"
+            elif is_weekend:
+                label = "Weekend"
+            elif is_holiday:
+                label = holidays_names_map.get(d, "Holiday")
+            else:
+                label = ""
+
+            cell_label = ws.cell(
+                row=row_idx, column=len(headers), value=label,
+            )
+            cell_label.font = data_font
+            cell_label.border = thin_border
+
+            # Row fill
+            if is_holiday:
+                for ci in range(1, len(headers) + 1):
+                    ws.cell(row=row_idx, column=ci).fill = holiday_fill
+            elif is_weekend:
+                for ci in range(1, len(headers) + 1):
+                    ws.cell(row=row_idx, column=ci).fill = weekend_fill
 
         wb.save(filepath)
         wb.close()
-        _status(f"✓ ExRate updated: {os.path.basename(filepath)}")
+        _status(f"✓ ExRate created: {os.path.basename(filepath)}")
         return filepath
