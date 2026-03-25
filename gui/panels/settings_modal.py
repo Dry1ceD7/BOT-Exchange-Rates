@@ -31,7 +31,7 @@ _RELEASES_URL = (
 )
 _BOT_API_PING = (
     "https://gateway.api.bot.or.th/bot/public/Stat-ExchangeRate/v2/"
-    "DAILY_AVG_EXG_RATE/?start_period=2025-01-01&end_period=2025-01-02"
+    "DAILY_AVG_EXG_RATE/?start_period=2025-01-01&end_period=2025-01-02&currency=USD"
 )
 
 

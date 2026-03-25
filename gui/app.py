@@ -49,10 +49,20 @@ logger = logging.getLogger(__name__)
 
 def get_theme() -> dict:
     """Return the active color palette based on customtkinter appearance mode."""
-    mode = ctk.get_appearance_mode().lower()
-    is_dark = mode == "dark" or (
-        mode == "system" and ctk.AppearanceModeTracker.detect_appearance_mode() == 1
-    )
+    mode = ctk.get_appearance_mode()  # Returns "Dark", "Light", or "System"
+    logger.debug("get_theme: ctk.get_appearance_mode() = %r", mode)
+
+    # Determine if we should use dark palette
+    if mode.lower() == "light":
+        is_dark = False
+    elif mode.lower() == "dark":
+        is_dark = True
+    else:
+        # System mode — try to detect, default to dark on failure
+        try:
+            is_dark = ctk.AppearanceModeTracker.detect_appearance_mode() == 1
+        except Exception:
+            is_dark = True
 
     if is_dark:
         return {
@@ -85,32 +95,32 @@ def get_theme() -> dict:
         }
     else:
         return {
-            "bg":           "#F0F4F8",
-            "header_bg":    "#1A365D",
+            "bg":           "#EEF2F7",
+            "header_bg":    "#2D4A7A",
             "header_text":  "#FFFFFF",
-            "header_sub":   "#94A3B8",
+            "header_sub":   "#CBD5E1",
             "card_bg":      "#FFFFFF",
-            "card_border":  "#E2E8F0",
-            "divider":      "#E2E8F0",
-            "section_bg":   "#F8FAFC",
-            "text_primary": "#1E293B",
-            "text_secondary": "#64748B",
-            "text_muted":   "#94A3B8",
-            "trust_blue":   "#2563EB",
-            "blue_hover":   "#1D4ED8",
-            "success":      "#16A34A",
-            "success_hover": "#15803D",
-            "warning":      "#D97706",
-            "warning_hover": "#B45309",
-            "revert_bg":    "#C2410C",
-            "revert_hover": "#9A3412",
-            "error_text":   "#DC2626",
-            "process_text": "#2563EB",
+            "card_border":  "#D1D9E6",
+            "divider":      "#D1D9E6",
+            "section_bg":   "#F5F7FA",
+            "text_primary": "#1A202C",
+            "text_secondary": "#4A5568",
+            "text_muted":   "#A0AEC0",
+            "trust_blue":   "#2B6CB0",
+            "blue_hover":   "#2C5282",
+            "success":      "#2F855A",
+            "success_hover": "#276749",
+            "warning":      "#C05621",
+            "warning_hover": "#9C4221",
+            "revert_bg":    "#C53030",
+            "revert_hover": "#9B2C2C",
+            "error_text":   "#C53030",
+            "process_text": "#2B6CB0",
             "drop_border":  "#CBD5E1",
-            "combo_bg":     "#F8FAFC",
+            "combo_bg":     "#F7FAFC",
             "combo_border": "#CBD5E1",
-            "switch_track": "#94A3B8",
-            "switch_thumb": "#64748B",
+            "switch_track": "#CBD5E1",
+            "switch_thumb": "#4A5568",
         }
 
 # Legacy aliases for backward compatibility during transition
@@ -890,7 +900,11 @@ class BOTExrateApp(ctk.CTk):
         def _worker():
             import asyncio
 
+            import httpx
             from openpyxl import Workbook
+
+            from core.api_client import CLIENT_TIMEOUT, BOTClient
+            from core.engine import LedgerEngine
 
             try:
                 # Create a blank workbook with an ExRate sheet
@@ -900,17 +914,21 @@ class BOTExrateApp(ctk.CTk):
                 wb.save(dest)
                 wb.close()
 
-                # Update with fresh rates from BOT API (fully independent)
-                loop = asyncio.new_event_loop()
-                try:
-                    loop.run_until_complete(
-                        self.engine.update_exrate_standalone(
+                # Create a fresh engine with its own async client
+                async def _run():
+                    async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT) as client:
+                        api = BOTClient(client)
+                        engine = LedgerEngine(api, event_bus=self.event_bus)
+                        return await engine.update_exrate_standalone(
                             dest,
                             progress_cb=_status_cb,
                             currencies=currencies,
                             rate_types=rate_types,
                         )
-                    )
+
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(_run())
                     self.after(0, _done, True,
                                f"✓ ExRate created: {os.path.basename(dest)}")
                 except Exception as e:
