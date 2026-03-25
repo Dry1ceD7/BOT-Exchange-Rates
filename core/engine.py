@@ -169,7 +169,6 @@ class LedgerEngine:
             formats = [
                 "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d",
                 "%d %b %Y", "%d %B %Y", "%Y%m%d",
-                "%m/%d/%Y", "%m-%d-%Y",
             ]
             for fmt in formats:
                 try:
