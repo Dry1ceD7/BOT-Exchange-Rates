@@ -2,21 +2,19 @@
 """
 main.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.8) - Enterprise Desktop Edition
+BOT Exchange Rate Processor (v4.0) - Enterprise Desktop Edition
 ---------------------------------------------------------------------------
 Entry point. Loads .env, prompts for API tokens on first use via
 a registration dialog, ensures required directories exist, then
-launches the GUI.
+launches the PySide6 GUI.
 """
 
 import os
 import sys
+import traceback
 
 # Explicitly insert current directory to Python Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import tkinter as tk
-from tkinter import messagebox
 
 from dotenv import load_dotenv
 
@@ -32,8 +30,6 @@ def _ensure_directories():
     """
     Git does not track empty folders. On a fresh clone, data/input/
     and data/backups/ will not exist. Create them proactively.
-    (data/ and data/backups/ are also created by database.py and
-    backup_manager.py singletons, but data/input/ is NOT.)
     """
     project_root = get_project_root()
     for subdir in ["data", "data/input", "data/backups"]:
@@ -53,19 +49,14 @@ def _prompt_for_tokens() -> bool:
     Launch the registration dialog to collect API tokens.
     Returns True if the user activated successfully, False otherwise.
     """
-    import customtkinter as ctk
+    from PySide6.QtWidgets import QApplication
 
     from gui.panels.token_dialog import TokenRegistrationDialog
 
-    root = ctk.CTk()
-    root.withdraw()
-
-    dialog = TokenRegistrationDialog(root, env_path=ENV_PATH)
-    root.wait_window(dialog)
-
-    activated = dialog.activated
-    root.destroy()
-    return activated
+    app = QApplication.instance() or QApplication(sys.argv)
+    dialog = TokenRegistrationDialog(env_path=ENV_PATH)
+    result = dialog.exec()
+    return result == dialog.Accepted
 
 
 def main():
@@ -76,12 +67,14 @@ def main():
         if not _prompt_for_tokens():
             sys.exit(0)
 
+    from PySide6.QtWidgets import QApplication
+
     from gui.app import BOTExrateApp
-    app = BOTExrateApp()
-    app.mainloop()
 
-
-import traceback  # noqa: E402
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BOTExrateApp()
+    window.show()
+    sys.exit(app.exec())
 
 
 def global_exception_handler(exc_type, exc_value, exc_traceback):
@@ -105,13 +98,14 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
 
     # Show GUI popup
     try:
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror(
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        app = QApplication.instance() or QApplication(sys.argv)
+        QMessageBox.critical(
+            None,
             "Fatal Application Error",
-            f"A critical crash occurred:\n\n{exc_value}\n\nPlease check error.log for full details."
+            f"A critical crash occurred:\n\n{exc_value}\n\nPlease check error.log for full details.",
         )
-        root.destroy()
     except Exception:
         pass
 

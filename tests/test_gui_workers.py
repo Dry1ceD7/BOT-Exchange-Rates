@@ -114,11 +114,17 @@ class TestSettingsManager:
 class TestPanelModules:
     """Verify that modular panel files exist and expose the right classes."""
 
-    def test_live_console_module_exists(self):
-        from gui.panels.live_console import LiveConsolePanel  # noqa: F401
+    def test_live_console_module_importable(self):
+        """live_console module must be importable (stub in v4.0)."""
+        import gui.panels.live_console  # noqa: F401
 
     def test_settings_modal_module_exists(self):
         from gui.panels.settings_modal import SettingsModal  # noqa: F401
 
-    def test_control_panel_module_exists(self):
-        from gui.panels.control_panel import ControlPanel  # noqa: F401
+    def test_control_panel_module_importable(self):
+        """control_panel module must be importable (stub in v4.0)."""
+        import gui.panels.control_panel  # noqa: F401
+
+    def test_main_app_module_exists(self):
+        """gui/app.py must expose BOTExrateApp (v4.0 main window)."""
+        from gui.app import BOTExrateApp  # noqa: F401

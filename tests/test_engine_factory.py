@@ -2,17 +2,17 @@
 """
 tests/test_engine_factory.py
 ---------------------------------------------------------------------------
-TDGD RED PHASE: Failing Tests for the Engine Factory (Strategy Pattern)
+BOT Exchange Rate Processor (v4.0) — Engine Factory Tests
 ---------------------------------------------------------------------------
-These tests MUST FAIL initially because core/engine_factory.py does not
-exist yet. They define the contract that the factory must satisfy.
+Validates that the single OpenpyxlEngine is properly exposed and
+inherits from BaseEngine with the required contract methods.
 """
 
 from unittest.mock import patch
 
 
 class TestEngineFactoryRouting:
-    """Verify that the OS-level router returns the correct engine class."""
+    """Verify that the factory returns the correct engine class."""
 
     def test_factory_module_exists(self):
         """The engine_factory module must be importable."""
@@ -25,52 +25,58 @@ class TestEngineFactoryRouting:
         assert hasattr(BaseEngine, "process_ledger")
         assert hasattr(BaseEngine, "process_batch")
 
-    @patch("sys.platform", "win32")
-    def test_windows_returns_native_engine(self):
-        """On Windows, the factory must return NativeExcelEngine."""
-        # Force re-import with patched platform
+    def test_all_platforms_return_openpyxl_engine(self):
+        """All platforms now return OpenpyxlEngine (COM removed)."""
         from core.engine_factory import get_engine_class
 
         engine_cls = get_engine_class()
-        assert engine_cls.__name__ == "NativeExcelEngine"
+        assert engine_cls.__name__ == "OpenpyxlEngine"
+
+    @patch("sys.platform", "win32")
+    def test_windows_returns_openpyxl_engine(self):
+        """On Windows, the factory returns OpenpyxlEngine (COM removed)."""
+        from core.engine_factory import get_engine_class
+
+        engine_cls = get_engine_class()
+        assert engine_cls.__name__ == "OpenpyxlEngine"
 
     @patch("sys.platform", "darwin")
-    def test_macos_returns_fallback_engine(self):
-        """On macOS, the factory must return FallbackExcelEngine."""
+    def test_macos_returns_openpyxl_engine(self):
+        """On macOS, the factory returns OpenpyxlEngine."""
         from core.engine_factory import get_engine_class
 
         engine_cls = get_engine_class()
-        assert engine_cls.__name__ == "FallbackExcelEngine"
+        assert engine_cls.__name__ == "OpenpyxlEngine"
 
     @patch("sys.platform", "linux")
-    def test_linux_returns_fallback_engine(self):
-        """On Linux, the factory must return FallbackExcelEngine."""
+    def test_linux_returns_openpyxl_engine(self):
+        """On Linux, the factory returns OpenpyxlEngine."""
         from core.engine_factory import get_engine_class
 
         engine_cls = get_engine_class()
-        assert engine_cls.__name__ == "FallbackExcelEngine"
+        assert engine_cls.__name__ == "OpenpyxlEngine"
 
 
 class TestBaseEngineContract:
-    """Verify that both engine implementations share the BaseEngine API."""
+    """Verify that OpenpyxlEngine shares the BaseEngine API."""
 
-    def test_fallback_engine_inherits_base(self):
-        """FallbackExcelEngine must be a subclass of BaseEngine."""
-        from core.engine_factory import BaseEngine, FallbackExcelEngine
+    def test_openpyxl_engine_inherits_base(self):
+        """OpenpyxlEngine must be a subclass of BaseEngine."""
+        from core.engine_factory import BaseEngine, OpenpyxlEngine
 
-        assert issubclass(FallbackExcelEngine, BaseEngine)
+        assert issubclass(OpenpyxlEngine, BaseEngine)
 
-    def test_fallback_engine_has_process_ledger(self):
-        """FallbackExcelEngine must implement process_ledger()."""
-        from core.engine_factory import FallbackExcelEngine
+    def test_openpyxl_engine_has_process_ledger(self):
+        """OpenpyxlEngine must implement process_ledger()."""
+        from core.engine_factory import OpenpyxlEngine
 
-        assert callable(getattr(FallbackExcelEngine, "process_ledger", None))
+        assert callable(getattr(OpenpyxlEngine, "process_ledger", None))
 
-    def test_fallback_engine_has_process_batch(self):
-        """FallbackExcelEngine must implement process_batch()."""
-        from core.engine_factory import FallbackExcelEngine
+    def test_openpyxl_engine_has_process_batch(self):
+        """OpenpyxlEngine must implement process_batch()."""
+        from core.engine_factory import OpenpyxlEngine
 
-        assert callable(getattr(FallbackExcelEngine, "process_batch", None))
+        assert callable(getattr(OpenpyxlEngine, "process_batch", None))
 
 
 class TestAutoUpdaterContract:
@@ -84,8 +90,6 @@ class TestAutoUpdaterContract:
         """check_for_update() must return a dict with version info."""
         from core.auto_updater import check_for_update
 
-        # With a mock, it should return a structure like:
-        # {"update_available": bool, "latest_version": str, "download_url": str}
         result = check_for_update(current_version="0.0.0-test")
         assert isinstance(result, dict)
         assert "update_available" in result

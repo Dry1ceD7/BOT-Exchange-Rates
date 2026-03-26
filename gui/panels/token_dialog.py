@@ -2,12 +2,10 @@
 """
 gui/panels/token_dialog.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.8) — API Token Registration Dialog
+BOT Exchange Rate Processor (v4.0) — API Token Registration Dialog (PySide6)
 ---------------------------------------------------------------------------
-License-key-style popup that collects BOT API tokens on first use.
+Modal QDialog that collects BOT API tokens on first use.
 Writes validated tokens to .env and injects them into os.environ.
-
-SFFB: Strict < 200 lines.
 """
 
 import logging
@@ -15,236 +13,238 @@ import os
 import webbrowser
 from typing import Optional
 
-import customtkinter as ctk
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+)
 
 from core.paths import get_project_root
 
 logger = logging.getLogger(__name__)
 
-# ── Theme Constants ──────────────────────────────────────────────────────
-COLOR_BG = "#0F172A"
-COLOR_CARD = "#1E293B"
-COLOR_TEXT = "#F1F5F9"
-COLOR_MUTED = "#94A3B8"
-COLOR_ACCENT = "#3B82F6"
-COLOR_SUCCESS = "#22C55E"
-COLOR_ERROR = "#F87171"
-COLOR_ENTRY_BG = "#334155"
-
 BOT_PORTAL_URL = "https://apiportal.bot.or.th/"
 MIN_KEY_LENGTH = 8
 
+# ── Theme Colors (Catppuccin Mocha) ──────────────────────────────────────
+QSS = """
+QDialog {
+    background-color: #1E1E2E;
+}
+QLabel {
+    color: #CDD6F4;
+}
+QLabel#Title {
+    font-size: 22px;
+    font-weight: 700;
+    color: #89B4FA;
+}
+QLabel#Subtitle {
+    font-size: 13px;
+    color: #A6ADC8;
+}
+QLabel#FieldLabel {
+    font-size: 11px;
+    font-weight: 600;
+    color: #A6ADC8;
+}
+QLabel#Status {
+    font-size: 12px;
+    color: #F38BA8;
+}
+QLabel#PortalLink {
+    font-size: 12px;
+    color: #89B4FA;
+}
+QLineEdit {
+    background-color: #313244;
+    color: #CDD6F4;
+    border: 1px solid #89B4FA;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-family: "SF Mono", "Cascadia Code", monospace;
+    font-size: 13px;
+}
+QLineEdit:focus {
+    border-color: #B4BEFE;
+}
+QPushButton#Activate {
+    background-color: #A6E3A1;
+    color: #1E1E2E;
+    font-size: 15px;
+    font-weight: 700;
+    border: none;
+    border-radius: 10px;
+    padding: 10px 20px;
+}
+QPushButton#Activate:hover {
+    background-color: #94D18A;
+}
+QCheckBox {
+    color: #A6ADC8;
+    font-size: 12px;
+}
+"""
 
-class TokenRegistrationDialog(ctk.CTkToplevel):
+
+class TokenRegistrationDialog(QDialog):
     """
-    A registration-key-style modal for collecting BOT API tokens.
+    PySide6 modal dialog for collecting BOT API tokens.
 
     Usage:
-        dialog = TokenRegistrationDialog(root)
-        root.wait_window(dialog)
-        if dialog.activated:
+        dialog = TokenRegistrationDialog(env_path=".env")
+        if dialog.exec() == QDialog.Accepted:
             # tokens are now in os.environ and .env
     """
 
     def __init__(
         self,
-        master,
         env_path: Optional[str] = None,
         prefill_exg: str = "",
         prefill_hol: str = "",
-        **kwargs,
+        parent=None,
     ):
-        super().__init__(master, **kwargs)
-
-        self.activated = False
+        super().__init__(parent)
         self._env_path = env_path or os.path.join(get_project_root(), ".env")
 
-        self.title("BOT Exchange Rate — API Registration")
-        self.geometry("520x520")
-        self.resizable(False, False)
-        self.configure(fg_color=COLOR_BG)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.setWindowTitle("BOT Exchange Rate — API Registration")
+        self.setFixedSize(520, 480)
+        self.setStyleSheet(QSS)
+        self.setWindowModality(Qt.ApplicationModal)
 
-        self._prefill_exg = prefill_exg
-        self._prefill_hol = prefill_hol
-        self._show_keys = False
+        self._build_ui(prefill_exg, prefill_hol)
 
-        self._build_ui()
-        self._center()
-        self.grab_set()
+    def _build_ui(self, prefill_exg: str, prefill_hol: str):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 28, 30, 20)
+        layout.setSpacing(8)
 
-    # ── Layout ───────────────────────────────────────────────────────────
+        # Title
+        title = QLabel("API Registration")
+        title.setObjectName("Title")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
 
-    def _center(self):
-        self.update_idletasks()
-        w, h = 520, 520
-        sx = (self.winfo_screenwidth() - w) // 2
-        sy = (self.winfo_screenheight() - h) // 2
-        self.geometry(f"{w}x{h}+{sx}+{sy}")
+        subtitle = QLabel("Enter your Bank of Thailand API keys to activate")
+        subtitle.setObjectName("Subtitle")
+        subtitle.setAlignment(Qt.AlignCenter)
+        layout.addWidget(subtitle)
+        layout.addSpacing(16)
 
-    def _build_ui(self):
-        # Header
-        ctk.CTkLabel(
-            self, text="API Registration",
-            font=ctk.CTkFont(size=22, weight="bold"),
-            text_color=COLOR_TEXT,
-        ).pack(pady=(28, 4))
+        # Exchange Rate Key
+        lbl_exg = QLabel("EXCHANGE RATE API KEY")
+        lbl_exg.setObjectName("FieldLabel")
+        layout.addWidget(lbl_exg)
 
-        ctk.CTkLabel(
-            self, text="Enter your Bank of Thailand API keys to activate",
-            font=ctk.CTkFont(size=13),
-            text_color=COLOR_MUTED,
-        ).pack(pady=(0, 20))
+        self._entry_exg = QLineEdit()
+        self._entry_exg.setPlaceholderText("Paste your exchange rate API key here")
+        self._entry_exg.setEchoMode(QLineEdit.Password)
+        if prefill_exg:
+            self._entry_exg.setText(prefill_exg)
+        layout.addWidget(self._entry_exg)
+        layout.addSpacing(10)
 
-        # Card frame
-        card = ctk.CTkFrame(self, fg_color=COLOR_CARD, corner_radius=12)
-        card.pack(padx=30, fill="x")
+        # Holiday Key
+        lbl_hol = QLabel("HOLIDAY API KEY")
+        lbl_hol.setObjectName("FieldLabel")
+        layout.addWidget(lbl_hol)
 
-        # ── Exchange Rate Key ────────────────────────────────────────
-        ctk.CTkLabel(
-            card, text="EXCHANGE RATE API KEY",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=COLOR_MUTED,
-        ).pack(anchor="w", padx=20, pady=(18, 4))
+        self._entry_hol = QLineEdit()
+        self._entry_hol.setPlaceholderText("Paste your holiday API key here")
+        self._entry_hol.setEchoMode(QLineEdit.Password)
+        if prefill_hol:
+            self._entry_hol.setText(prefill_hol)
+        layout.addWidget(self._entry_hol)
+        layout.addSpacing(6)
 
-        self._entry_exg = ctk.CTkEntry(
-            card, height=40, corner_radius=8,
-            fg_color=COLOR_ENTRY_BG, border_color=COLOR_ACCENT,
-            text_color=COLOR_TEXT, font=ctk.CTkFont(size=13, family="Courier"),
-            placeholder_text="Paste your exchange rate API key here",
-            show="•",
-        )
-        self._entry_exg.pack(padx=20, fill="x")
-        if self._prefill_exg:
-            self._entry_exg.insert(0, self._prefill_exg)
+        # Show keys checkbox
+        self._chk_show = QCheckBox("Show keys")
+        self._chk_show.toggled.connect(self._toggle_visibility)
+        layout.addWidget(self._chk_show)
+        layout.addSpacing(10)
 
-        # ── Holiday Key ──────────────────────────────────────────────
-        ctk.CTkLabel(
-            card, text="HOLIDAY API KEY",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=COLOR_MUTED,
-        ).pack(anchor="w", padx=20, pady=(14, 4))
+        # Status label
+        self._lbl_status = QLabel("")
+        self._lbl_status.setObjectName("Status")
+        self._lbl_status.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._lbl_status)
+        layout.addSpacing(6)
 
-        self._entry_hol = ctk.CTkEntry(
-            card, height=40, corner_radius=8,
-            fg_color=COLOR_ENTRY_BG, border_color=COLOR_ACCENT,
-            text_color=COLOR_TEXT, font=ctk.CTkFont(size=13, family="Courier"),
-            placeholder_text="Paste your holiday API key here",
-            show="•",
-        )
-        self._entry_hol.pack(padx=20, fill="x")
-        if self._prefill_hol:
-            self._entry_hol.insert(0, self._prefill_hol)
+        # Activate button
+        btn_activate = QPushButton("Activate")
+        btn_activate.setObjectName("Activate")
+        btn_activate.setMinimumHeight(44)
+        btn_activate.clicked.connect(self._on_activate)
+        layout.addWidget(btn_activate)
+        layout.addSpacing(6)
 
-        # ── Show Keys toggle ─────────────────────────────────────────
-        self._chk_show = ctk.CTkCheckBox(
-            card, text="Show keys",
-            font=ctk.CTkFont(size=12), text_color=COLOR_MUTED,
-            command=self._toggle_visibility,
-            checkbox_height=18, checkbox_width=18,
-        )
-        self._chk_show.pack(anchor="w", padx=20, pady=(10, 18))
+        # Portal link
+        link = QLabel("Don't have keys? Register at apiportal.bot.or.th")
+        link.setObjectName("PortalLink")
+        link.setAlignment(Qt.AlignCenter)
+        link.setCursor(Qt.PointingHandCursor)
+        link.mousePressEvent = lambda _: webbrowser.open(BOT_PORTAL_URL)
+        layout.addWidget(link)
 
-        # ── Status Label ─────────────────────────────────────────────
-        self._lbl_status = ctk.CTkLabel(
-            self, text="", font=ctk.CTkFont(size=12),
-            text_color=COLOR_ERROR,
-        )
-        self._lbl_status.pack(pady=(12, 4))
-
-        # ── Activate Button ──────────────────────────────────────────
-        ctk.CTkButton(
-            self, text="Activate",
-            fg_color=COLOR_SUCCESS, hover_color="#16A34A",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            corner_radius=10, height=44,
-            command=self._on_activate,
-        ).pack(padx=30, fill="x", pady=(0, 8))
-
-        # ── Portal Link ──────────────────────────────────────────────
-        link = ctk.CTkLabel(
-            self,
-            text="Don't have keys? Register at apiportal.bot.or.th",
-            font=ctk.CTkFont(size=12, underline=True),
-            text_color=COLOR_ACCENT, cursor="hand2",
-        )
-        link.pack(pady=(0, 20))
-        link.bind("<Button-1>", lambda _: webbrowser.open(BOT_PORTAL_URL))
-
-    # ── Actions ──────────────────────────────────────────────────────────
-
-    def _toggle_visibility(self):
-        self._show_keys = not self._show_keys
-        char = "" if self._show_keys else "•"
-        self._entry_exg.configure(show=char)
-        self._entry_hol.configure(show=char)
+    def _toggle_visibility(self, checked: bool):
+        mode = QLineEdit.Normal if checked else QLineEdit.Password
+        self._entry_exg.setEchoMode(mode)
+        self._entry_hol.setEchoMode(mode)
 
     def _on_activate(self):
-        exg = self._entry_exg.get().strip()
-        hol = self._entry_hol.get().strip()
+        exg = self._entry_exg.text().strip()
+        hol = self._entry_hol.text().strip()
 
-        # Validate
         if not exg or not hol:
-            self._lbl_status.configure(
-                text="Both API keys are required.", text_color=COLOR_ERROR,
-            )
+            self._lbl_status.setText("Both API keys are required.")
             return
         if len(exg) < MIN_KEY_LENGTH or len(hol) < MIN_KEY_LENGTH:
-            self._lbl_status.configure(
-                text="API keys appear too short. Please check and try again.",
-                text_color=COLOR_ERROR,
-            )
+            self._lbl_status.setText("API keys appear too short.")
             return
 
-        # Write to .env
         try:
             self._write_env(exg, hol)
         except OSError as e:
-            self._lbl_status.configure(
-                text="Failed to save .env: %s" % e, text_color=COLOR_ERROR,
-            )
+            self._lbl_status.setText(f"Failed to save .env: {e}")
             logger.error("Failed to write .env: %s", e)
             return
 
-        # Inject into current process
         os.environ["BOT_TOKEN_EXG"] = exg
         os.environ["BOT_TOKEN_HOL"] = hol
 
-        self.activated = True
         logger.info("API tokens activated and saved to .env")
-        self.grab_release()
-        self.destroy()
+        self.accept()
 
     def _write_env(self, exg: str, hol: str):
-        """Write or update the .env file with the provided tokens."""
+        """Write or update .env with tokens."""
         lines = []
         if os.path.exists(self._env_path):
             with open(self._env_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
 
-        # Update existing keys or prepare to append
         keys_written = {"BOT_TOKEN_EXG": False, "BOT_TOKEN_HOL": False}
         new_lines = []
         for line in lines:
             stripped = line.strip()
             if stripped.startswith("BOT_TOKEN_EXG="):
-                new_lines.append("BOT_TOKEN_EXG=%s\n" % exg)
+                new_lines.append(f"BOT_TOKEN_EXG={exg}\n")
                 keys_written["BOT_TOKEN_EXG"] = True
             elif stripped.startswith("BOT_TOKEN_HOL="):
-                new_lines.append("BOT_TOKEN_HOL=%s\n" % hol)
+                new_lines.append(f"BOT_TOKEN_HOL={hol}\n")
                 keys_written["BOT_TOKEN_HOL"] = True
             else:
                 new_lines.append(line)
 
         if not keys_written["BOT_TOKEN_EXG"]:
-            new_lines.append("BOT_TOKEN_EXG=%s\n" % exg)
+            new_lines.append(f"BOT_TOKEN_EXG={exg}\n")
         if not keys_written["BOT_TOKEN_HOL"]:
-            new_lines.append("BOT_TOKEN_HOL=%s\n" % hol)
+            new_lines.append(f"BOT_TOKEN_HOL={hol}\n")
 
         with open(self._env_path, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
-
-    def _on_close(self):
-        self.activated = False
-        self.grab_release()
-        self.destroy()
