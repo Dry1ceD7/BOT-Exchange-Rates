@@ -217,6 +217,12 @@ class BOTExrateApp(QMainWindow):
         title.setObjectName("AppHeader")
         hdr.addWidget(title)
         hdr.addStretch()
+
+        # Live rate ticker
+        from gui.panels.rate_ticker import RateTickerWidget
+        self.rate_ticker = RateTickerWidget()
+        hdr.addWidget(self.rate_ticker)
+
         ver = QLabel(f"v{__version__}")
         ver.setObjectName("VersionBadge")
         hdr.addWidget(ver)
@@ -413,12 +419,16 @@ class BOTExrateApp(QMainWindow):
         self.drop_zone.set_colors(COLORS_DARK)
         self._dark_mode = True
         self.btn_theme.setText("Light Mode")
+        if hasattr(self, 'rate_ticker'):
+            self.rate_ticker.set_dark_mode(True)
 
     def _apply_theme_light(self):
         apply_light_theme(self)
         self.drop_zone.set_colors(COLORS_LIGHT)
         self._dark_mode = False
         self.btn_theme.setText("Dark Mode")
+        if hasattr(self, 'rate_ticker'):
+            self.rate_ticker.set_dark_mode(False)
 
     def _on_toggle_theme(self):
         if self._dark_mode:
