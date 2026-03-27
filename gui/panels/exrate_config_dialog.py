@@ -88,7 +88,7 @@ class ExrateConfigDialog(QDialog):
         self.combo_year = QComboBox()
         self.combo_year.setObjectName("DateCombo")
         today = date.today()
-        years = [str(y) for y in range(2010, today.year + 2)]
+        years = [str(y) for y in range(2018, today.year + 1)]
         self.combo_year.addItems(years)
         self.combo_year.setCurrentText(str(today.year))
         yl.addWidget(self.combo_year)

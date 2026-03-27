@@ -123,13 +123,21 @@ def _read_existing_data(ws, data_start_row: int) -> Dict[date, dict]:
 
 
 def _parse_cell_date(cell_val) -> date | None:
-    """Parse a date from a cell value."""
+    """Parse a date from a cell value (supports multiple formats)."""
     if isinstance(cell_val, datetime):
         return cell_val.date()
     if isinstance(cell_val, date):
         return cell_val
     if isinstance(cell_val, str):
-        for fmt in ("%Y-%m-%d", "%d %b %Y"):
+        for fmt in (
+            "%Y-%m-%d",    # 2026-01-22 (ISO)
+            "%d %b %Y",    # 22 Jan 2026
+            "%d %B %Y",    # 22 January 2026
+            "%d/%m/%Y",    # 22/01/2026
+            "%d/%m/%y",    # 22/01/26 or 22/1/26
+            "%d-%m-%Y",    # 22-01-2026
+            "%d-%m-%y",    # 22-01-26
+        ):
             try:
                 return datetime.strptime(cell_val.strip(), fmt).date()
             except ValueError:
@@ -204,7 +212,7 @@ def _write_merged_data(ws, merged, holidays_set, thin_border, start_row):
         is_holiday = d in holidays_set
 
         cell_date = ws.cell(row=current_row, column=1, value=d)
-        cell_date.number_format = "DD/MM/YYYY"
+        cell_date.number_format = "DD MMM YYYY"
         cell_date.font = data_font
         cell_date.alignment = date_align
         cell_date.border = thin_border

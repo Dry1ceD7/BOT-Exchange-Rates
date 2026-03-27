@@ -117,13 +117,23 @@ class LedgerEngine:
             return cell_value.date()
         if isinstance(cell_value, date):
             return cell_value
+        if isinstance(cell_value, (int, float)):
+            # Possibly a numeric date (Excel serial number) — skip
+            return None
         if isinstance(cell_value, str):
             val = cell_value.strip()
             if not val or val.lower() in ("nan", "null"):
                 return None
+            # Full-year formats first, then short-year formats
             formats = [
-                "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d",
-                "%d %b %Y", "%d %B %Y", "%Y%m%d",
+                "%d/%m/%Y",   # 22/01/2026
+                "%d-%m-%Y",   # 22-01-2026
+                "%Y-%m-%d",   # 2026-01-22 (ISO)
+                "%d %b %Y",   # 22 Jan 2026
+                "%d %B %Y",   # 22 January 2026
+                "%Y%m%d",     # 20260122
+                "%d/%m/%y",   # 22/01/26 or 22/1/26
+                "%d-%m-%y",   # 22-01-26
             ]
             for fmt in formats:
                 try:
@@ -674,9 +684,11 @@ class LedgerEngine:
                         continue
 
                     # ── Date Normalization ─────────────────────────
+                    # Write proper date object + display as "DD MMM YYYY"
+                    # so the cell shows e.g. "22 Jan 2026"
                     if isinstance(src_cell.value, str):
                         src_cell.value = inv_date
-                        src_cell.number_format = "DD/MM/YYYY"
+                    src_cell.number_format = "DD MMM YYYY"
 
                     # Cell references for this row
                     date_ref = f"{date_letter}{row_idx}"
@@ -713,7 +725,7 @@ class LedgerEngine:
                 for r in range(mapping["header_row"] + 1, max_preformat + 1):
                     cell = ws.cell(row=r, column=src_idx)
                     if not isinstance(cell, MergedCell):
-                        cell.number_format = "DD/MM/YYYY"
+                        cell.number_format = "DD MMM YYYY"
 
             # ── Save ─────────────────────────────────────────────────────
             wb.save(filepath)
