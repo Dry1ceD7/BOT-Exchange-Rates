@@ -17,19 +17,18 @@ import sys
 from datetime import date
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import (
+    QColor,
     QDragEnterEvent,
     QDropEvent,
     QFont,
     QIcon,
-    QPixmap,
     QPainter,
-    QColor,
+    QPixmap,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -54,7 +53,7 @@ from core.paths import get_project_root
 from core.version import __version__
 from core.workers.event_bus import EventBus
 from gui.handlers import BatchWorker, RevertWorker, StandaloneExrateWorker
-from gui.theme import apply_dark_theme, apply_light_theme, COLORS_DARK, COLORS_LIGHT
+from gui.theme import COLORS_DARK, COLORS_LIGHT, apply_dark_theme, apply_light_theme
 
 logger = logging.getLogger(__name__)
 

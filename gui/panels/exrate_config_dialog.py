@@ -186,6 +186,7 @@ class ExrateConfigDialog(QDialog):
     # ── Generate ─────────────────────────────────────────────────────
     def _on_generate(self):
         import os
+
         from PySide6.QtWidgets import QMessageBox
 
         currencies = [ccy for ccy, cb in self._ccy_checks.items() if cb.isChecked()]

@@ -10,17 +10,14 @@ and application info.
 
 import logging
 import os
-import threading
 from typing import Optional
 
 import httpx
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDialog,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QPushButton,
     QVBoxLayout,

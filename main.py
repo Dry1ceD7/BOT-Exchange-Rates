@@ -53,7 +53,14 @@ def _prompt_for_tokens() -> bool:
 
     from gui.panels.token_dialog import TokenRegistrationDialog
 
-    app = QApplication.instance() or QApplication(sys.argv)
+    if not QApplication.instance():
+        _app = QApplication(sys.argv)
+    else:
+        _app = QApplication.instance()
+
+    dialog = TokenRegistrationDialog(env_path=ENV_PATH)
+    result = dialog.exec()
+
     dialog = TokenRegistrationDialog(env_path=ENV_PATH)
     result = dialog.exec()
     return result == dialog.Accepted
@@ -100,7 +107,11 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
     try:
         from PySide6.QtWidgets import QApplication, QMessageBox
 
-        app = QApplication.instance() or QApplication(sys.argv)
+        if not QApplication.instance():
+            _app = QApplication(sys.argv)
+        else:
+            _app = QApplication.instance()
+
         QMessageBox.critical(
             None,
             "Fatal Application Error",

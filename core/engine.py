@@ -14,7 +14,6 @@ import gc
 import logging
 import os
 import re
-import time
 import traceback
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -30,8 +29,6 @@ from core.database import CacheDB
 from core.exrate_sheet import update_master_exrate_sheet
 from core.logic import BOTLogicEngine, safe_to_decimal
 from core.prescan import prescan_oldest_date
-
-
 
 logger = logging.getLogger(__name__)
 
