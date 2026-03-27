@@ -279,7 +279,7 @@ QProgressBar#BatchProgress {{
     border: 1px solid {C['surface1']};
     border-radius: 6px;
     text-align: center;
-    color: {C['text']};
+    color: {'#1E1E2E' if is_dark else '#FFFFFF'};
     font-weight: 700;
     font-size: 12px;
     min-height: 26px;
@@ -287,7 +287,7 @@ QProgressBar#BatchProgress {{
 QProgressBar#BatchProgress::chunk {{
     background: qlineargradient(
         x1:0, y1:0, x2:1, y2:0,
-        stop:0 {C['green']}, stop:1 {C['teal']}
+        stop:0 {'#A6E3A1' if is_dark else '#40A02B'}, stop:1 {'#94E2D5' if is_dark else '#179299'}
     );
     border-radius: 5px;
 }}
@@ -299,6 +299,8 @@ QTextEdit#LiveConsole {{
     border: 1px solid {C['surface0']};
     border-radius: 6px;
     padding: 8px;
+    font-family: "SF Mono", "Cascadia Code", "Consolas", "Courier New", monospace;
+    font-size: 12px;
     selection-background-color: {C['surface1']};
 }}
 
