@@ -5,7 +5,7 @@ gui/panels/settings_modal.py
 BOT Exchange Rate Processor (v4.0) — Settings Modal (PySide6)
 ---------------------------------------------------------------------------
 QDialog for user preferences: API key management, API ping, version check,
-and application info.
+version browser, and application info.
 """
 
 import logging
@@ -24,10 +24,10 @@ from PySide6.QtWidgets import (
 )
 
 from core.config_manager import SettingsManager
+from core.version import __version__
 
 logger = logging.getLogger(__name__)
 
-_RELEASES_URL = "https://api.github.com/repos/Dry1ceD7/BOT-Exchange-Rates/releases"
 _BOT_API_PING = (
     "https://gateway.api.bot.or.th"
     "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
@@ -65,12 +65,18 @@ class UpdateCheckWorker(QThread):
     """Background update check worker."""
     done = Signal(str, str, str)  # text, color, version_or_empty
 
+    def __init__(self, include_prerelease: bool = False, parent=None):
+        super().__init__(parent)
+        self.include_prerelease = include_prerelease
+
     def run(self):
         try:
             from core.auto_updater import check_for_update
-            from core.version import __version__
 
-            result = check_for_update(current_version=__version__)
+            result = check_for_update(
+                current_version=__version__,
+                include_prerelease=self.include_prerelease,
+            )
             if result.get("update_available"):
                 ver = result.get("latest_version", "?")
                 self.done.emit(f"Update available: v{ver}", "#FAB387", ver)
@@ -86,7 +92,7 @@ class DownloadUpdateWorker(QThread):
     """Background worker to download and apply an update."""
     progress = Signal(int, int)  # downloaded, total
     done = Signal(str, str)      # text, color
-    restart_ready = Signal()     # emitted when restart is needed
+    download_complete = Signal(str)  # path to downloaded file
 
     def __init__(self, version: str, parent=None):
         super().__init__(parent)
@@ -94,11 +100,7 @@ class DownloadUpdateWorker(QThread):
 
     def run(self):
         try:
-            from core.auto_updater import (
-                apply_update,
-                download_update,
-                get_installer_asset_url,
-            )
+            from core.auto_updater import download_update, get_installer_asset_url
 
             self.done.emit("Finding installer...", "#A6ADC8")
             asset = get_installer_asset_url(self.version)
@@ -113,32 +115,28 @@ class DownloadUpdateWorker(QThread):
             def on_progress(downloaded, total):
                 self.progress.emit(downloaded, total)
 
-            dl = download_update(url, progress_cb=on_progress)
+            dl = download_update(url, filename=fname, progress_cb=on_progress)
             if dl.get("error"):
                 self.done.emit(f"Download failed: {dl['error']}", "#F38BA8")
-                return
-
-            self.done.emit("Installing update...", "#89B4FA")
-            result = apply_update(dl["path"])
-            if result.get("success"):
-                self.done.emit("Update installed! Restarting...", "#A6E3A1")
-                self.restart_ready.emit()
             else:
                 self.done.emit(
-                    f"Install failed: {result.get('error', 'Unknown')}",
-                    "#F38BA8",
+                    "Download complete! Ready to install.", "#A6E3A1",
                 )
+                self.download_complete.emit(dl["path"])
         except Exception as e:
             self.done.emit(f"Error: {e}", "#F38BA8")
 
 
 class SettingsModal(QDialog):
-    """PySide6 settings dialog with API management and update features."""
+    """PySide6 settings dialog with API management, update, and version browser."""
+
+    # Signal emitted when an update has been downloaded and is pending install
+    update_pending = Signal(str)  # path to downloaded installer
 
     def __init__(self, config_dir: Optional[str] = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.setFixedSize(440, 560)
+        self.setFixedSize(460, 640)
         self.setWindowModality(Qt.ApplicationModal)
 
         self._mgr = SettingsManager(config_dir=config_dir)
@@ -157,13 +155,18 @@ class SettingsModal(QDialog):
         title.setStyleSheet("font-size: 18px; font-weight: 700; color: #89B4FA;")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
-        layout.addSpacing(8)
+
+        current = QLabel(f"Current: v{__version__}")
+        current.setObjectName("VersionBadge")
+        current.setAlignment(Qt.AlignCenter)
+        layout.addWidget(current)
+        layout.addSpacing(4)
 
         # ── Auto-Update Toggle ────────────────────────────────────────
         self._chk_auto_update = QCheckBox("Check for updates on startup")
         self._chk_auto_update.setChecked(self._settings.get("auto_update", True))
         layout.addWidget(self._chk_auto_update)
-        layout.addSpacing(8)
+        layout.addSpacing(4)
 
         # ── API Keys Group ────────────────────────────────────────────
         api_group = QGroupBox("API Keys")
@@ -205,6 +208,16 @@ class SettingsModal(QDialog):
         update_layout.addWidget(self.btn_download_update)
 
         layout.addWidget(update_group)
+
+        # ── Version Browser Group ─────────────────────────────────────
+        version_group = QGroupBox("Version Manager")
+        version_layout = QVBoxLayout(version_group)
+
+        self.btn_version_browser = QPushButton("Browse All Versions")
+        self.btn_version_browser.clicked.connect(self._on_version_browser)
+        version_layout.addWidget(self.btn_version_browser)
+
+        layout.addWidget(version_group)
 
         layout.addStretch()
 
@@ -275,7 +288,7 @@ class SettingsModal(QDialog):
         )
         self._dl_worker.done.connect(self._on_dl_status)
         self._dl_worker.progress.connect(self._on_dl_progress)
-        self._dl_worker.restart_ready.connect(self._on_restart_ready)
+        self._dl_worker.download_complete.connect(self._on_download_ready)
         self._dl_worker.start()
 
     def _on_dl_status(self, text: str, color: str):
@@ -291,14 +304,25 @@ class SettingsModal(QDialog):
                 f"Downloading... {mb_dl:.1f} / {mb_total:.1f} MB ({pct}%)"
             )
 
-    def _on_restart_ready(self):
-        """Triggered after update is installed — restart the app."""
-        from core.auto_updater import restart_app
-        restart_app()
+    def _on_download_ready(self, path: str):
+        """Update downloaded — ask user whether to restart now or later."""
+        self.update_pending.emit(path)
+        self.accept()  # Close settings dialog, MainWindow handles the rest
+
+    # ── Version Browser ───────────────────────────────────────────────
+    def _on_version_browser(self):
+        from gui.panels.version_browser import VersionBrowserDialog
+        dlg = VersionBrowserDialog(parent=self)
+        dlg.update_downloaded.connect(self._on_version_installed)
+        dlg.exec()
+
+    def _on_version_installed(self, path: str):
+        """A specific version was downloaded and installed via the browser."""
+        self.update_pending.emit(path)
+        self.accept()
 
     # ── Save & Close ──────────────────────────────────────────────────
     def _save_and_close(self):
         self._settings["auto_update"] = self._chk_auto_update.isChecked()
         self._mgr.save(self._settings)
         self.accept()
-
