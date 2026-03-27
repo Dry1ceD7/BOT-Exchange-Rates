@@ -116,7 +116,8 @@ def check_for_update(
 
 def get_installer_asset_url(tag: str) -> dict:
     """
-    Fetch the installer .exe asset URL from a specific GitHub release.
+    Fetch the installer asset URL from a specific GitHub release.
+    Detects .exe, .dmg, .zip, .tar.gz assets.
 
     Returns:
         {"url": str | None, "filename": str | None, "size": int | None, "error": str | None}
@@ -131,16 +132,34 @@ def get_installer_asset_url(tag: str) -> dict:
         resp.raise_for_status()
         data = resp.json()
 
-        # Look for .exe installer asset
+        # Determine preferred extension for this platform
+        import sys
+        if sys.platform == "darwin":
+            preferred = (".dmg", ".zip")
+        elif sys.platform == "win32":
+            preferred = (".exe",)
+        else:
+            preferred = (".tar.gz", ".zip")
+
+        # Look for preferred asset first
         for asset in data.get("assets", []):
             name = asset.get("name", "")
-            if name.lower().endswith(".exe"):
+            if any(name.lower().endswith(ext) for ext in preferred):
                 result["url"] = asset.get("browser_download_url")
                 result["filename"] = name
                 result["size"] = asset.get("size", 0)
                 return result
 
-        result["error"] = "No .exe installer found in release assets"
+        # Fallback: any downloadable asset
+        for asset in data.get("assets", []):
+            name = asset.get("name", "")
+            if any(name.lower().endswith(ext) for ext in (".exe", ".dmg", ".zip", ".tar.gz")):
+                result["url"] = asset.get("browser_download_url")
+                result["filename"] = name
+                result["size"] = asset.get("size", 0)
+                return result
+
+        result["error"] = "No installer found in release assets"
     except Exception as e:
         logger.warning("Failed to get installer asset: %s", e)
         result["error"] = str(e)
@@ -247,7 +266,9 @@ def apply_update(new_exe_path: str) -> dict:
     result = {"success": False, "error": None}
 
     if not getattr(sys, "frozen", False):
-        result["error"] = "In-place update only works for frozen (packaged) apps"
+        # Dev mode — just mark success, the download is already saved
+        logger.info("Dev mode: update downloaded to %s (apply on frozen only)", new_exe_path)
+        result["success"] = True
         return result
 
     current_exe = os.path.abspath(sys.executable)
@@ -311,12 +332,12 @@ def apply_update(new_exe_path: str) -> dict:
 
 def restart_app() -> None:
     """
-    Restart the application by re-launching the executable
-    and exiting the current process.
+    Restart the application by quitting the current process first,
+    then launching a fresh instance.
 
     Handles three cases:
       1. macOS .app bundle → 'open -n' the .app
-      2. Frozen (PyInstaller) → launch sys.executable, then exit
+      2. Frozen (PyInstaller) → launch sys.executable
       3. Dev mode → os.execv to replace the current process
     """
     import subprocess
@@ -327,14 +348,38 @@ def restart_app() -> None:
 
         # macOS .app bundle — find the .app container and relaunch it
         if sys.platform == "darwin" and ".app/" in exe_path:
-            # e.g., /Applications/BOT_ExRate.app/Contents/MacOS/BOT_ExRate
             app_path = exe_path.split(".app/")[0] + ".app"
-            subprocess.Popen(["open", "-n", app_path])
+            # Use a shell script: wait for this process to die, then relaunch
+            script = (
+                f'(while kill -0 {os.getpid()} 2>/dev/null; do sleep 0.2; done; '
+                f'open "{app_path}") &'
+            )
+            subprocess.Popen(["sh", "-c", script], start_new_session=True)
         else:
-            # Windows / Linux frozen exe
-            subprocess.Popen([exe_path])
+            # Windows / Linux frozen exe — use a detached launcher
+            if sys.platform == "win32":
+                import tempfile
+                bat_path = os.path.join(
+                    tempfile.gettempdir(), "bot_exrate_restart.bat"
+                )
+                with open(bat_path, "w") as f:
+                    f.write("@echo off\n")
+                    f.write("timeout /t 2 /nobreak > NUL\n")
+                    f.write(f'"{exe_path}"\n')
+                    f.write('del "%~f0"\n')
+                subprocess.Popen(
+                    ["cmd.exe", "/c", bat_path],
+                    creationflags=0x00000008,  # DETACHED_PROCESS
+                    close_fds=True,
+                )
+            else:
+                script = (
+                    f'(while kill -0 {os.getpid()} 2>/dev/null; '
+                    f'do sleep 0.2; done; "{exe_path}") &'
+                )
+                subprocess.Popen(["sh", "-c", script], start_new_session=True)
 
-        # Force-quit the current instance
+        # Quit the current application cleanly
         from PySide6.QtWidgets import QApplication
         app = QApplication.instance()
         if app:

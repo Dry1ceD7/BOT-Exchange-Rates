@@ -112,13 +112,13 @@ class DropZoneWidget(QWidget):
         painter.setPen(QColor(self.text_hover if self._hover else self.text_color))
         font = QFont("SF Pro Display", 14, QFont.Bold)
         painter.setFont(font)
-        painter.drawText(self.rect().adjusted(0, -12, 0, 0), Qt.AlignCenter,
+        painter.drawText(self.rect().adjusted(0, -18, 0, 0), Qt.AlignCenter,
                          "Drop .xlsx files here")
 
         font2 = QFont("SF Pro Display", 11)
         painter.setFont(font2)
         painter.setPen(QColor(self.sub_color))
-        painter.drawText(self.rect().adjusted(0, 16, 0, 0), Qt.AlignCenter,
+        painter.drawText(self.rect().adjusted(0, 22, 0, 0), Qt.AlignCenter,
                          "or click Add Files below")
         painter.end()
 
