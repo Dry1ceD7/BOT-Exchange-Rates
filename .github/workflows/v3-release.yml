@@ -38,8 +38,11 @@ jobs:
       - name: Lint with ruff
         run: uv run ruff check .
 
+      - name: Install system dependencies for Qt
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon-x11-0 xvfb
+
       - name: Run tests
-        run: uv run pytest tests/ -v
+        run: xvfb-run -a uv run pytest tests/ -v
 
   # ── STAGE 2: Build Matrix ──────────────────────────────────────────────
   build:
