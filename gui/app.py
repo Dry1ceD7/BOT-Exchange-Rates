@@ -158,6 +158,7 @@ class BOTExrateApp(QMainWindow):
         self._worker: Optional[BatchWorker] = None
         self._exrate_worker: Optional[StandaloneExrateWorker] = None
         self._file_queue: List[str] = []
+        self._pending_update_path: Optional[str] = None
 
         self._build_toolbar()
         self._build_ui()
@@ -183,11 +184,6 @@ class BOTExrateApp(QMainWindow):
         self.btn_theme.setObjectName("ToolbarButton")
         self.btn_theme.clicked.connect(self._on_toggle_theme)
         toolbar.addWidget(self.btn_theme)
-
-        self.btn_versions = QPushButton("Versions")
-        self.btn_versions.setObjectName("ToolbarButton")
-        self.btn_versions.clicked.connect(self._on_versions)
-        toolbar.addWidget(self.btn_versions)
 
         self.btn_settings = QPushButton("Settings")
         self.btn_settings.setObjectName("ToolbarButton")
@@ -710,20 +706,69 @@ class BOTExrateApp(QMainWindow):
         QMessageBox.critical(self, "Revert Failed", msg)
 
     # ────────────────────────────────────────────────────────────────────
-    #  Version Browser
-    # ────────────────────────────────────────────────────────────────────
-    def _on_versions(self):
-        from gui.panels.version_browser import VersionBrowserDialog
-        dlg = VersionBrowserDialog(parent=self)
-        dlg.exec()
-
-    # ────────────────────────────────────────────────────────────────────
     #  Settings / About
     # ────────────────────────────────────────────────────────────────────
     def _on_settings(self):
         from gui.panels.settings_modal import SettingsModal
         dlg = SettingsModal(parent=self)
+        dlg.update_pending.connect(self._on_update_pending)
         dlg.exec()
+
+    def _on_update_pending(self, path: str):
+        """An update has been downloaded. Show restart-now/later dialog."""
+        self._pending_update_path = path
+        self._show_update_ready_dialog()
+
+    def _show_update_ready_dialog(self):
+        """Prompt user: Restart Now or Later."""
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Update Ready")
+        msg_box.setText("A new update has been downloaded and installed.")
+        msg_box.setInformativeText(
+            "Would you like to restart now to apply the update, "
+            "or restart later?"
+        )
+        btn_now = msg_box.addButton("Restart Now", QMessageBox.AcceptRole)
+        msg_box.addButton("Later", QMessageBox.RejectRole)
+        msg_box.setDefaultButton(btn_now)
+        msg_box.exec()
+
+        if msg_box.clickedButton() == btn_now:
+            from core.auto_updater import restart_app
+            restart_app()
+        else:
+            self._log("Update ready — will apply on next restart.", "success")
+
+    def closeEvent(self, event):
+        """Handle app close — check for pending updates."""
+        if self._pending_update_path:
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Pending Update")
+            msg_box.setText("A downloaded update is pending.")
+            msg_box.setInformativeText(
+                "What would you like to do?"
+            )
+            btn_restart = msg_box.addButton(
+                "Update && Restart", QMessageBox.AcceptRole
+            )
+            btn_close = msg_box.addButton(
+                "Close Without Update", QMessageBox.DestructiveRole
+            )
+            msg_box.addButton("Cancel", QMessageBox.RejectRole)
+            msg_box.setDefaultButton(btn_restart)
+            msg_box.exec()
+
+            clicked = msg_box.clickedButton()
+            if clicked == btn_restart:
+                from core.auto_updater import restart_app
+                event.accept()
+                restart_app()
+            elif clicked == btn_close:
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.accept()
 
     def _on_about(self):
         QMessageBox.about(self, "About",
