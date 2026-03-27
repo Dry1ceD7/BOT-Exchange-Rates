@@ -5,6 +5,8 @@ gui/theme.py
 BOT Exchange Rate Processor (v4.0) — Premium QSS Themes
 ---------------------------------------------------------------------------
 Catppuccin-inspired Dark (Mocha) and Light (Latte) themes.
+Fixed for proper contrast in both modes, readable progress bars,
+and correct widget backgrounds.
 """
 
 from PySide6.QtWidgets import QApplication
@@ -49,7 +51,8 @@ _LIGHT = {
 }
 
 
-def _build_qss(C: dict) -> str:
+def _build_qss(C: dict, is_dark: bool = True) -> str:
+
     return f"""
 /* ── Global ──────────────────────────────────────────── */
 QMainWindow {{
@@ -156,6 +159,20 @@ QCheckBox {{
     font-size: 13px;
     spacing: 6px;
 }}
+QCheckBox::indicator {{
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    border: 2px solid {C['surface2']};
+    background-color: {C['mantle']};
+}}
+QCheckBox::indicator:checked {{
+    background-color: {C['blue']};
+    border-color: {C['blue']};
+}}
+QCheckBox::indicator:hover {{
+    border-color: {C['blue']};
+}}
 
 /* ── Buttons ─────────────────────────────────────────── */
 QPushButton {{
@@ -235,7 +252,7 @@ QPushButton#SecondaryAction:hover {{
 }}
 
 /* ── Date Combos ─────────────────────────────────────── */
-QComboBox#DateCombo {{
+QComboBox, QComboBox#DateCombo {{
     background-color: {C['mantle']};
     color: {C['text']};
     border: 1px solid {C['surface1']};
@@ -244,11 +261,11 @@ QComboBox#DateCombo {{
     font-size: 13px;
     min-width: 55px;
 }}
-QComboBox#DateCombo::drop-down {{
+QComboBox::drop-down, QComboBox#DateCombo::drop-down {{
     border: none;
     width: 20px;
 }}
-QComboBox#DateCombo QAbstractItemView {{
+QComboBox QAbstractItemView, QComboBox#DateCombo QAbstractItemView {{
     background-color: {C['mantle']};
     color: {C['text']};
     border: 1px solid {C['surface1']};
@@ -263,8 +280,9 @@ QProgressBar#BatchProgress {{
     border-radius: 6px;
     text-align: center;
     color: {C['text']};
-    font-weight: 600;
-    min-height: 24px;
+    font-weight: 700;
+    font-size: 12px;
+    min-height: 26px;
 }}
 QProgressBar#BatchProgress::chunk {{
     background: qlineargradient(
@@ -390,6 +408,61 @@ QDialog QListWidget::item:selected {{
 QDialog QListWidget::item:hover {{
     background-color: {C['surface0']};
 }}
+QDialog QComboBox {{
+    background-color: {C['mantle']};
+    color: {C['text']};
+    border: 1px solid {C['surface1']};
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 13px;
+    min-width: 55px;
+}}
+QDialog QComboBox::drop-down {{
+    border: none;
+    width: 20px;
+}}
+QDialog QComboBox QAbstractItemView {{
+    background-color: {C['mantle']};
+    color: {C['text']};
+    border: 1px solid {C['surface1']};
+    selection-background-color: {C['surface1']};
+    selection-color: {C['blue']};
+}}
+QDialog QCheckBox {{
+    color: {C['text']};
+    font-size: 13px;
+    spacing: 6px;
+}}
+QDialog QPushButton {{
+    background-color: {C['surface0']};
+    color: {C['text']};
+    border: 1px solid {C['surface1']};
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-weight: 500;
+}}
+QDialog QPushButton:hover {{
+    background-color: {C['surface1']};
+    border-color: {C['blue']};
+}}
+QDialog QPushButton#PrimaryAction {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 {C['teal']}, stop:1 {C['blue']}
+    );
+    color: {C['crust']};
+    font-size: 14px;
+    font-weight: 700;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 20px;
+}}
+QDialog QPushButton#PrimaryAction:hover {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 {C['blue']}, stop:1 {C['lavender']}
+    );
+}}
 
 /* ── Message Boxes ───────────────────────────────────── */
 QMessageBox {{
@@ -401,8 +474,8 @@ QMessageBox QLabel {{
 """
 
 
-_DARK_QSS = _build_qss(_DARK)
-_LIGHT_QSS = _build_qss(_LIGHT)
+_DARK_QSS = _build_qss(_DARK, is_dark=True)
+_LIGHT_QSS = _build_qss(_LIGHT, is_dark=False)
 
 # Public exports for DropZone theme-awareness
 COLORS_DARK = _DARK

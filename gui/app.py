@@ -17,7 +17,7 @@ import sys
 from datetime import date
 from typing import List, Optional
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import (
     QColor,
     QDragEnterEvent,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -305,7 +306,7 @@ class BOTExrateApp(QMainWindow):
         dr.addWidget(QLabel("Year:"))
         self.combo_year = QComboBox()
         self.combo_year.setObjectName("DateCombo")
-        years = [str(y) for y in range(2010, today.year + 2)]
+        years = [str(y) for y in range(2018, today.year + 1)]
         self.combo_year.addItems(years)
         self.combo_year.setCurrentText(str(today.year))
         self.combo_year.currentIndexChanged.connect(self._on_month_changed)
@@ -360,6 +361,11 @@ class BOTExrateApp(QMainWindow):
         self.progress.setValue(0)
         self.progress.setMaximum(1)
         ll.addWidget(self.progress)
+
+        # ── EventBus polling timer for real-time log updates ─────────
+        self._bus_timer = QTimer(self)
+        self._bus_timer.setInterval(100)  # 100ms poll
+        self._bus_timer.timeout.connect(self._poll_event_bus)
         ll.addStretch()
 
         # ═══ RIGHT PANEL ═════════════════════════════════════════════
@@ -531,8 +537,13 @@ class BOTExrateApp(QMainWindow):
 
         self.progress.setMaximum(len(self._file_queue))
         self.progress.setValue(0)
+        self.progress.setFormat("%v / %m files processed")
         self.btn_process.setEnabled(False)
         self.btn_open_location.setVisible(False)
+
+        # Reset the event bus and start polling
+        self.bus = EventBus()
+        self._bus_timer.start()
 
         self._worker = BatchWorker(
             file_queue=list(self._file_queue),
@@ -548,11 +559,20 @@ class BOTExrateApp(QMainWindow):
 
     def _on_batch_progress(self, idx, total, fname, error):
         self.progress.setValue(idx)
-        self.statusBar().showMessage(
-            f"{fname}: {error}" if error else f"{fname} ({idx}/{total})")
+        pct = int((idx / total) * 100) if total else 0
+        self.progress.setFormat(f"{idx} / {total} files processed ({pct}%)")
+        if error:
+            self._log(f"[{idx}/{total}] {fname} — SKIPPED: {error}", "error")
+            self.statusBar().showMessage(f"{fname}: {error}")
+        else:
+            self._log(f"[{idx}/{total}] {fname} — OK", "success")
+            self.statusBar().showMessage(f"{fname} ({idx}/{total}) — {pct}%")
 
     def _on_batch_finished(self, success, failed, errors):
+        self._bus_timer.stop()
+        self._poll_event_bus()  # Flush remaining events
         self.btn_process.setEnabled(True)
+        self.progress.setFormat(f"{success + failed} / {success + failed} files processed (100%)")
         self._log(f"Batch complete: {success} succeeded, {failed} failed",
                   "success" if failed == 0 else "warn")
         self.statusBar().showMessage(f"Complete — {success} OK, {failed} failed")
@@ -570,9 +590,19 @@ class BOTExrateApp(QMainWindow):
                 f"All {success} file(s) processed successfully!")
 
     def _on_batch_error(self, msg):
+        self._bus_timer.stop()
         self.btn_process.setEnabled(True)
         self._log(f"Error: {msg}", "error")
         QMessageBox.critical(self, "Processing Error", msg)
+
+    def _poll_event_bus(self):
+        """Drain new events from the EventBus into the Processing Log."""
+        for ev in self.bus.drain():
+            etype = ev.get("type", "log")
+            msg = ev.get("msg", "")
+            level_map = {"log": "info", "success": "success",
+                         "error": "error", "warn": "warn"}
+            self._log(msg, level_map.get(etype, "info"))
 
     # ────────────────────────────────────────────────────────────────────
     #  Generate ExRate Sheet (standalone — no input file needed)
@@ -585,7 +615,7 @@ class BOTExrateApp(QMainWindow):
         # Open config dialog for currency/rate type selection
         from gui.panels.exrate_config_dialog import ExrateConfigDialog
         dlg = ExrateConfigDialog(parent=self)
-        if dlg.exec() != dlg.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
         config = dlg.get_config()
@@ -634,21 +664,28 @@ class BOTExrateApp(QMainWindow):
     def _on_open_location(self):
         if not self._last_output_path:
             return
-        path = self._last_output_path
+        path = os.path.abspath(self._last_output_path)
         if os.path.isfile(path):
+            # Reveal file in file manager
             if sys.platform == "darwin":
                 subprocess.run(["open", "-R", path], check=False)
             elif sys.platform == "win32":
-                subprocess.run(["explorer", "/select,", path], check=False)
+                subprocess.run(["explorer", "/select,", os.path.normpath(path)], check=False)
             else:
                 subprocess.run(["xdg-open", os.path.dirname(path)], check=False)
-        elif os.path.isdir(path):
-            if sys.platform == "darwin":
-                subprocess.run(["open", path], check=False)
-            elif sys.platform == "win32":
-                subprocess.run(["explorer", path], check=False)
+        else:
+            # File not found — try opening parent directory
+            parent = os.path.dirname(path)
+            if os.path.isdir(parent):
+                if sys.platform == "darwin":
+                    subprocess.run(["open", parent], check=False)
+                elif sys.platform == "win32":
+                    subprocess.run(["explorer", os.path.normpath(parent)], check=False)
+                else:
+                    subprocess.run(["xdg-open", parent], check=False)
             else:
-                subprocess.run(["xdg-open", path], check=False)
+                QMessageBox.warning(self, "Not Found",
+                    f"Could not locate:\n{path}")
 
     # ────────────────────────────────────────────────────────────────────
     #  Revert

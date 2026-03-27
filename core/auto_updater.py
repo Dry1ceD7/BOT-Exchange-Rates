@@ -311,16 +311,35 @@ def apply_update(new_exe_path: str) -> dict:
 
 def restart_app() -> None:
     """
-    Restart the application by launching the executable again
+    Restart the application by re-launching the executable
     and exiting the current process.
+
+    Handles three cases:
+      1. macOS .app bundle → 'open -n' the .app
+      2. Frozen (PyInstaller) → launch sys.executable, then exit
+      3. Dev mode → os.execv to replace the current process
     """
     import subprocess
     import sys
 
     if getattr(sys, "frozen", False):
-        subprocess.Popen([sys.executable])
+        exe_path = os.path.abspath(sys.executable)
+
+        # macOS .app bundle — find the .app container and relaunch it
+        if sys.platform == "darwin" and ".app/" in exe_path:
+            # e.g., /Applications/BOT_ExRate.app/Contents/MacOS/BOT_ExRate
+            app_path = exe_path.split(".app/")[0] + ".app"
+            subprocess.Popen(["open", "-n", app_path])
+        else:
+            # Windows / Linux frozen exe
+            subprocess.Popen([exe_path])
+
+        # Force-quit the current instance
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app:
+            app.quit()
+        sys.exit(0)
     else:
-        subprocess.Popen([sys.executable] + sys.argv)
-
-    sys.exit(0)
-
+        # Dev mode — os.execv replaces the current process entirely
+        os.execv(sys.executable, [sys.executable] + sys.argv)

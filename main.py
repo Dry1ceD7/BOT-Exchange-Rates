@@ -49,7 +49,7 @@ def _prompt_for_tokens() -> bool:
     Launch the registration dialog to collect API tokens.
     Returns True if the user activated successfully, False otherwise.
     """
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QDialog
 
     from gui.panels.token_dialog import TokenRegistrationDialog
 
@@ -60,10 +60,7 @@ def _prompt_for_tokens() -> bool:
 
     dialog = TokenRegistrationDialog(env_path=ENV_PATH)
     result = dialog.exec()
-
-    dialog = TokenRegistrationDialog(env_path=ENV_PATH)
-    result = dialog.exec()
-    return result == dialog.Accepted
+    return result == QDialog.DialogCode.Accepted
 
 
 def main():

@@ -82,6 +82,56 @@ class UpdateCheckWorker(QThread):
             self.done.emit(f"Error: {e}", "#F38BA8", "")
 
 
+class DownloadUpdateWorker(QThread):
+    """Background worker to download and apply an update."""
+    progress = Signal(int, int)  # downloaded, total
+    done = Signal(str, str)      # text, color
+    restart_ready = Signal()     # emitted when restart is needed
+
+    def __init__(self, version: str, parent=None):
+        super().__init__(parent)
+        self.version = version
+
+    def run(self):
+        try:
+            from core.auto_updater import (
+                apply_update,
+                download_update,
+                get_installer_asset_url,
+            )
+
+            self.done.emit("Finding installer...", "#A6ADC8")
+            asset = get_installer_asset_url(self.version)
+            if asset.get("error"):
+                self.done.emit(f"Error: {asset['error']}", "#F38BA8")
+                return
+
+            url = asset["url"]
+            fname = asset.get("filename", "update.exe")
+            self.done.emit(f"Downloading {fname}...", "#89B4FA")
+
+            def on_progress(downloaded, total):
+                self.progress.emit(downloaded, total)
+
+            dl = download_update(url, progress_cb=on_progress)
+            if dl.get("error"):
+                self.done.emit(f"Download failed: {dl['error']}", "#F38BA8")
+                return
+
+            self.done.emit("Installing update...", "#89B4FA")
+            result = apply_update(dl["path"])
+            if result.get("success"):
+                self.done.emit("Update installed! Restarting...", "#A6E3A1")
+                self.restart_ready.emit()
+            else:
+                self.done.emit(
+                    f"Install failed: {result.get('error', 'Unknown')}",
+                    "#F38BA8",
+                )
+        except Exception as e:
+            self.done.emit(f"Error: {e}", "#F38BA8")
+
+
 class SettingsModal(QDialog):
     """PySide6 settings dialog with API management and update features."""
 
@@ -93,6 +143,7 @@ class SettingsModal(QDialog):
 
         self._mgr = SettingsManager(config_dir=config_dir)
         self._settings = self._mgr.load()
+        self._available_version = ""
 
         self._build_ui()
 
@@ -147,6 +198,12 @@ class SettingsModal(QDialog):
         self.lbl_update.setAlignment(Qt.AlignCenter)
         update_layout.addWidget(self.lbl_update)
 
+        self.btn_download_update = QPushButton("Download && Install Update")
+        self.btn_download_update.setObjectName("PrimaryAction")
+        self.btn_download_update.setVisible(False)
+        self.btn_download_update.clicked.connect(self._on_download_update)
+        update_layout.addWidget(self.btn_download_update)
+
         layout.addWidget(update_group)
 
         layout.addStretch()
@@ -191,6 +248,7 @@ class SettingsModal(QDialog):
         self.lbl_update.setText("Checking...")
         self.lbl_update.setStyleSheet("color: #A6ADC8;")
         self.btn_check_update.setEnabled(False)
+        self.btn_download_update.setVisible(False)
         self._update_worker = UpdateCheckWorker(parent=self)
         self._update_worker.done.connect(self._on_update_done)
         self._update_worker.start()
@@ -199,9 +257,48 @@ class SettingsModal(QDialog):
         self.lbl_update.setText(text)
         self.lbl_update.setStyleSheet(f"color: {color};")
         self.btn_check_update.setEnabled(True)
+        if version:
+            self._available_version = version
+            self.btn_download_update.setVisible(True)
+
+    # ── Download & Install ────────────────────────────────────────────
+    def _on_download_update(self):
+        if not self._available_version:
+            return
+        self.btn_download_update.setEnabled(False)
+        self.btn_check_update.setEnabled(False)
+        self.lbl_update.setText("Preparing download...")
+        self.lbl_update.setStyleSheet("color: #89B4FA;")
+
+        self._dl_worker = DownloadUpdateWorker(
+            version=self._available_version, parent=self,
+        )
+        self._dl_worker.done.connect(self._on_dl_status)
+        self._dl_worker.progress.connect(self._on_dl_progress)
+        self._dl_worker.restart_ready.connect(self._on_restart_ready)
+        self._dl_worker.start()
+
+    def _on_dl_status(self, text: str, color: str):
+        self.lbl_update.setText(text)
+        self.lbl_update.setStyleSheet(f"color: {color};")
+
+    def _on_dl_progress(self, downloaded: int, total: int):
+        if total > 0:
+            pct = int(downloaded / total * 100)
+            mb_dl = downloaded / (1024 * 1024)
+            mb_total = total / (1024 * 1024)
+            self.lbl_update.setText(
+                f"Downloading... {mb_dl:.1f} / {mb_total:.1f} MB ({pct}%)"
+            )
+
+    def _on_restart_ready(self):
+        """Triggered after update is installed — restart the app."""
+        from core.auto_updater import restart_app
+        restart_app()
 
     # ── Save & Close ──────────────────────────────────────────────────
     def _save_and_close(self):
         self._settings["auto_update"] = self._chk_auto_update.isChecked()
         self._mgr.save(self._settings)
         self.accept()
+
