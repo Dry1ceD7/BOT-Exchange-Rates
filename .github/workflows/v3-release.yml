@@ -6,7 +6,7 @@
 # Uses uv for dependency management per working agreement mandate.
 # ---------------------------------------------------------------------------
 
-name: V3 Release Build
+name: V4 Release Build
 
 on:
   push:
@@ -38,8 +38,13 @@ jobs:
       - name: Lint with ruff
         run: uv run ruff check .
 
-      - name: Install system dependencies for Qt
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon-x11-0 xvfb
+      - name: Install system dependencies for Qt (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y \
+            libegl1 libxkbcommon-x11-0 xvfb \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
+            libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
 
       - name: Run tests
         run: xvfb-run -a uv run pytest tests/ -v
@@ -90,22 +95,30 @@ jobs:
         run: |
           ICON_FLAG=""
           SEPARATOR=":"
+          WINDOWED="--windowed"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             ICON_FLAG="--icon=assets/icon.ico"
             SEPARATOR=";"
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            ICON_FLAG="--icon=assets/icon.png"
+          else
+            # Linux — don't use --windowed (no dock on headless)
+            WINDOWED=""
           fi
           uv run pyinstaller \
             --name "BOT-ExRate" \
             --onedir \
-            --windowed \
+            $WINDOWED \
             $ICON_FLAG \
             --add-data "assets${SEPARATOR}assets" \
-            --hidden-import customtkinter \
-            --hidden-import tkinterdnd2 \
+            --hidden-import PySide6 \
+            --hidden-import PySide6.QtWidgets \
+            --hidden-import PySide6.QtCore \
+            --hidden-import PySide6.QtGui \
             --hidden-import openpyxl \
-            --hidden-import xlrd \
             --hidden-import httpx \
-            --hidden-import pydantic \
+            --hidden-import packaging \
+            --hidden-import dotenv \
             main.py
 
       # ── Windows: Inno Setup Installer ─────────────────────────────────
@@ -137,19 +150,22 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          # Create a staging directory for the DMG contents
           mkdir -p dmg-staging
-          cp -R dist/BOT-ExRate dmg-staging/
+          # PyInstaller --onedir --windowed creates .app bundle on macOS
+          if [ -d "dist/BOT-ExRate.app" ]; then
+            cp -R dist/BOT-ExRate.app dmg-staging/
+          elif [ -d "dist/BOT-ExRate" ]; then
+            cp -R dist/BOT-ExRate dmg-staging/
+          fi
           ln -s /Applications dmg-staging/Applications
 
-          # Create the DMG
           hdiutil create \
             -volname "BOT Exchange Rate Processor" \
             -srcfolder dmg-staging \
             -ov -format UDZO \
             dist/BOT-ExRate-macOS.dmg
 
-          echo "✓ DMG created: BOT-ExRate-macOS.dmg"
+          echo "✓ DMG created"
           ls -lh dist/BOT-ExRate-macOS.dmg
 
       # ── Linux: tar.gz (unchanged) ─────────────────────────────────────
