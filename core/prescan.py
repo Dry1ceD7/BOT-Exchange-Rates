@@ -2,11 +2,11 @@
 """
 core/prescan.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v2.6.1) - Smart Date Pre-Scanner
+BOT Exchange Rate Processor (v3.0.45-beta) - Smart Date Pre-Scanner
 ---------------------------------------------------------------------------
 Separated from engine.py for SFFB compliance (<200 lines).
-Pre-scans queued .xls/.xlsx files to detect the oldest date in the
-source column. Supports both legacy xlrd (.xls) and openpyxl (.xlsx).
+Pre-scans queued .xlsx files to detect the oldest date in the
+source column. Uses openpyxl for all modern Excel formats.
 """
 
 import logging
@@ -15,7 +15,6 @@ from datetime import date, datetime
 from typing import List, Optional, Tuple
 
 import openpyxl
-import xlrd
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +29,7 @@ def prescan_oldest_date(
     target_col_name: str = "Date",
 ) -> Tuple[date, bool]:
     """
-    Pre-scans queued .xls/.xlsx files to find the absolute
+    Pre-scans queued .xlsx files to find the absolute
     oldest date in the source column.
 
     Returns:
@@ -42,12 +41,7 @@ def prescan_oldest_date(
         if not os.path.exists(fp):
             continue
 
-        is_legacy_xls = fp.lower().endswith(".xls") and not fp.lower().endswith(".xlsx")
-
-        if is_legacy_xls:
-            found = _scan_xls(fp, target_col_name)
-        else:
-            found = _scan_xlsx(fp, target_col_name)
+        found = _scan_xlsx(fp, target_col_name)
 
         if found is not None:
             if oldest is None or found < oldest:
@@ -60,71 +54,6 @@ def prescan_oldest_date(
     prev_year = date.today().year - 1
     fallback = date(prev_year, 12, 28)
     return fallback, False
-
-
-# ── Legacy .xls scanning (xlrd) ─────────────────────────────────────────
-
-
-def _scan_xls(filepath: str, target_col_name: str) -> Optional[date]:
-    """Scan a legacy .xls file using xlrd to find the oldest date."""
-    oldest: Optional[date] = None
-    wb = None
-    devnull_fh = None
-    try:
-        import os
-        with open(filepath, 'rb') as f:
-            file_data = f.read()
-
-        devnull_fh = open(os.devnull, 'w')
-        wb = xlrd.open_workbook(file_contents=file_data, formatting_info=False, logfile=devnull_fh)
-        for sheet_name in wb.sheet_names():
-            ws = wb.sheet_by_name(sheet_name)
-            target_col_idx = None
-
-            # Search header rows (first 10 rows)
-            for row_idx in range(min(10, ws.nrows)):
-                for col_idx in range(ws.ncols):
-                    val = ws.cell_value(row_idx, col_idx)
-                    if isinstance(val, str) and val.strip() == target_col_name:
-                        target_col_idx = col_idx
-                        header_row = row_idx
-                        break
-                if target_col_idx is not None:
-                    break
-
-            if target_col_idx is None:
-                continue
-
-            # Scan data rows for dates
-            for row_idx in range(header_row + 1, ws.nrows):
-                cell_type = ws.cell_type(row_idx, target_col_idx)
-                cell_val = ws.cell_value(row_idx, target_col_idx)
-
-                parsed = None
-                if cell_type == xlrd.XL_CELL_DATE and cell_val:
-                    try:
-                        dt = xlrd.xldate_as_datetime(cell_val, wb.datemode)
-                        parsed = dt.date()
-                    except Exception:
-                        pass
-                elif cell_type == xlrd.XL_CELL_TEXT:
-                    parsed = _parse_scan_date(cell_val, DATE_FORMATS)
-
-                if parsed is not None:
-                    if oldest is None or parsed < oldest:
-                        oldest = parsed
-    except Exception as e:
-        logger.debug("xlrd prescan failed for %s: %s", filepath, e)
-    finally:
-        if wb is not None:
-            try:
-                wb.release_resources()
-            except Exception:
-                pass
-        if devnull_fh is not None:
-            devnull_fh.close()
-
-    return oldest
 
 
 # ── Modern .xlsx scanning (openpyxl) ────────────────────────────────────
