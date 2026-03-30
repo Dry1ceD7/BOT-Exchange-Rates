@@ -100,7 +100,6 @@ jobs:
             --hidden-import customtkinter \
             --hidden-import tkinterdnd2 \
             --hidden-import openpyxl \
-            --hidden-import xlrd \
             --hidden-import httpx \
             --hidden-import pydantic \
             main.py

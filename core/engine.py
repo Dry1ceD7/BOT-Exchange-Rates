@@ -14,7 +14,6 @@ import gc
 import logging
 import os
 import re
-import time
 import traceback
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -722,30 +721,14 @@ class LedgerEngine:
                         cell.number_format = "DD/MM/YYYY"
 
             # ── Save & Cleanup ───────────────────────────────────────────
-            if converted:
-                final_path = os.path.splitext(original_path)[0] + ".xlsx"
-                wb.save(final_path)
-                wb.close()
-                del wb  # release file handle immediately
-                wb = None
-                try:
-                    os.remove(filepath)
-                except OSError as e:
-                    logger.debug("Cleanup of temp file failed: %s", e)
-                filepath = final_path
-                logger.info(
-                    "Saved processed output as: %s (original .xls preserved)",
-                    os.path.basename(final_path),
-                )
-            else:
-                wb.save(filepath)
-                wb.close()
-                del wb  # release file handle immediately
-                wb = None
-                logger.info(
-                    "Overwritten in-place: %s",
-                    os.path.basename(filepath),
-                )
+            wb.save(filepath)
+            wb.close()
+            del wb  # release file handle immediately
+            wb = None
+            logger.info(
+                "Overwritten in-place: %s",
+                os.path.basename(filepath),
+            )
         except Exception:
             # On ANY error, close the workbook to release the file lock
             if wb is not None:
