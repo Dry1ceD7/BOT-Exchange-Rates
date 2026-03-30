@@ -638,34 +638,44 @@ class LedgerEngine:
                     mapping["header_row"] + 1, ws.max_row + 1
                 ):
                     src_cell = ws.cell(row=row_idx, column=src_idx)
+                    out_cell = ws.cell(row=row_idx, column=out_col)
+
+                    # Skip merged cells — they are read-only
                     if isinstance(src_cell, MergedCell):
                         continue
-                    inv_date = self._parse_date(src_cell.value)
-                    if not inv_date:
+                    if isinstance(out_cell, MergedCell):
                         continue
 
                     # ── Date Normalization ─────────────────────────
-                    # Only normalize text strings to date objects.
-                    # Skip if already a proper date/datetime.
-                    if isinstance(src_cell.value, str):
+                    # Normalize text-string dates to proper date objects
+                    # so XLOOKUP can match the date serial in ExRate.
+                    inv_date = self._parse_date(src_cell.value)
+                    if inv_date and isinstance(src_cell.value, str):
                         src_cell.value = inv_date
                         src_cell.number_format = "DD/MM/YYYY"
+
 
                     # ── Build the expected XLOOKUP formula ─────────
                     # Uses relative refs for Cur & Date (row-dynamic
                     # so drag-down works per-row), absolute refs for
                     # ExRate ranges.
                     #
+                    # Formula is ALWAYS built — even for empty rows —
+                    # so it serves as a drag-down placeholder.
+                    # When neither Cur nor Date exist, the IFS formula
+                    # gracefully returns "" (no #N/A errors).
+                    #
                     # Logic:
                     #   THB → 1
-                    #   USD → XLOOKUP Date in ExRate!A → return ExRate!B (USD Buying TT)
-                    #   EUR → XLOOKUP Date in ExRate!A → return ExRate!D (EUR Buying TT)
-                    #   Other → ""
+                    #   USD → XLOOKUP Date → ExRate!B (USD Buying TT)
+                    #   EUR → XLOOKUP Date → ExRate!D (EUR Buying TT)
+                    #   Other/blank → ""
                     date_ref = f"{date_letter}{row_idx}"
                     cur_ref = f"{cur_letter}{row_idx}"
 
                     formula = (
-                        f"=_xlfn.IFS("
+                        f"=IF(OR({cur_ref}=\"\",{date_ref}=\"\"),\"\","
+                        f"_xlfn.IFS("
                         f"{cur_ref}=\"THB\",1,"
                         f"{cur_ref}=\"USD\","
                         f"IFERROR(_xlfn.XLOOKUP({date_ref},"
@@ -675,16 +685,14 @@ class LedgerEngine:
                         f"IFERROR(_xlfn.XLOOKUP({date_ref},"
                         f"ExRate!$A$2:$A${N},"
                         f"ExRate!$D$2:$D${N},\"\",0),\"\"),"
-                        f"TRUE,\"\")"
+                        f"TRUE,\"\"))"
                     )
 
                     # ── Skip-if-identical: exact formula match ─────
                     # Only skip if the cell already contains the EXACT
                     # same formula. Any old/different formula gets
                     # overwritten to ensure correctness.
-                    existing_val = ws.cell(
-                        row=row_idx, column=out_col,
-                    ).value
+                    existing_val = out_cell.value
                     if (
                         isinstance(existing_val, str)
                         and existing_val == formula
@@ -693,13 +701,14 @@ class LedgerEngine:
                         continue
 
                     # Track if we're replacing an old formula
-                    if isinstance(existing_val, str) and existing_val.startswith("="):
-                        overwritten += 1
+                    if existing_val is not None:
+                        if isinstance(existing_val, str) and existing_val.startswith("="):
+                            overwritten += 1
 
                     self._zero_touch_write(ws, row_idx, out_col, formula)
                     written += 1
 
-                if skipped or overwritten:
+                if skipped or overwritten or written:
                     logger.info(
                         "Sheet '%s': %d identical (skipped), "
                         "%d old formulas replaced, %d new written",
