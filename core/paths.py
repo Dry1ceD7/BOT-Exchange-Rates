@@ -2,7 +2,7 @@
 """
 core/paths.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.8) — Centralized Path Resolution
+BOT Exchange Rate Processor — Centralized Path Resolution
 ---------------------------------------------------------------------------
 Provides a single get_project_root() that works correctly in both:
   - Source mode: python main.py

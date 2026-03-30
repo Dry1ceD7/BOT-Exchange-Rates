@@ -2,13 +2,14 @@
 """
 main.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.8) - Enterprise Desktop Edition
+BOT Exchange Rate Processor — Enterprise Desktop Edition
 ---------------------------------------------------------------------------
 Entry point. Loads .env, prompts for API tokens on first use via
 a registration dialog, ensures required directories exist, then
 launches the GUI.
 """
 
+import logging
 import os
 import sys
 
@@ -25,6 +26,22 @@ from core.paths import get_project_root
 # Securely load API Keys to os.environ BEFORE anything else
 ENV_PATH = os.path.join(get_project_root(), ".env")
 load_dotenv(dotenv_path=ENV_PATH)
+
+# ── Configure root logger — routes ALL log output to file + console ──────
+_LOG_DIR = os.path.join(get_project_root(), "data")
+os.makedirs(_LOG_DIR, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(name)-24s  %(levelname)-7s  %(message)s",
+    handlers=[
+        logging.FileHandler(
+            os.path.join(_LOG_DIR, "app.log"),
+            encoding="utf-8",
+        ),
+        logging.StreamHandler(),
+    ],
+)
 
 
 # ── Cold-Start: Ensure required directories exist ────────────────────────

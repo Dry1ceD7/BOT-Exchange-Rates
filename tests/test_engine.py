@@ -56,9 +56,9 @@ def sample_xlsx(tmp_path):
 
 @pytest.fixture
 def oversized_file(tmp_path):
-    """Creates a file larger than MAX_FILE_SIZE_MB."""
+    """Creates a file larger than MAX_FILE_SIZE_MB (50 MB)."""
     filepath = tmp_path / "huge.xlsx"
-    filepath.write_bytes(b"x" * (16 * 1024 * 1024))  # 16 MB
+    filepath.write_bytes(b"x" * (51 * 1024 * 1024))  # 51 MB
     return str(filepath)
 
 

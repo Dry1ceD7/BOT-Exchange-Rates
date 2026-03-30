@@ -2,7 +2,7 @@
 """
 gui/panels/control_panel.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.8) — Control Panel
+BOT Exchange Rate Processor — Control Panel
 ---------------------------------------------------------------------------
 Drop zone, date selectors, and action buttons extracted from the monolithic
 gui/app.py for SFFB compliance (< 200 lines).
@@ -22,7 +22,7 @@ import customtkinter as ctk
 logger = logging.getLogger(__name__)
 
 # Supported extensions
-EXCEL_EXTENSIONS = (".xlsx", ".xls", ".xlsm", ".xlsb")
+EXCEL_EXTENSIONS = (".xlsx", ".xlsm")
 
 # Color tokens (shared with app.py)
 COLOR_SECTION_BG = "#F8FAFC"

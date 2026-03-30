@@ -2,7 +2,7 @@
 """
 gui/app.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.8) - Enterprise Desktop Edition
+BOT Exchange Rate Processor — Enterprise Desktop Edition
 ---------------------------------------------------------------------------
 Zero-emoji, typography-driven corporate UI.
 
@@ -174,8 +174,8 @@ def parse_drop_data(raw: str, tk_root=None) -> List[str]:
 
 
 # Supported Excel extensions (openpyxl handles .xlsx and .xlsm natively)
-EXCEL_EXTENSIONS = (".xlsx", ".xls", ".xlsm", ".xlsb")
-OPENPYXL_NATIVE = (".xlsx", ".xlsm", ".xls")  # .xls auto-converted via xlrd
+EXCEL_EXTENSIONS = (".xlsx", ".xlsm")
+OPENPYXL_NATIVE = (".xlsx", ".xlsm")
 
 
 def resolve_excel_files(paths: List[str]) -> List[str]:
@@ -611,9 +611,7 @@ class BOTExrateApp(ctk.CTk):
         paths = filedialog.askopenfilenames(
             title="Select Excel Ledgers",
             filetypes=[
-                ("Excel workbooks", "*.xlsx *.xlsm *.xls *.xlsb"),
-                ("Excel (modern)", "*.xlsx *.xlsm"),
-                ("Excel (legacy)", "*.xls *.xlsb"),
+                ("Excel workbooks", "*.xlsx *.xlsm"),
                 ("All files", "*.*")
             ]
         )

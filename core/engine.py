@@ -2,11 +2,10 @@
 """
 core/engine.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor (v3.0.8) - Cache-First Orchestrator
+BOT Exchange Rate Processor — Cache-First Orchestrator
 ---------------------------------------------------------------------------
 Slim orchestrator. Heavy logic extracted to:
   - core/exrate_sheet.py → Master ExRate sheet builder
-  - core/xls_converter.py → Legacy .xls conversion
   - core/prescan.py → Smart date pre-scanner
 """
 
@@ -15,7 +14,6 @@ import gc
 import logging
 import os
 import re
-import sys
 import time
 import traceback
 from datetime import date, datetime, timedelta
@@ -32,17 +30,6 @@ from core.database import CacheDB
 from core.exrate_sheet import update_master_exrate_sheet
 from core.logic import BOTLogicEngine, safe_to_decimal
 from core.prescan import prescan_oldest_date
-from core.xls_converter import convert_xls_to_xlsx
-
-# ── Detect if pywin32 is available (COM engine optional) ─────────────────
-HAS_PYWIN32 = False
-if sys.platform == "win32":
-    try:
-        import pywintypes  # noqa: F401
-        import win32com  # noqa: F401
-        HAS_PYWIN32 = True
-    except ImportError:
-        pass
 
 logger = logging.getLogger(__name__)
 
@@ -59,39 +46,6 @@ class MissingColumnError(Exception):
     pass
 
 
-# -------------------------------------------------------------------------
-# EXCEL TMP FILE CLEANUP
-# -------------------------------------------------------------------------
-# Microsoft Excel COM creates UUID-named .tmp files (e.g.
-# "b2fb6ef1-6f57-43d5-88a6-49d88bc3cc9c.tmp") in the same directory as
-# the workbook being edited. These are recovery/lock files that should be
-# auto-cleaned by Excel on close, but often linger if the COM process
-# doesn't shut down cleanly.
-
-_UUID_TMP_PATTERN = re.compile(
-    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$',
-    re.IGNORECASE,
-)
-
-
-def _cleanup_excel_tmp_files(directory: str) -> int:
-    """Remove UUID-named .tmp files left behind by Excel COM in *directory*.
-    Returns the number of files removed."""
-    if not os.path.isdir(directory):
-        return 0
-    removed = 0
-    for fname in os.listdir(directory):
-        if _UUID_TMP_PATTERN.match(fname):
-            fpath = os.path.join(directory, fname)
-            try:
-                os.remove(fpath)
-                removed += 1
-                logger.debug("Cleaned up Excel tmp: %s", fname)
-            except OSError:
-                pass
-    if removed:
-        logger.info("Cleaned up %d Excel tmp file(s) in %s", removed, directory)
-    return removed
 
 
 # -------------------------------------------------------------------------
@@ -129,7 +83,7 @@ SKIP_SHEET_NAMES = {"ExRate", "Exrate USD", "Exrate EUR"}
 
 
 class LedgerEngine:
-    MAX_FILE_SIZE_MB = 15
+    MAX_FILE_SIZE_MB = 50
     MAX_FILE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
     def __init__(self, api_client: BOTClient, event_bus=None):
@@ -204,45 +158,7 @@ class LedgerEngine:
             check_date -= timedelta(days=1)
         return date(prev_year, 12, 20)
 
-    # ── Cross-tab VLOOKUP with rollback ───────────────────────────
-    @staticmethod
-    def _vlookup_exrate(
-        target_date: date,
-        currency: str,
-        exrate_index: Dict[date, dict],
-        max_rollback: int = 10,
-    ) -> Optional[float]:
-        """
-        Cross-tab VLOOKUP: look up Buying TT Rate in the ExRate index.
 
-        Walks backwards from target_date until a valid trading day
-        with non-None rate data is found (skips weekends/holidays).
-
-        Args:
-            target_date: The date from the monthly tab's "Date" column.
-            currency: The value from the "Cur" column ("USD" or "EUR").
-            exrate_index: The in-memory index built from the ExRate tab.
-            max_rollback: Safety guardrail for max backwards steps.
-
-        Returns:
-            The Buying TT rate as a float, or None if not resolvable.
-        """
-        rate_key = {
-            "USD": "usd_buying",
-            "EUR": "eur_buying",
-        }.get(currency)
-        if rate_key is None:
-            return None
-
-        current = target_date
-        for _ in range(max_rollback + 1):
-            entry = exrate_index.get(current)
-            if entry is not None:
-                val = entry.get(rate_key)
-                if val is not None:
-                    return float(val) if not isinstance(val, float) else val
-            current -= timedelta(days=1)
-        return None
 
     # ── Zero-Touch Write (Global Formatting Protocol) ─────────────
     @staticmethod
@@ -417,15 +333,9 @@ class LedgerEngine:
     # ================================================================== #
     async def process_ledger(
         self, filepath: str, start_date: Optional[str] = None,
-        excel=None,
     ) -> str:
-        """Process a single ledger file end-to-end.
+        """Process a single ledger file end-to-end."""
 
-        Args:
-            excel: Optional shared Excel COM instance (for batch pooling).
-        """
-
-        # ── MANDATE 2: Absolute pathing for COM safety ───────────────
         filepath = os.path.abspath(filepath)
 
         self._check_memory_guardrail(filepath)
@@ -469,124 +379,58 @@ class LedgerEngine:
             except Exception:
                 pass  # Fall through to normal pipeline
 
-        # ── .xls Auto-Conversion ─────────────────────────────────────
-        original_path = filepath
-        converted = False
-        is_legacy_xls = filepath.lower().endswith(".xls") and not filepath.lower().endswith(".xlsx")
-
-        if is_legacy_xls:
-            converted = True
-            self._emit("Converting legacy .xls to .xlsx")
-            if not HAS_PYWIN32:
-                # Without COM engine, convert .xls to .xlsx for openpyxl
-                filepath = convert_xls_to_xlsx(filepath)
+        # ── Reject unsupported formats ─────────────────────────────────
+        if not filepath.lower().endswith((".xlsx", ".xlsm")):
+            raise ValueError(
+                f"Unsupported format: {os.path.basename(filepath)}. "
+                "Only .xlsx and .xlsm files are supported."
+            )
 
         # ── Pre-scan dates for API data loading ──────────────────────
-        # We need to scan dates BEFORE choosing the engine path so that
-        # the COM engine has all the rate/holiday data it needs.
         self._emit("Scanning dates from workbook")
         all_target_dates: Set[date] = set()
 
-        if is_legacy_xls and HAS_PYWIN32:
-            # On Windows, we didn't pre-convert, so openpyxl cannot read this.
-            # Use xlrd purely for the read-only pre-scan to extract dates.
-            wb_scan = None
-            devnull_fh = None
-            try:
-                import xlrd
-                devnull_fh = open(os.devnull, 'w')
-                wb_scan = xlrd.open_workbook(filepath, logfile=devnull_fh)
-                for sheet in wb_scan.sheets():
-                    if sheet.name in SKIP_SHEET_NAMES:
-                        continue
+        wb_scan = None
+        try:
+            import openpyxl
+            wb_scan = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
+            for sheet_name in wb_scan.sheetnames:
+                if sheet_name in SKIP_SHEET_NAMES:
+                    continue
+                ws = wb_scan[sheet_name]
+                header_row_idx = None
+                col_indices: Dict[str, int] = {}
+                for row_idx, row in enumerate(
+                    ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
+                ):
+                    row_strs = [
+                        str(c).strip() if c is not None else "" for c in row
+                    ]
+                    if self.target_cols["source_date"] in row_strs:
+                        header_row_idx = row_idx
+                        for ci, val in enumerate(row_strs):
+                            if val == self.target_cols["source_date"]:
+                                col_indices["source"] = ci
+                        break
 
-                    # Scan headers (first 10 rows)
-                    header_row_idx = None
-                    src_col_idx = None
-                    for row_idx in range(min(10, sheet.nrows)):
-                        row_vals = [str(c.value).strip() if c.value is not None else "" for c in sheet.row(row_idx)]
-                        if self.target_cols["source_date"] in row_vals:
-                            header_row_idx = row_idx
-                            src_col_idx = row_vals.index(self.target_cols["source_date"])
-                            break
+                if header_row_idx is None or "source" not in col_indices:
+                    continue
 
-                    if header_row_idx is not None and src_col_idx is not None:
-                        for row_idx in range(header_row_idx + 1, sheet.nrows):
-                            cell = sheet.cell(row_idx, src_col_idx)
-                            if cell.ctype == xlrd.XL_CELL_DATE:
-                                try:
-                                    dt_tuple = xlrd.xldate_as_tuple(cell.value, wb_scan.datemode)
-                                    parsed_date = date(dt_tuple[0], dt_tuple[1], dt_tuple[2])
-                                    all_target_dates.add(parsed_date)
-                                except Exception:
-                                    pass
-                            else:
-                                parsed_date = self._parse_date(cell.value)
-                                if parsed_date:
-                                    all_target_dates.add(parsed_date)
-            except Exception as e:
-                logger.warning("xlrd pre-scan failed for %s: %s", os.path.basename(filepath), e)
-            finally:
-                if wb_scan is not None:
-                    wb_scan.release_resources()
-                    del wb_scan
-                    wb_scan = None
-                if devnull_fh is not None:
-                    devnull_fh.close()
-                # Release file handles before COM opens the file
-                gc.collect()
-                time.sleep(0.3)
-
-        else:
-            # Standard openpyxl pre-scan for .xlsx (and Mac/Linux converted files)
-            wb_scan = None
-            try:
-                import openpyxl
-                wb_scan = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
-                for sheet_name in wb_scan.sheetnames:
-                    if sheet_name in SKIP_SHEET_NAMES:
-                        continue
-                    ws = wb_scan[sheet_name]
-                    header_row_idx = None
-                    col_indices: Dict[str, int] = {}
-                    for row_idx, row in enumerate(
-                        ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
-                    ):
-                        row_strs = [
-                            str(c).strip() if c is not None else "" for c in row
-                        ]
-                        if self.target_cols["source_date"] in row_strs:
-                            header_row_idx = row_idx
-                            for ci, val in enumerate(row_strs):
-                                if val == self.target_cols["source_date"]:
-                                    col_indices["source"] = ci
-                            break
-
-                    if header_row_idx is None or "source" not in col_indices:
-                        continue
-
-                    src_idx = col_indices["source"] + 1
-                    for row_idx in range(header_row_idx + 1, (ws.max_row or 0) + 1):
-                        parsed_date = self._parse_date(
-                            ws.cell(row=row_idx, column=src_idx).value
-                        )
-                        if parsed_date:
-                            all_target_dates.add(parsed_date)
-            except Exception:
-                if converted and os.path.exists(filepath):
-                    try:
-                        os.remove(filepath)
-                    except OSError as cleanup_err:
-                        logger.debug("Cleanup failed for temp file %s: %s", filepath, cleanup_err)
-                raise
-            finally:
-                if wb_scan is not None:
-                    wb_scan.close()
-                    del wb_scan
-                    wb_scan = None
-                # Force Python to release file handles before COM opens it
-                gc.collect()
-                time.sleep(0.3)
+                src_idx = col_indices["source"] + 1
+                for row_idx in range(header_row_idx + 1, (ws.max_row or 0) + 1):
+                    parsed_date = self._parse_date(
+                        ws.cell(row=row_idx, column=src_idx).value
+                    )
+                    if parsed_date:
+                        all_target_dates.add(parsed_date)
+        except Exception:
+            raise
+        finally:
+            if wb_scan is not None:
+                wb_scan.close()
+                del wb_scan
+                wb_scan = None
+            gc.collect()
 
         # ── Date hierarchy ───────────────────────────────────────────
         target_year = (
@@ -663,70 +507,14 @@ class LedgerEngine:
                     pass
 
         # ══════════════════════════════════════════════════════════════
-        #  OS-AWARE DISPATCHER: COM (Windows+pywin32) vs openpyxl
-        # ══════════════════════════════════════════════════════════════
-        if HAS_PYWIN32:
-            # ── PRIMARY PATH: Native Microsoft Excel COM Engine ───────
-            try:
-                from core.com_engine import process_ledger_com
-                self._emit("Dispatching to Native COM Engine (Windows)")
-                logger.info("Dispatching to Native COM Engine (Windows).")
-
-                result = process_ledger_com(
-                    filepath=filepath,
-                    usd_buying=usd_buying,
-                    usd_selling=usd_selling,
-                    eur_buying=eur_buying,
-                    eur_selling=eur_selling,
-                    holidays_set=master_holidays_set,
-                    holidays_names=holidays_names,
-                    computed_start=computed_start,
-                    target_cols=self.target_cols,
-                    excel=excel,
-                )
-
-                # Handle .xls → .xlsx output path
-                if converted:
-                    final_path = os.path.splitext(original_path)[0] + ".xlsx"
-                    # COM engine SaveAs may have already saved to the final path.
-                    # Use normcase for case-insensitive comparison on Windows.
-                    if os.path.normcase(os.path.abspath(result)) != os.path.normcase(os.path.abspath(final_path)):
-                        import shutil
-                        shutil.move(result, final_path)
-                    result = final_path
-                    logger.info(
-                        "Saved processed output as: %s (original .xls preserved)",
-                        os.path.basename(final_path),
-                    )
-
-                gc.collect()
-                self._emit("File saved and memory cleaned", etype="success")
-                return result
-            except (ImportError, RuntimeError) as com_err:
-                # COM engine import failed — fall through to openpyxl
-                logger.warning(
-                    "COM Engine unavailable, falling back to openpyxl: %s",
-                    com_err,
-                )
-                self._emit("COM unavailable — using openpyxl engine")
-                # If .xls wasn't converted yet, convert now for openpyxl
-                if is_legacy_xls and not filepath.lower().endswith(".xlsx"):
-                    filepath = convert_xls_to_xlsx(filepath)
-
-        # ══════════════════════════════════════════════════════════════
-        #  FALLBACK PATH: openpyxl (macOS / Linux)
+        #  openpyxl ENGINE
         # ══════════════════════════════════════════════════════════════
         self._emit("Processing sheets with openpyxl engine")
-        logger.info("Using openpyxl engine (non-Windows fallback).")
+        logger.info("Processing with openpyxl engine.")
 
         try:
             wb = openpyxl.load_workbook(filepath)
         except Exception:
-            if converted and os.path.exists(filepath):
-                try:
-                    os.remove(filepath)
-                except OSError as cleanup_err:
-                    logger.debug("Cleanup failed for temp file %s: %s", filepath, cleanup_err)
             raise
 
         try:
@@ -817,8 +605,7 @@ class LedgerEngine:
             # the parsed date object back to the cell.
             #
             # Formula strategy (exact match):
-            #   XLOOKUP match_mode 0 = exact match (primary)
-            #   VLOOKUP FALSE = exact match (fallback for older Excel)
+            #   XLOOKUP match_mode 0 = exact match
             #
             # ExRate layout (data starts at row 2, sorted ascending):
             #   A=Date, B=USD Buy, C=USD Sell, D=EUR Buy, E=EUR Sell
@@ -847,6 +634,7 @@ class LedgerEngine:
 
                 skipped = 0
                 written = 0
+                overwritten = 0
                 for row_idx in range(
                     mapping["header_row"] + 1, ws.max_row + 1
                 ):
@@ -864,20 +652,16 @@ class LedgerEngine:
                         src_cell.value = inv_date
                         src_cell.number_format = "DD/MM/YYYY"
 
-                    # ── Skip-if-correct: don't rewrite formulas ───
-                    # If the EX Rate cell already has an IFS formula,
-                    # the data is already correct — skip this row.
-                    existing_val = ws.cell(
-                        row=row_idx, column=out_col,
-                    ).value
-                    if (
-                        isinstance(existing_val, str)
-                        and existing_val.startswith("=_xlfn.IFS(")
-                    ):
-                        skipped += 1
-                        continue
-
-                    # Cell references for this row
+                    # ── Build the expected XLOOKUP formula ─────────
+                    # Uses relative refs for Cur & Date (row-dynamic
+                    # so drag-down works per-row), absolute refs for
+                    # ExRate ranges.
+                    #
+                    # Logic:
+                    #   THB → 1
+                    #   USD → XLOOKUP Date in ExRate!A → return ExRate!B (USD Buying TT)
+                    #   EUR → XLOOKUP Date in ExRate!A → return ExRate!D (EUR Buying TT)
+                    #   Other → ""
                     date_ref = f"{date_letter}{row_idx}"
                     cur_ref = f"{cur_letter}{row_idx}"
 
@@ -887,28 +671,46 @@ class LedgerEngine:
                         f"{cur_ref}=\"USD\","
                         f"IFERROR(_xlfn.XLOOKUP({date_ref},"
                         f"ExRate!$A$2:$A${N},"
-                        f"ExRate!$B$2:$B${N},\"\",0),"
-                        f"IFERROR(VLOOKUP({date_ref},"
-                        f"ExRate!$A$2:$E${N},2,FALSE),\"\")),"
+                        f"ExRate!$B$2:$B${N},\"\",0),\"\"),"
                         f"{cur_ref}=\"EUR\","
                         f"IFERROR(_xlfn.XLOOKUP({date_ref},"
                         f"ExRate!$A$2:$A${N},"
-                        f"ExRate!$D$2:$D${N},\"\",0),"
-                        f"IFERROR(VLOOKUP({date_ref},"
-                        f"ExRate!$A$2:$E${N},4,FALSE),\"\")),"
+                        f"ExRate!$D$2:$D${N},\"\",0),\"\"),"
                         f"TRUE,\"\")"
                     )
+
+                    # ── Skip-if-identical: exact formula match ─────
+                    # Only skip if the cell already contains the EXACT
+                    # same formula. Any old/different formula gets
+                    # overwritten to ensure correctness.
+                    existing_val = ws.cell(
+                        row=row_idx, column=out_col,
+                    ).value
+                    if (
+                        isinstance(existing_val, str)
+                        and existing_val == formula
+                    ):
+                        skipped += 1
+                        continue
+
+                    # Track if we're replacing an old formula
+                    if isinstance(existing_val, str) and existing_val.startswith("="):
+                        overwritten += 1
+
                     self._zero_touch_write(ws, row_idx, out_col, formula)
                     written += 1
 
-                if skipped:
+                if skipped or overwritten:
                     logger.info(
-                        "Sheet '%s': %d rows skipped (already correct), "
-                        "%d rows updated",
-                        sheet_name, skipped, written,
+                        "Sheet '%s': %d identical (skipped), "
+                        "%d old formulas replaced, %d new written",
+                        sheet_name, skipped, overwritten,
+                        written - overwritten,
                     )
                     self._emit(
-                        f"{sheet_name}: {skipped} skipped, {written} updated"
+                        f"{sheet_name}: {skipped} skipped, "
+                        f"{overwritten} replaced, "
+                        f"{written - overwritten} new"
                     )
 
                 # ── Pre-format Date column for manual entry ───────────
@@ -950,18 +752,11 @@ class LedgerEngine:
                 try:
                     wb.close()
                 except Exception:
-                    pass
+                    logger.debug("Failed to close workbook during error handling")
                 del wb
                 wb = None
-            if converted and os.path.exists(filepath):
-                try:
-                    os.remove(filepath)
-                except OSError:
-                    pass
             raise
         gc.collect()
-        # Clean up any UUID .tmp files left by Excel COM
-        _cleanup_excel_tmp_files(os.path.dirname(os.path.abspath(filepath)))
         self._emit("File saved and memory cleaned", etype="success")
         return filepath
 
@@ -976,72 +771,33 @@ class LedgerEngine:
             Callable[[int, int, str, Optional[str]], None]
         ] = None,
     ) -> Tuple[int, int, List[str]]:
-        """
-        Batch processing with pre-edit backup, cache, and auto-cleanup.
-
-        MANDATE 3 — Instance Pooling:
-          On Windows, boots a SINGLE Excel.Application instance for the
-          entire batch queue. All files are processed inside that one
-          instance. excel.Quit() fires only when the full batch finishes.
-        """
+        """Batch processing with pre-edit backup, cache, and auto-cleanup."""
         self.backup.cleanup_old_backups(max_age_days=7)
         total = len(filepaths)
         success = 0
         errors: List[str] = []
 
-        # ── MANDATE 3: Pool a single Excel instance for the batch ─────
-        excel_instance = None
-        excel_ctx = None
-        if HAS_PYWIN32:
+        for idx, fp in enumerate(filepaths):
+            fname = os.path.basename(fp)
             try:
-                from core.com_engine import ExcelCOM
-                excel_ctx = ExcelCOM()
-                excel_instance = excel_ctx.__enter__()
-                logger.info(
-                    "Batch: Pooled single Excel COM instance for %d files.",
-                    total,
-                )
+                await self.process_ledger(fp, start_date=start_date)
+                success += 1
+                if progress_cb:
+                    progress_cb(idx + 1, total, fname, None)
+            except BackupError as e:
+                err_msg = f"{fname}: BACKUP FAILED — skipped ({e})"
+                errors.append(err_msg)
+                if progress_cb:
+                    progress_cb(idx + 1, total, fname, str(e))
             except Exception as e:
-                logger.warning("Failed to pool Excel COM: %s", e)
-                excel_instance = None
-                excel_ctx = None
-
-        try:
-            for idx, fp in enumerate(filepaths):
-                fname = os.path.basename(fp)
-                try:
-                    await self.process_ledger(
-                        fp, start_date=start_date, excel=excel_instance,
-                    )
-                    success += 1
-                    if progress_cb:
-                        progress_cb(idx + 1, total, fname, None)
-                except BackupError as e:
-                    err_msg = f"{fname}: BACKUP FAILED — skipped ({e})"
-                    errors.append(err_msg)
-                    if progress_cb:
-                        progress_cb(idx + 1, total, fname, str(e))
-                except Exception as e:
-                    err_msg = f"{fname}: {e!s}"
-                    errors.append(err_msg)
-                    logger.error(
-                        "File SKIPPED: %s\n%s",
-                        fname, traceback.format_exc(),
-                    )
-                    if progress_cb:
-                        progress_cb(idx + 1, total, fname, str(e))
-        finally:
-            # ── Quit the pooled Excel instance ────────────────────────
-            if excel_ctx is not None:
-                excel_ctx.__exit__(None, None, None)
-                logger.info("Batch: Pooled Excel COM instance terminated.")
-            # Clean up any lingering UUID .tmp files from Excel COM
-            cleaned_dirs: Set[str] = set()
-            for fp in filepaths:
-                d = os.path.dirname(os.path.abspath(fp))
-                if d not in cleaned_dirs:
-                    _cleanup_excel_tmp_files(d)
-                    cleaned_dirs.add(d)
+                err_msg = f"{fname}: {e!s}"
+                errors.append(err_msg)
+                logger.error(
+                    "File SKIPPED: %s\n%s",
+                    fname, traceback.format_exc(),
+                )
+                if progress_cb:
+                    progress_cb(idx + 1, total, fname, str(e))
 
         return success, total - success, errors
 
