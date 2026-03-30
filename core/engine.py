@@ -376,8 +376,8 @@ class LedgerEngine:
                 if has_exrate and not has_month_tabs:
                     self._emit("Standalone ExRate file detected — updating rates")
                     return await self.update_exrate_standalone(filepath)
-            except Exception:
-                pass  # Fall through to normal pipeline
+            except Exception as exc:
+                logger.debug("Standalone detection probe failed: %s", exc)
 
         # ── Reject unsupported formats ─────────────────────────────────
         if not filepath.lower().endswith((".xlsx", ".xlsm")):
