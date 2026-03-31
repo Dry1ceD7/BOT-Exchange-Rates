@@ -234,15 +234,20 @@ class BOTExrateApp(ctk.CTk):
         )
         self._btn_settings.pack(side="left", padx=(12, 0))
 
-        # v3.1.0: Rate Ticker — right side of header
+        # v3.1.1: Ticker Strip below Header
+        self.ticker_strip = ctk.CTkFrame(self, fg_color="#0F172A", corner_radius=0, height=36)
+        self.ticker_strip.pack(fill="x")
+        self.ticker_strip.pack_propagate(False)
+
         from core.database import CacheDB
         from gui.panels.rate_ticker import RateTicker
         try:
             self._cache_db = CacheDB()
             self.rate_ticker = RateTicker(
-                sub_row, cache_db=self._cache_db,
+                self.ticker_strip, cache_db=self._cache_db,
             )
-            self.rate_ticker.pack(side="left", padx=(16, 0))
+            # Center the ticker in the strip
+            self.rate_ticker.place(relx=0.5, rely=0.5, anchor="center")
             self.rate_ticker.start()
         except Exception as e:
             logger.debug("Rate ticker init failed (non-critical): %s", e)

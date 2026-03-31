@@ -699,9 +699,10 @@ class LedgerEngine:
                     # Normalize text-string dates to proper date objects
                     # so XLOOKUP can match the date serial in ExRate.
                     inv_date = self._parse_date(src_cell.value)
-                    if inv_date and isinstance(src_cell.value, str):
+                    if inv_date:
                         src_cell.value = inv_date
-                        src_cell.number_format = "DD/MM/YYYY"
+                        # v3.1.1: User requested display format: 12 Feb 2026
+                        src_cell.number_format = "dd mmm yyyy"
 
 
                     # ── Build the expected XLOOKUP formula ─────────

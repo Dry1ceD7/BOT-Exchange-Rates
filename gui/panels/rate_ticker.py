@@ -43,34 +43,71 @@ class RateTicker(ctk.CTkFrame):
         }
         self._prev_rates: Dict[str, Optional[Decimal]] = dict(self._rates)
 
-        # ── Build compact layout ─────────────────────────────────────
-        self._lbl_usd = ctk.CTkLabel(
-            self, text="USD --/--",
-            font=ctk.CTkFont(family="Consolas", size=10, weight="bold"),
-            text_color="#94A3B8",
-        )
-        self._lbl_usd.pack(side="left", padx=(4, 2))
+        # ── Build Gimmick Layout ─────────────────────────────────────
+        self.container = ctk.CTkFrame(self, fg_color="#1E293B", corner_radius=6, border_width=1, border_color="#334155")
+        self.container.pack(pady=4, padx=10, fill="y")
 
-        self._lbl_sep = ctk.CTkLabel(
-            self, text="|",
-            font=ctk.CTkFont(size=10),
-            text_color="#475569",
-        )
-        self._lbl_sep.pack(side="left", padx=2)
+        # Left: USD
+        self.usd_frame = ctk.CTkFrame(self.container, fg_color="transparent")
+        self.usd_frame.pack(side="left", padx=12, pady=4)
 
-        self._lbl_eur = ctk.CTkLabel(
-            self, text="EUR --/--",
-            font=ctk.CTkFont(family="Consolas", size=10, weight="bold"),
-            text_color="#94A3B8",
+        self.lbl_usd_title = ctk.CTkLabel(
+            self.usd_frame, text="🇺🇸 USD",
+            font=ctk.CTkFont(weight="bold", size=12), text_color="#E2E8F0"
         )
-        self._lbl_eur.pack(side="left", padx=(2, 4))
+        self.lbl_usd_title.pack(side="left", padx=(0, 8))
 
-        self._lbl_time = ctk.CTkLabel(
-            self, text="",
-            font=ctk.CTkFont(size=8),
-            text_color="#64748B",
+        self.lbl_usd_buy = ctk.CTkLabel(
+            self.usd_frame, text="BUY --/--",
+            font=ctk.CTkFont(family="Consolas", size=11, weight="bold"),
+            text_color="#94A3B8"
         )
-        self._lbl_time.pack(side="left", padx=(4, 0))
+        self.lbl_usd_buy.pack(side="left", padx=4)
+
+        self.lbl_usd_sell = ctk.CTkLabel(
+            self.usd_frame, text="SELL --/--",
+            font=ctk.CTkFont(family="Consolas", size=11, weight="bold"),
+            text_color="#94A3B8"
+        )
+        self.lbl_usd_sell.pack(side="left", padx=4)
+
+        # Center: LIVE indicator
+        self.live_frame = ctk.CTkFrame(self.container, fg_color="transparent")
+        self.live_frame.pack(side="left", padx=20)
+        self.lbl_live = ctk.CTkLabel(
+            self.live_frame, text="● LIVE",
+            font=ctk.CTkFont(size=9, weight="bold"), text_color="#ef4444"
+        )
+        self.lbl_live.pack(side="left", padx=(0, 4))
+        self.lbl_time = ctk.CTkLabel(
+            self.live_frame, text="--:--",
+            font=ctk.CTkFont(size=9, weight="bold"), text_color="#94A3B8"
+        )
+        self.lbl_time.pack(side="left")
+
+        # Right: EUR
+        self.eur_frame = ctk.CTkFrame(self.container, fg_color="transparent")
+        self.eur_frame.pack(side="left", padx=12, pady=4)
+
+        self.lbl_eur_title = ctk.CTkLabel(
+            self.eur_frame, text="🇪🇺 EUR",
+            font=ctk.CTkFont(weight="bold", size=12), text_color="#E2E8F0"
+        )
+        self.lbl_eur_title.pack(side="left", padx=(0, 8))
+
+        self.lbl_eur_buy = ctk.CTkLabel(
+            self.eur_frame, text="BUY --/--",
+            font=ctk.CTkFont(family="Consolas", size=11, weight="bold"),
+            text_color="#94A3B8"
+        )
+        self.lbl_eur_buy.pack(side="left", padx=4)
+
+        self.lbl_eur_sell = ctk.CTkLabel(
+            self.eur_frame, text="SELL --/--",
+            font=ctk.CTkFont(family="Consolas", size=11, weight="bold"),
+            text_color="#94A3B8"
+        )
+        self.lbl_eur_sell.pack(side="left", padx=4)
 
     def start(self) -> None:
         """Begin the refresh cycle."""
@@ -173,49 +210,48 @@ class RateTicker(ctk.CTkFrame):
         # Format USD
         usd_b = self._rates.get("usd_buying")
         usd_s = self._rates.get("usd_selling")
-        usd_text, usd_color = self._format_pair("USD", usd_b, usd_s, "usd_buying")
+        usd_b_text, usd_b_color = self._format_single(usd_b, "usd_buying")
+        usd_s_text, usd_s_color = self._format_single(usd_s, "usd_selling")
 
         # Format EUR
         eur_b = self._rates.get("eur_buying")
         eur_s = self._rates.get("eur_selling")
-        eur_text, eur_color = self._format_pair("EUR", eur_b, eur_s, "eur_buying")
+        eur_b_text, eur_b_color = self._format_single(eur_b, "eur_buying")
+        eur_s_text, eur_s_color = self._format_single(eur_s, "eur_selling")
 
-        self._lbl_usd.configure(text=usd_text, text_color=usd_color)
-        self._lbl_eur.configure(text=eur_text, text_color=eur_color)
-        self._lbl_time.configure(
-            text=datetime.now().strftime("%H:%M"),
-        )
+        self.lbl_usd_buy.configure(text=f"BUY {usd_b_text}", text_color=usd_b_color)
+        self.lbl_usd_sell.configure(text=f"SELL {usd_s_text}", text_color=usd_s_color)
 
-    def _format_pair(
-        self, ccy: str,
-        buying: Optional[Decimal],
-        selling: Optional[Decimal],
-        trend_key: str,
-    ) -> tuple:
-        """Format a currency pair for display."""
-        if buying is None and selling is None:
-            return f"{ccy} --/--", "#64748B"
+        self.lbl_eur_buy.configure(text=f"BUY {eur_b_text}", text_color=eur_b_color)
+        self.lbl_eur_sell.configure(text=f"SELL {eur_s_text}", text_color=eur_s_color)
 
-        b_str = f"{float(buying):.4f}" if buying else "--"
-        s_str = f"{float(selling):.4f}" if selling else "--"
+        self.lbl_time.configure(text=datetime.now().strftime("%H:%M:%S"))
 
-        # Determine trend color
+        # Make the LIVE dot blink slightly between updates
+        current_color = self.lbl_live.cget("text_color")
+        self.lbl_live.configure(text_color="#ef4444" if current_color != "#ef4444" else "#dc2626")
+
+    def _format_single(self, rate: Optional[Decimal], trend_key: str) -> tuple:
+        if rate is None:
+            return "--.--", "#64748B"
+
+        val_str = f"{float(rate):.4f}"
         prev = self._prev_rates.get(trend_key)
         curr = self._rates.get(trend_key)
+
         if prev is not None and curr is not None and prev != curr:
             if curr > prev:
-                arrow = "▲"
-                color = "#22C55E"  # green
+                return f"{val_str} ▲", "#22C55E"
             else:
-                arrow = "▼"
-                color = "#EF4444"  # red
-        else:
-            arrow = "●"
-            color = "#3B82F6"  # blue/neutral
-
-        return f"{ccy}{arrow}{b_str}/{s_str}", color
+                return f"{val_str} ▼", "#EF4444"
+        return f"{val_str} ●", "#3B82F6"
 
     def apply_theme(self, theme: dict) -> None:
         """Re-apply colors for dark/light mode transitions."""
-        self._lbl_sep.configure(text_color=theme.get("text_muted", "#475569"))
-        self._lbl_time.configure(text_color=theme.get("text_muted", "#64748B"))
+        bg = theme.get("bg_secondary", "#1E293B")
+        border = theme.get("border", "#334155")
+        text_primary = theme.get("text_primary", "#E2E8F0")
+
+        self.container.configure(fg_color=bg, border_color=border)
+        self.lbl_usd_title.configure(text_color=text_primary)
+        self.lbl_eur_title.configure(text_color=text_primary)
