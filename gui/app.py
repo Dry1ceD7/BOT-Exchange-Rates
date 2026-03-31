@@ -127,7 +127,7 @@ class BOTExrateApp(ctk.CTk):
         super().__init__()
 
         self.title(f"BOT Exchange Rate Processor  |  V{APP_VERSION}")
-        self.geometry("740x920")
+        self.geometry("740x960")
         self.resizable(False, True)
         self.configure(fg_color=COLOR_BG_DARK)
 
@@ -142,7 +142,7 @@ class BOTExrateApp(ctk.CTk):
 
         # Center window
         self.update_idletasks()
-        w, h = 740, 920
+        w, h = 740, 960
         sx = (self.winfo_screenwidth() - w) // 2
         sy = (self.winfo_screenheight() - h) // 2
         self.geometry(f"{w}x{h}+{sx}+{sy}")
@@ -160,10 +160,19 @@ class BOTExrateApp(ctk.CTk):
         from gui.panels.update_banner import UpdateManager
         self._updater = UpdateManager(self)
 
+        # v3.2.0: Dry-run simulation mode flag
+        self._dry_run_var = ctk.StringVar(value="off")
+
         self._build_header()
         self._build_card()
         self._build_live_console()
+        self._build_footer()
         self._updater.check_for_updates()
+
+        # v3.2.0: System Tray — minimize to tray on close
+        from gui.panels.tray_manager import TrayManager
+        self._tray = TrayManager(self)
+        self._tray.setup()
 
     def _set_app_icon(self):
         """Load and set the application window icon (works in source + frozen mode)."""
@@ -430,6 +439,23 @@ class BOTExrateApp(ctk.CTk):
         )
         self.btn_revert.pack(side="left", padx=(0, 12))
 
+        # ── v3.2.0: Dry-Run Simulation Toggle ────────────────────────
+        sim_row = ctk.CTkFrame(self.card, fg_color="transparent")
+        sim_row.pack(pady=(8, 0))
+        self.toggle_dryrun = ctk.CTkSwitch(
+            sim_row, text="  Simulation Mode (Dry Run)",
+            variable=self._dry_run_var, onvalue="on", offvalue="off",
+            font=ctk.CTkFont(size=11), text_color=COLOR_TEXT_SECONDARY,
+            progress_color="#F59E0B", button_color="#64748B",
+            button_hover_color="#475569", fg_color="#94A3B8",
+        )
+        self.toggle_dryrun.pack()
+        self.lbl_dryrun_hint = ctk.CTkLabel(
+            sim_row, text="Preview changes in the Processing Log without modifying files.",
+            font=ctk.CTkFont(size=10), text_color=COLOR_TEXT_MUTED,
+        )
+        self.lbl_dryrun_hint.pack(pady=(2, 0))
+
         self.btn_export_exrate = ctk.CTkButton(
             btn_row, text="ExRate Sheet",
             height=48, width=160,
@@ -637,7 +663,10 @@ class BOTExrateApp(ctk.CTk):
                             text=f"Connecting to BOT API...  fallback range  (0 of {total})",
                             text_color=COLOR_WARNING
                         )
-                    self.batch_handler.start_batch(self.file_queue, start_date_str)
+                    dry_run = self._dry_run_var.get() == "on"
+                    self.batch_handler.start_batch(
+                        self.file_queue, start_date_str, dry_run=dry_run,
+                    )
 
                 self.after(0, _update_ui_and_start)
 
@@ -653,7 +682,10 @@ class BOTExrateApp(ctk.CTk):
                 text=f"Connecting to BOT API...  (0 of {total})",
                 text_color=COLOR_PROCESS_TEXT
             )
-            self.batch_handler.start_batch(self.file_queue, start_date_str)
+            dry_run = self._dry_run_var.get() == "on"
+            self.batch_handler.start_batch(
+                self.file_queue, start_date_str, dry_run=dry_run,
+            )
 
     def _update_progress(self, idx: int, total: int, fname: str, error):
         self.progressbar.set(idx / total)
@@ -958,6 +990,29 @@ class BOTExrateApp(ctk.CTk):
         if hasattr(self, "_auto_scheduler"):
             self._auto_scheduler.stop()
             logger.info("Scheduler stopped")
+
+    # ================================================================== #
+    #  V3.2.0: COMPANY LICENSE FOOTER
+    # ================================================================== #
+    def _build_footer(self):
+        """Build the company license footer bar at the bottom of the window."""
+        self.footer_frame = ctk.CTkFrame(
+            self, fg_color="#0C111D", corner_radius=0, height=28,
+        )
+        self.footer_frame.pack(fill="x", side="bottom")
+        self.footer_frame.pack_propagate(False)
+
+        self.lbl_footer = ctk.CTkLabel(
+            self.footer_frame,
+            text=(
+                f"Property of Advanced ID Asia Engineering., Ltd (AAE)"
+                f"  \u2502  V{APP_VERSION}"
+            ),
+            font=ctk.CTkFont(size=10),
+            text_color="#64748B",
+        )
+        self.lbl_footer.place(relx=0.5, rely=0.5, anchor="center")
+
 
 if __name__ == "__main__":
     app = BOTExrateApp()

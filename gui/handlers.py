@@ -35,19 +35,35 @@ class BatchHandler:
         self.app = app
         self.bus = event_bus or EventBus()
 
-    def start_batch(self, file_queue: List[str], start_date: str):
+    def start_batch(
+        self,
+        file_queue: List[str],
+        start_date: str,
+        dry_run: bool = False,
+    ):
         """Launch the batch processing thread."""
-        self.bus.push({"type": "log", "msg": f"Starting batch: {len(file_queue)} ledger(s)..."})
+        mode = "SIMULATION" if dry_run else "batch"
+        self.bus.push({"type": "log", "msg": f"Starting {mode}: {len(file_queue)} ledger(s)..."})
+        if dry_run:
+            self.bus.push({
+                "type": "log",
+                "msg": "\u26a0 DRY RUN \u2014 files will NOT be modified.",
+            })
         threading.Thread(
             target=self._batch_thread,
-            args=(file_queue, start_date),
+            args=(file_queue, start_date, dry_run),
             daemon=True,
         ).start()
 
-    def _batch_thread(self, file_queue: List[str], start_date: str):
+    def _batch_thread(
+        self,
+        file_queue: List[str],
+        start_date: str,
+        dry_run: bool = False,
+    ):
         """Thread target: runs the async batch in a fresh event loop."""
         try:
-            asyncio.run(self._run_batch(file_queue, start_date))
+            asyncio.run(self._run_batch(file_queue, start_date, dry_run))
         except (httpx.ConnectError, httpx.TimeoutException):
             self.bus.push({"type": "error", "msg": "Network error — check your internet connection."})
             try:
@@ -64,7 +80,12 @@ class BatchHandler:
             except Exception:
                 pass
 
-    async def _run_batch(self, file_queue: List[str], start_date: str):
+    async def _run_batch(
+        self,
+        file_queue: List[str],
+        start_date: str,
+        dry_run: bool = False,
+    ):
         """Async batch executor."""
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -75,11 +96,18 @@ class BatchHandler:
             self.bus.push({"type": "log", "msg": f"API connected. Date: {start_date}"})
 
             def progress_cb(idx, total, fname, error):
+                prefix = "[SIM] " if dry_run else ""
                 if error:
-                    self.bus.push({"type": "error", "msg": f"[{idx}/{total}] {fname} — SKIPPED: {error}"})
+                    self.bus.push({
+                        "type": "error",
+                        "msg": f"{prefix}[{idx}/{total}] {fname} — SKIPPED: {error}",
+                    })
                     logger.error("File SKIPPED: %s — %s", fname, error)
                 else:
-                    self.bus.push({"type": "log", "msg": f"[{idx}/{total}] {fname} — OK"})
+                    self.bus.push({
+                        "type": "log",
+                        "msg": f"{prefix}[{idx}/{total}] {fname} — OK",
+                    })
                 try:
                     self.app.after(
                         100, self.app._update_progress,
@@ -89,11 +117,15 @@ class BatchHandler:
                     pass
 
             success, fail, errors = await engine.process_batch(
-                file_queue, start_date=start_date, progress_cb=progress_cb,
+                file_queue,
+                start_date=start_date,
+                progress_cb=progress_cb,
+                dry_run=dry_run,
             )
+            label = "Simulation" if dry_run else "Batch"
             self.bus.push({
                 "type": "success",
-                "msg": f"Batch complete: {success} succeeded, {fail} failed.",
+                "msg": f"{label} complete: {success} succeeded, {fail} failed.",
             })
             try:
                 self.app.after(

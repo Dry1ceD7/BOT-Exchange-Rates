@@ -370,7 +370,10 @@ class LedgerEngine:
     #  PROCESS SINGLE LEDGER
     # ================================================================== #
     async def process_ledger(
-        self, filepath: str, start_date: Optional[str] = None,
+        self,
+        filepath: str,
+        start_date: Optional[str] = None,
+        dry_run: bool = False,
     ) -> str:
         """Process a single ledger file end-to-end."""
 
@@ -378,8 +381,11 @@ class LedgerEngine:
 
         self._check_memory_guardrail(filepath)
         self._emit("Size check passed")
-        self.backup.create_backup(filepath)
-        self._emit("Backup created")
+        if dry_run:
+            self._emit("[SIM] Backup skipped (dry run)")
+        else:
+            self.backup.create_backup(filepath)
+            self._emit("Backup created")
 
         # ── Standalone ExRate detection ────────────────────────────────
         # If the file contains an ExRate sheet but no month tabs with
@@ -793,14 +799,20 @@ class LedgerEngine:
                         cell.number_format = "DD/MM/YYYY"
 
             # ── Save & Cleanup ───────────────────────────────────────────
-            wb.save(filepath)
+            if dry_run:
+                self._emit(
+                    "[SIM] File NOT saved (dry run) "
+                    f"— {os.path.basename(filepath)}"
+                )
+            else:
+                wb.save(filepath)
+                logger.info(
+                    "Overwritten in-place: %s",
+                    os.path.basename(filepath),
+                )
             wb.close()
             del wb  # release file handle immediately
             wb = None
-            logger.info(
-                "Overwritten in-place: %s",
-                os.path.basename(filepath),
-            )
         except Exception:
             # On ANY error, close the workbook to release the file lock
             if wb is not None:
@@ -825,9 +837,11 @@ class LedgerEngine:
         progress_cb: Optional[
             Callable[[int, int, str, Optional[str]], None]
         ] = None,
+        dry_run: bool = False,
     ) -> Tuple[int, int, List[str]]:
         """Batch processing with pre-edit backup, cache, and auto-cleanup."""
-        self.backup.cleanup_old_backups(max_age_days=7)
+        if not dry_run:
+            self.backup.cleanup_old_backups(max_age_days=7)
         total = len(filepaths)
         success = 0
         errors: List[str] = []
@@ -835,7 +849,9 @@ class LedgerEngine:
         for idx, fp in enumerate(filepaths):
             fname = os.path.basename(fp)
             try:
-                await self.process_ledger(fp, start_date=start_date)
+                await self.process_ledger(
+                    fp, start_date=start_date, dry_run=dry_run,
+                )
                 success += 1
                 if progress_cb:
                     progress_cb(idx + 1, total, fname, None)
