@@ -696,13 +696,26 @@ class LedgerEngine:
                         continue
 
                     # ── Date Normalization ─────────────────────────
-                    # Normalize text-string dates to proper date objects
-                    # so XLOOKUP can match the date serial in ExRate.
+                    # Ensure dates are proper date objects so XLOOKUP
+                    # can match the date serial in ExRate.
+                    #
+                    # v3.1.2: Respect the user's existing date format.
+                    # If the cell already has a custom date-type format
+                    # (e.g. "dd/mm/yyyy", "d mmm yyyy"), keep it.
+                    # Only apply the default "dd mmm yyyy" when the
+                    # cell has no date format (General, @, or text).
                     inv_date = self._parse_date(src_cell.value)
                     if inv_date:
+                        existing_fmt = src_cell.number_format or "General"
                         src_cell.value = inv_date
-                        # v3.1.1: User requested display format: 12 Feb 2026
-                        src_cell.number_format = "dd mmm yyyy"
+                        # Preserve user-set date formats; apply default
+                        # only for generic/text cells
+                        if existing_fmt in (
+                            "General", "@", "0", "general",
+                        ):
+                            src_cell.number_format = "dd mmm yyyy"
+                        else:
+                            src_cell.number_format = existing_fmt
 
 
                     # ── Build the expected XLOOKUP formula ─────────
