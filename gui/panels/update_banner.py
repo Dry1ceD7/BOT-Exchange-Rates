@@ -8,8 +8,6 @@ Extracted from gui/app.py to reduce God Object line count.
 """
 
 import logging
-import os
-import platform
 import threading
 
 import customtkinter as ctk
@@ -169,12 +167,9 @@ class UpdateManager:
     def _do_download(self, version: str) -> None:
         """Execute the actual download + install with the confirmed path."""
         from core.auto_updater import (
-            apply_update,
             download_update,
             get_installer_asset_url,
         )
-
-        install_dir = self._install_dir
 
         # Update banner to show downloading state
         if self._banner:
@@ -209,15 +204,10 @@ class UpdateManager:
                 self.app.after(0, self._show_error, result["error"])
                 return
 
-            apply_result = apply_update(
-                result["path"],
-                install_dir=install_dir,
-            )
-            if apply_result.get("success"):
-                self.app.after(0, self._show_success)
-            else:
-                self.app.after(0, self._show_error,
-                               apply_result.get("error", "Update failed"))
+            # Instead of applying the update immediately and keeping the app alive,
+            # we present a 'Ready to Install' banner. The user must click to apply,
+            # which will execute the bat file and immediately exit the app.
+            self.app.after(0, self._show_ready_to_install, result["path"])
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -238,8 +228,8 @@ class UpdateManager:
                 text_color="#FFFFFF",
             ).place(relx=0.5, rely=0.5, anchor="center")
 
-    def _show_success(self) -> None:
-        """Show success banner with Restart Now / Restart Later options."""
+    def _show_ready_to_install(self, installer_path: str) -> None:
+        """Show banner indicating download is ready to apply."""
         if self._banner:
             for w in self._banner.winfo_children():
                 w.destroy()
@@ -250,24 +240,24 @@ class UpdateManager:
 
             ctk.CTkLabel(
                 inner,
-                text="  ✅ Update installed successfully!",
+                text="  ✅ Update downloaded!",
                 font=ctk.CTkFont(size=13, weight="bold"),
                 text_color="#FFFFFF",
             ).pack(side="left", padx=(0, 16))
 
             ctk.CTkButton(
-                inner, text="Restart Now",
-                width=110, height=28,
+                inner, text="Install & Restart",
+                width=130, height=28,
                 fg_color="#FFFFFF", hover_color="#D1FAE5",
                 text_color="#065F46",
                 font=ctk.CTkFont(size=12, weight="bold"),
                 corner_radius=6,
-                command=self._restart_app,
+                command=lambda: self._execute_installer(installer_path),
             ).pack(side="left", padx=(0, 8))
 
             ctk.CTkButton(
-                inner, text="Restart Later",
-                width=110, height=28,
+                inner, text="Later",
+                width=70, height=28,
                 fg_color="transparent", hover_color="#047857",
                 text_color="#FFFFFF",
                 font=ctk.CTkFont(size=12, weight="bold"),
@@ -275,6 +265,27 @@ class UpdateManager:
                 border_width=1, border_color="#FFFFFF",
                 command=self._dismiss,
             ).pack(side="left")
+
+    def _execute_installer(self, installer_path: str) -> None:
+        """Launch the background updater script and immediately EXIT."""
+        from core.auto_updater import apply_update
+
+        # Update the UI first so user knows it's working
+        if self._banner:
+            for w in self._banner.winfo_children():
+                w.destroy()
+            ctk.CTkLabel(
+                self._banner,
+                text="  Applying update... Closing application.",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color="#FFFFFF",
+            ).place(relx=0.5, rely=0.5, anchor="center")
+
+        # Fire the detached process
+        apply_update(installer_path, install_dir=self._install_dir)
+
+        # IMMEDIATELY kill this instance so the .bat file can overwrite BOT-ExRate.exe
+        self.app.after(500, self._exit_for_restart)
 
     def _dismiss(self) -> None:
         """Dismiss the update banner — update installed, will apply on next launch."""
@@ -288,30 +299,7 @@ class UpdateManager:
                 text_color=t["success"],
             )
 
-    def _restart_app(self) -> None:
-        """Restart the application — launch new exe and exit current process."""
-        import subprocess
-        import sys
 
-        logger.info("User requested restart after update")
-        try:
-            if getattr(sys, "frozen", False):
-                exe_path = os.path.abspath(sys.executable)
-                if platform.system() == "Windows":
-                    DETACHED_PROCESS = 0x00000008
-                    subprocess.Popen(
-                        [exe_path],
-                        creationflags=DETACHED_PROCESS,
-                        close_fds=True,
-                    )
-                else:
-                    subprocess.Popen([exe_path])
-                self.app.after(500, self._exit_for_restart)
-            else:
-                self.app.destroy()
-        except Exception as e:
-            logger.error("Restart failed: %s", e)
-            self._show_error(f"Restart failed: {e}")
 
     def _exit_for_restart(self) -> None:
         """Clean exit for restart — destroy window and exit process."""

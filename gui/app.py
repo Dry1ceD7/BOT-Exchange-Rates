@@ -164,9 +164,9 @@ class BOTExrateApp(ctk.CTk):
         self._dry_run_var = ctk.StringVar(value="off")
 
         self._build_header()
+        self._build_footer()
         self._build_card()
         self._build_live_console()
-        self._build_footer()
         self._updater.check_for_updates()
 
         # v3.2.0: System Tray — minimize to tray on close
@@ -227,7 +227,7 @@ class BOTExrateApp(ctk.CTk):
         sub_row = ctk.CTkFrame(inner, fg_color="transparent")
         sub_row.pack(pady=(2, 0))
         self.lbl_header_sub = ctk.CTkLabel(
-            sub_row, text=f"Enterprise Desktop Edition  |  V{APP_VERSION}",
+            sub_row, text="Enterprise Desktop Edition",
             font=ctk.CTkFont(size=11), text_color=COLOR_HEADER_SUB
         )
         self.lbl_header_sub.pack(side="left")
@@ -243,20 +243,16 @@ class BOTExrateApp(ctk.CTk):
         )
         self._btn_settings.pack(side="left", padx=(12, 0))
 
-        # v3.1.1: Ticker Strip below Header
-        self.ticker_strip = ctk.CTkFrame(self, fg_color="#0F172A", corner_radius=0, height=36)
-        self.ticker_strip.pack(fill="x")
-        self.ticker_strip.pack_propagate(False)
-
+        # v3.2.1: Ticker integrated cleanly into header without separate background strip
         from core.database import CacheDB
         from gui.panels.rate_ticker import RateTicker
         try:
             self._cache_db = CacheDB()
             self.rate_ticker = RateTicker(
-                self.ticker_strip, cache_db=self._cache_db,
+                inner, cache_db=self._cache_db,
             )
-            # Center the ticker in the strip
-            self.rate_ticker.place(relx=0.5, rely=0.5, anchor="center")
+            # Center the ticker below the subtitle row
+            self.rate_ticker.pack(pady=(6, 0))
             self.rate_ticker.start()
         except Exception as e:
             logger.debug("Rate ticker init failed (non-critical): %s", e)
@@ -956,6 +952,12 @@ class BOTExrateApp(ctk.CTk):
         if hasattr(self, "rate_ticker") and self.rate_ticker is not None:
             self.rate_ticker.apply_theme(t)
 
+        # ── Footer ──────────────────────────────────────────────────
+        if hasattr(self, "footer_frame"):
+            self.footer_frame.configure(fg_color=t["header_bg"])
+        if hasattr(self, "lbl_footer"):
+            self.lbl_footer.configure(text_color=t["header_sub"])
+
         logger.debug("Theme applied: %s mode", ctk.get_appearance_mode())
 
     # ================================================================== #
@@ -1013,6 +1015,15 @@ class BOTExrateApp(ctk.CTk):
         )
         self.lbl_footer.place(relx=0.5, rely=0.5, anchor="center")
 
+
+    def restore_from_tray(self):
+        """Called via IPC socket or tray double-click to restore the window."""
+        if hasattr(self, "_tray"):
+            self._tray.restore_if_hidden()
+        else:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
 
 if __name__ == "__main__":
     app = BOTExrateApp()

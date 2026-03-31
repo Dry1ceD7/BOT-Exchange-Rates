@@ -44,7 +44,7 @@ class RateTicker(ctk.CTkFrame):
         self._prev_rates: Dict[str, Optional[Decimal]] = dict(self._rates)
 
         # ── Build Gimmick Layout ─────────────────────────────────────
-        self.container = ctk.CTkFrame(self, fg_color="#1E293B", corner_radius=6, border_width=1, border_color="#334155")
+        self.container = ctk.CTkFrame(self, fg_color="transparent")
         self.container.pack(pady=4, padx=10, fill="y")
 
         # Left: USD
@@ -53,20 +53,20 @@ class RateTicker(ctk.CTkFrame):
 
         self.lbl_usd_title = ctk.CTkLabel(
             self.usd_frame, text="🇺🇸 USD",
-            font=ctk.CTkFont(weight="bold", size=12), text_color="#E2E8F0"
+            font=ctk.CTkFont(weight="bold", size=13), text_color="#E2E8F0"
         )
         self.lbl_usd_title.pack(side="left", padx=(0, 8))
 
         self.lbl_usd_buy = ctk.CTkLabel(
             self.usd_frame, text="BUY --/--",
-            font=ctk.CTkFont(family="Consolas", size=11, weight="bold"),
+            font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
             text_color="#94A3B8"
         )
         self.lbl_usd_buy.pack(side="left", padx=4)
 
         self.lbl_usd_sell = ctk.CTkLabel(
             self.usd_frame, text="SELL --/--",
-            font=ctk.CTkFont(family="Consolas", size=11, weight="bold"),
+            font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
             text_color="#94A3B8"
         )
         self.lbl_usd_sell.pack(side="left", padx=4)
@@ -91,20 +91,20 @@ class RateTicker(ctk.CTkFrame):
 
         self.lbl_eur_title = ctk.CTkLabel(
             self.eur_frame, text="🇪🇺 EUR",
-            font=ctk.CTkFont(weight="bold", size=12), text_color="#E2E8F0"
+            font=ctk.CTkFont(weight="bold", size=13), text_color="#E2E8F0"
         )
         self.lbl_eur_title.pack(side="left", padx=(0, 8))
 
         self.lbl_eur_buy = ctk.CTkLabel(
             self.eur_frame, text="BUY --/--",
-            font=ctk.CTkFont(family="Consolas", size=11, weight="bold"),
+            font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
             text_color="#94A3B8"
         )
         self.lbl_eur_buy.pack(side="left", padx=4)
 
         self.lbl_eur_sell = ctk.CTkLabel(
             self.eur_frame, text="SELL --/--",
-            font=ctk.CTkFont(family="Consolas", size=11, weight="bold"),
+            font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
             text_color="#94A3B8"
         )
         self.lbl_eur_sell.pack(side="left", padx=4)
@@ -248,10 +248,7 @@ class RateTicker(ctk.CTkFrame):
 
     def apply_theme(self, theme: dict) -> None:
         """Re-apply colors for dark/light mode transitions."""
-        bg = theme.get("bg_secondary", "#1E293B")
-        border = theme.get("border", "#334155")
-        text_primary = theme.get("text_primary", "#E2E8F0")
+        text_primary = theme.get("header_text", "#FFFFFF")
 
-        self.container.configure(fg_color=bg, border_color=border)
         self.lbl_usd_title.configure(text_color=text_primary)
         self.lbl_eur_title.configure(text_color=text_primary)

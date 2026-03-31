@@ -784,11 +784,17 @@ class LedgerEngine:
                         sheet_name, skipped, overwritten,
                         written - overwritten,
                     )
-                    self._emit(
-                        f"{sheet_name}: {skipped} skipped, "
-                        f"{overwritten} replaced, "
-                        f"{written - overwritten} new"
-                    )
+                    if dry_run:
+                        self._emit(
+                            f"[SIM] {sheet_name}: Would inject {written} formulas "
+                            f"(replaced {overwritten}) and normalize {written} dates"
+                        )
+                    else:
+                        self._emit(
+                            f"{sheet_name}: {skipped} skipped, "
+                            f"{overwritten} replaced, "
+                            f"{written - overwritten} new"
+                        )
 
                 # ── Pre-format Date column for manual entry ───────────
                 # Apply "DD/MM/YYYY" to a small buffer zone below data

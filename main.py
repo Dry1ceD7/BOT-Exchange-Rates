@@ -89,6 +89,11 @@ def main():
     """Ensures directories, validates/prompts tokens, then starts the app."""
     _ensure_directories()
 
+    from core.ipc import ping_running_instance
+    if ping_running_instance():
+        print("Another instance is already running. Signal sent to restore.")
+        sys.exit(0)
+
     # ── v3.1.0: CLI argument parsing ─────────────────────────────────
     import argparse
     parser = argparse.ArgumentParser(
@@ -116,9 +121,20 @@ def main():
         if not _prompt_for_tokens():
             sys.exit(0)
 
+    from core.ipc import SingleInstanceServer
     from gui.app import BOTExrateApp
     app = BOTExrateApp()
-    app.mainloop()
+
+    # Start IPC listener to restore application if another tries to launch
+    ipc_server = SingleInstanceServer(
+        on_restore=lambda: app.after(0, app.restore_from_tray)
+    )
+    ipc_server.start()
+
+    try:
+        app.mainloop()
+    finally:
+        ipc_server.stop()
 
 
 def _run_headless(args):
