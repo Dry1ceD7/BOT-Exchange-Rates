@@ -235,8 +235,8 @@ class BOTExrateApp(ctk.CTk):
         self._btn_settings.pack(side="left", padx=(12, 0))
 
         # v3.1.0: Rate Ticker — right side of header
-        from gui.panels.rate_ticker import RateTicker
         from core.database import CacheDB
+        from gui.panels.rate_ticker import RateTicker
         try:
             self._cache_db = CacheDB()
             self.rate_ticker = RateTicker(

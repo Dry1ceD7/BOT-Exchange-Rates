@@ -124,7 +124,6 @@ def main():
 def _run_headless(args):
     """Run the processor in headless (CLI) mode without GUI."""
     import asyncio
-    from datetime import date as _date
 
     import httpx
 
@@ -157,7 +156,7 @@ def _run_headless(args):
         print("No Excel files found to process.")
         sys.exit(0)
 
-    print(f"BOT Exchange Rate Processor — Headless Mode")
+    print("BOT Exchange Rate Processor — Headless Mode")
     print(f"Found {len(files)} file(s) to process")
 
     # Determine start date
@@ -173,8 +172,8 @@ def _run_headless(args):
     # Run async batch
     async def _run():
         from core.api_client import BOTClient
-        from core.engine import LedgerEngine
         from core.audit_logger import AuditLogger
+        from core.engine import LedgerEngine
 
         audit = AuditLogger()
 

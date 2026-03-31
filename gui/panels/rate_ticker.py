@@ -9,7 +9,6 @@ and Selling rates. Fetches from CacheDB with a lightweight API
 fallback on startup. Auto-refreshes every 60 seconds.
 """
 
-import asyncio
 import logging
 import os
 import threading

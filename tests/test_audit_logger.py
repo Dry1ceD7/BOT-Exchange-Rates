@@ -3,8 +3,6 @@
 
 import csv
 import os
-import pytest
-from datetime import datetime
 
 from core.audit_logger import AuditLogger
 

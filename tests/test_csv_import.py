@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Tests for core/csv_import.py — Offline CSV Import."""
 
-import os
-import pytest
 from datetime import date
+
+import pytest
 
 from core.csv_import import import_bot_csv
 
@@ -37,7 +37,6 @@ class TestCSVImport:
         assert count == 3
 
         # Verify rates were inserted into multi-currency table
-        from decimal import Decimal
         rate = cache.get_multi_rate(
             date(2025, 1, 2), "USD", "buying_transfer",
         )

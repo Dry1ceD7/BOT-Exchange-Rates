@@ -23,6 +23,7 @@ import httpx
 from openpyxl.cell.cell import MergedCell
 from openpyxl.utils import get_column_letter
 
+from core.anomaly_guard import AnomalyGuard
 from core.api_client import CLIENT_TIMEOUT, BOTClient
 from core.backup_manager import BackupError, BackupManager
 from core.config_manager import SettingsManager
@@ -30,7 +31,6 @@ from core.database import CacheDB
 from core.exrate_sheet import update_master_exrate_sheet
 from core.logic import BOTLogicEngine, safe_to_decimal
 from core.prescan import prescan_oldest_date
-from core.anomaly_guard import AnomalyGuard
 
 logger = logging.getLogger(__name__)
 

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Tests for core/anomaly_guard.py — Rate Anomaly Detection."""
 
-import pytest
 from datetime import date
 from decimal import Decimal
 
-from core.anomaly_guard import AnomalyGuard, AnomalyResult
+from core.anomaly_guard import AnomalyGuard
 
 
 class TestAnomalyGuardSingleCheck:
