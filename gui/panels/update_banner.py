@@ -98,17 +98,89 @@ class UpdateManager:
 
     # ─── Download + Install ─────────────────────────────────────────
     def _start_download(self, version: str) -> None:
-        """Download and install the update."""
+        """Show install location confirmation, then download and install."""
+        from core.auto_updater import _get_install_dir
+
+        self._install_dir = _get_install_dir()
+
+        if self._banner:
+            for w in self._banner.winfo_children():
+                w.destroy()
+            self._banner.configure(fg_color="#1E40AF", height=52)
+
+            inner = ctk.CTkFrame(self._banner, fg_color="transparent")
+            inner.place(relx=0.5, rely=0.5, anchor="center")
+
+            # Show detected path
+            short_path = self._install_dir or "Unknown"
+            if len(short_path) > 45:
+                short_path = "..." + short_path[-42:]
+
+            ctk.CTkLabel(
+                inner,
+                text=f"  Install to: {short_path}",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color="#FFFFFF",
+            ).pack(side="left", padx=(0, 8))
+
+            ctk.CTkButton(
+                inner, text="Change",
+                width=70, height=24,
+                fg_color="#2563EB", hover_color="#3B82F6",
+                text_color="#FFFFFF",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                corner_radius=4,
+                command=self._change_install_dir,
+            ).pack(side="left", padx=(0, 6))
+
+            ctk.CTkButton(
+                inner, text="Install",
+                width=70, height=24,
+                fg_color="#059669", hover_color="#10B981",
+                text_color="#FFFFFF",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                corner_radius=4,
+                command=lambda: self._do_download(version),
+            ).pack(side="left", padx=(0, 6))
+
+            ctk.CTkButton(
+                inner, text="✕",
+                width=24, height=24,
+                fg_color="transparent", hover_color="#1E3A8A",
+                text_color="#FFFFFF",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                corner_radius=4,
+                command=lambda: self._banner.destroy(),
+            ).pack(side="left")
+
+    def _change_install_dir(self) -> None:
+        """Open a folder dialog for the user to pick install directory."""
+        from tkinter import filedialog
+
+        new_dir = filedialog.askdirectory(
+            title="Choose Installation Folder",
+            initialdir=self._install_dir or "/",
+        )
+        if new_dir:
+            self._install_dir = new_dir
+            # Re-trigger the confirmation banner
+            self._start_download(self._pending_version)
+
+    def _do_download(self, version: str) -> None:
+        """Execute the actual download + install with the confirmed path."""
         from core.auto_updater import (
             apply_update,
             download_update,
             get_installer_asset_url,
         )
 
+        install_dir = self._install_dir
+
         # Update banner to show downloading state
         if self._banner:
             for w in self._banner.winfo_children():
                 w.destroy()
+            self._banner.configure(fg_color="#F59E0B", height=40)
             self._dl_label = ctk.CTkLabel(
                 self._banner,
                 text="  Downloading update...",
@@ -137,7 +209,10 @@ class UpdateManager:
                 self.app.after(0, self._show_error, result["error"])
                 return
 
-            apply_result = apply_update(result["path"])
+            apply_result = apply_update(
+                result["path"],
+                install_dir=install_dir,
+            )
             if apply_result.get("success"):
                 self.app.after(0, self._show_success)
             else:

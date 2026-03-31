@@ -35,6 +35,10 @@ AppSupportURL={#MyAppURL}/issues
 DefaultDirName={autopf}\BOT-ExRate
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
+; v3.1.2: Remember install location from previous installs (registry-based)
+UsePreviousAppDir=yes
+; Show directory picker on first install only; skip on updates
+DisableDirPage=auto
 OutputDir=..\dist
 OutputBaseFilename=BOT-ExRate-Setup
 SetupIconFile=..\assets\icon.ico
@@ -42,9 +46,12 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+PrivilegesRequiredOverridesAllowed=dialog commandline
 UninstallDisplayIcon={app}\assets\icon.ico
 ArchitecturesInstallIn64BitMode=x64compatible
+; v3.1.2: Handle file locks when updating on server shares
+CloseApplications=force
+RestartApplications=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

@@ -8,11 +8,19 @@ On boot, pings the GitHub Releases API to check if a newer version is
 available. Returns a structured dict for the GUI to render a non-intrusive
 notification.
 
+v3.1.2 — Fixed install path resolution:
+  - Reads install directory from Windows Registry (Inno Setup record)
+  - Falls back to sys.executable parent for portable/non-registry installs
+  - Downloads to %TEMP% to avoid permission issues on server shares
+  - Passes correct /DIR= to Inno Setup for in-place updates
+
 Security: Read-only GET request. No tokens required for public repos.
 """
 
 import logging
 import os
+import platform
+import tempfile
 from typing import Optional
 
 import httpx
@@ -26,6 +34,67 @@ GITHUB_RELEASES_URL = (
 GITHUB_ALL_RELEASES_URL = (
     "https://api.github.com/repos/Dry1ceD7/BOT-Exchange-Rates/releases"
 )
+
+# Inno Setup AppId (must match installer.iss)
+INNO_APP_ID = "{B0T-EXRATE-2026-AAE}_is1"
+
+
+def _get_install_dir() -> Optional[str]:
+    """
+    Resolve the actual installation directory.
+
+    Priority order:
+      1. Windows Registry (Inno Setup records InstallLocation)
+      2. sys.executable parent directory (PyInstaller frozen app)
+      3. Project root (development mode)
+
+    This is the KEY FIX: when the app is installed on a server share
+    (e.g., \\\\SERVER\\Apps\\BOT-ExRate), the registry stores the exact
+    path where Inno Setup installed it. Using sys.executable alone
+    can return incorrect paths on mapped drives or UNC shares.
+    """
+    import sys
+
+    # ── Strategy 1: Windows Registry (most reliable for Inno Setup) ──
+    if platform.system() == "Windows":
+        try:
+            import winreg
+
+            # Inno Setup writes to either HKLM or HKCU depending on
+            # PrivilegesRequired. We check HKCU first (lowest), then HKLM.
+            for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    key_path = (
+                        f"Software\\Microsoft\\Windows\\CurrentVersion"
+                        f"\\Uninstall\\{INNO_APP_ID}"
+                    )
+                    with winreg.OpenKey(hive, key_path) as key:
+                        install_loc, _ = winreg.QueryValueEx(
+                            key, "InstallLocation"
+                        )
+                        if install_loc and os.path.isdir(install_loc):
+                            logger.info(
+                                "Install dir from registry: %s", install_loc
+                            )
+                            return install_loc.rstrip("\\").rstrip("/")
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    continue
+        except ImportError:
+            # winreg not available (non-Windows or restricted env)
+            pass
+
+    # ── Strategy 2: sys.executable parent (frozen apps) ──────────────
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        logger.info("Install dir from sys.executable: %s", exe_dir)
+        return exe_dir
+
+    # ── Strategy 3: Development mode — project root ──────────────────
+    dev_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    logger.info("Install dir from dev root: %s", dev_root)
+    return dev_root
 
 
 def check_for_update(
@@ -119,12 +188,14 @@ def get_installer_asset_url(tag: str) -> dict:
     Fetch the installer .exe asset URL from a specific GitHub release.
 
     Returns:
-        {"url": str | None, "filename": str | None, "size": int | None, "error": str | None}
+        {"url": str | None, "filename": str | None,
+         "size": int | None, "error": str | None}
     """
     result = {"url": None, "filename": None, "size": None, "error": None}
     try:
         resp = httpx.get(
-            f"https://api.github.com/repos/Dry1ceD7/BOT-Exchange-Rates/releases/tags/v{tag}",
+            f"https://api.github.com/repos/Dry1ceD7/"
+            f"BOT-Exchange-Rates/releases/tags/v{tag}",
             headers={"Accept": "application/vnd.github+json"},
             timeout=10.0,
         )
@@ -154,35 +225,30 @@ def download_update(
     progress_cb=None,
 ) -> dict:
     """
-    Download the update executable.
+    Download the update installer to a temp directory.
 
-    By default, downloads to the SAME directory where the running
-    application lives (server share path). This ensures updates
-    are installed on the server, not on the user's local PC.
+    v3.1.2 FIX: Always downloads to %TEMP% (or /tmp) to avoid:
+      - Permission denied errors on server shares
+      - File lock conflicts with the running application
+      - Writing into the inner PyInstaller _MEIXXXXXX folder
+
+    The Inno Setup installer will then copy files to the correct
+    install directory via the /DIR= flag.
 
     Args:
         url: Direct download URL for the .exe
-        dest_dir: Where to save (defaults to app's own directory)
+        dest_dir: Where to save (defaults to system temp dir)
         filename: Override filename (defaults to URL basename)
         progress_cb: Optional callback(downloaded_bytes, total_bytes)
 
     Returns:
         {"path": str | None, "error": str | None}
     """
-    import sys
-
     result = {"path": None, "error": None}
 
+    # v3.1.2: Always download to temp directory
     if dest_dir is None:
-        # Use the directory of the running executable (server path)
-        if getattr(sys, "frozen", False):
-            # PyInstaller frozen app — use exe's directory
-            dest_dir = os.path.dirname(os.path.abspath(sys.executable))
-        else:
-            # Development mode — use project root
-            dest_dir = os.path.dirname(
-                os.path.dirname(os.path.abspath(__file__))
-            )
+        dest_dir = tempfile.gettempdir()
 
     if filename is None:
         filename = url.rsplit("/", 1)[-1] if "/" in url else "update.exe"
@@ -193,7 +259,9 @@ def download_update(
     final_path = os.path.join(dest_dir, filename)
 
     try:
-        with httpx.stream("GET", url, follow_redirects=True, timeout=120.0) as resp:
+        with httpx.stream(
+            "GET", url, follow_redirects=True, timeout=120.0
+        ) as resp:
             resp.raise_for_status()
             total = int(resp.headers.get("content-length", 0))
             downloaded = 0
@@ -224,51 +292,83 @@ def download_update(
     return result
 
 
-def apply_update(new_exe_path: str) -> dict:
+def apply_update(
+    new_exe_path: str,
+    install_dir: Optional[str] = None,
+) -> dict:
     """
     Install the downloaded update silently.
 
     For Inno Setup installers (BOT-ExRate-Setup.exe):
       Runs the installer with /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-      /DIR=<current_app_dir> to install behind the scenes.
+      /DIR=<resolved_install_dir> to install behind the scenes.
+
+    v3.1.2 FIX: install_dir is resolved from the Windows Registry
+    (where Inno Setup originally recorded it), ensuring the update
+    goes to the server share — NOT the user's local PC.
 
     For portable single-file builds:
-      Falls back to atomic exe swap (rename current → .bak, rename new → current).
+      Falls back to atomic exe swap.
 
     Args:
         new_exe_path: Absolute path to the downloaded installer/exe.
+        install_dir: Override install directory. If None, auto-resolved.
 
     Returns:
-        {"success": bool, "error": str | None}
+        {"success": bool, "error": str | None,
+         "install_dir": str | None}
     """
     import subprocess
     import sys
 
-    result = {"success": False, "error": None}
+    result = {"success": False, "error": None, "install_dir": None}
 
     if not getattr(sys, "frozen", False):
-        result["error"] = "In-place update only works for frozen (packaged) apps"
+        result["error"] = (
+            "In-place update only works for frozen (packaged) apps"
+        )
         return result
 
-    current_exe = os.path.abspath(sys.executable)
-    app_dir = os.path.dirname(current_exe)
+    # v3.1.2: Resolve install directory from registry first
+    if install_dir is None:
+        install_dir = _get_install_dir()
+
+    if install_dir is None:
+        result["error"] = "Could not determine install directory"
+        return result
+
+    result["install_dir"] = install_dir
+    current_exe = os.path.join(install_dir, "BOT-ExRate.exe")
     filename = os.path.basename(new_exe_path).lower()
 
     try:
         if "setup" in filename:
-            # Inno Setup installer — run via detached batch script
-            # This allows the Python process to exit fully before the installer runs,
-            # preventing "Code 5: Access Denied" file lock errors.
-            logger.info("Preparing detached installer script...")
-            import tempfile
+            # Inno Setup installer — run via detached batch script.
+            # This allows the Python process to exit fully before the
+            # installer runs, preventing "Code 5: Access Denied" errors.
+            logger.info(
+                "Preparing detached installer script for dir: %s",
+                install_dir,
+            )
 
-            bat_path = os.path.join(tempfile.gettempdir(), "bot_exrate_updater.bat")
+            bat_path = os.path.join(
+                tempfile.gettempdir(), "bot_exrate_updater.bat"
+            )
             with open(bat_path, "w") as f:
                 f.write("@echo off\n")
-                f.write("timeout /t 2 /nobreak > NUL\n")  # Wait 2s for app to exit
-                f.write(f'"{new_exe_path}" /VERYSILENT /SUPPRESSMSGBOXES /DIR="{app_dir}"\n')
-                f.write(f'start "" "{current_exe}"\n')     # Relaunch the app
-                f.write('del "%~f0"\n')                   # Self-delete batch file
+                # Wait 3s for app to exit fully
+                f.write("timeout /t 3 /nobreak > NUL\n")
+                # Run Inno Setup with /DIR pointing to the REAL install dir
+                f.write(
+                    f'"{new_exe_path}" /VERYSILENT /SUPPRESSMSGBOXES '
+                    f'/NORESTART /DIR="{install_dir}"\n'
+                )
+                # Wait for installer to finish
+                f.write("timeout /t 2 /nobreak > NUL\n")
+                # Relaunch the app from the install dir
+                f.write(f'start "" "{current_exe}"\n')
+                # Self-delete batch file
+                f.write('del "%~f0"\n')
 
             if sys.platform == "win32":
                 flags = 0x00000008  # DETACHED_PROCESS
@@ -279,7 +379,12 @@ def apply_update(new_exe_path: str) -> dict:
                 )
             else:
                 subprocess.Popen(
-                    ["sh", "-c", f"sleep 2 && '{new_exe_path}' /VERYSILENT /DIR='{app_dir}' && open '{current_exe}'"],
+                    [
+                        "sh", "-c",
+                        f"sleep 3 && '{new_exe_path}' /VERYSILENT "
+                        f"/DIR='{install_dir}' && "
+                        f"open '{current_exe}'",
+                    ],
                     start_new_session=True,
                 )
 
@@ -323,4 +428,3 @@ def restart_app() -> None:
         subprocess.Popen([sys.executable] + sys.argv)
 
     sys.exit(0)
-
