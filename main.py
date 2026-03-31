@@ -53,7 +53,7 @@ def _ensure_directories():
     backup_manager.py singletons, but data/input/ is NOT.)
     """
     project_root = get_project_root()
-    for subdir in ["data", "data/input", "data/backups"]:
+    for subdir in ["data", "data/input", "data/backups", "data/logs"]:
         os.makedirs(os.path.join(project_root, subdir), exist_ok=True)
 
 
@@ -89,6 +89,29 @@ def main():
     """Ensures directories, validates/prompts tokens, then starts the app."""
     _ensure_directories()
 
+    # ── v3.1.0: CLI argument parsing ─────────────────────────────────
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="BOT Exchange Rate Processor — Enterprise Desktop Edition",
+    )
+    parser.add_argument(
+        "--headless", action="store_true",
+        help="Run in headless mode (no GUI). Process files and exit.",
+    )
+    parser.add_argument(
+        "--input", "-i", type=str, default=None,
+        help="Path to an Excel file or directory of Excel files to process.",
+    )
+    parser.add_argument(
+        "--start-date", "-s", type=str, default=None,
+        help="Start date for rate extraction (YYYY-MM-DD). Defaults to auto-detect.",
+    )
+    args = parser.parse_args()
+
+    if args.headless:
+        _run_headless(args)
+        return
+
     if not _tokens_present():
         if not _prompt_for_tokens():
             sys.exit(0)
@@ -96,6 +119,99 @@ def main():
     from gui.app import BOTExrateApp
     app = BOTExrateApp()
     app.mainloop()
+
+
+def _run_headless(args):
+    """Run the processor in headless (CLI) mode without GUI."""
+    import asyncio
+    from datetime import date as _date
+
+    import httpx
+
+    # Validate tokens
+    if not _tokens_present():
+        print("ERROR: API tokens not configured.")
+        print("Run the GUI first to register tokens, or set BOT_TOKEN_EXG and BOT_TOKEN_HOL in .env")
+        sys.exit(1)
+
+    # Collect files
+    input_path = args.input
+    if input_path is None:
+        input_path = os.path.join(get_project_root(), "data", "input")
+
+    if not os.path.exists(input_path):
+        print(f"ERROR: Input path not found: {input_path}")
+        sys.exit(1)
+
+    excel_exts = (".xlsx", ".xlsm")
+    if os.path.isfile(input_path):
+        files = [input_path] if input_path.lower().endswith(excel_exts) else []
+    else:
+        files = sorted([
+            os.path.join(input_path, f)
+            for f in os.listdir(input_path)
+            if f.lower().endswith(excel_exts) and not f.startswith(".")
+        ])
+
+    if not files:
+        print("No Excel files found to process.")
+        sys.exit(0)
+
+    print(f"BOT Exchange Rate Processor — Headless Mode")
+    print(f"Found {len(files)} file(s) to process")
+
+    # Determine start date
+    if args.start_date:
+        start_date = args.start_date
+    else:
+        from core.engine import LedgerEngine
+        oldest, was_detected = LedgerEngine.prescan_oldest_date(files)
+        start_date = oldest.strftime("%Y-%m-%d")
+        flag = "auto-detected" if was_detected else "fallback"
+        print(f"Start date: {start_date} ({flag})")
+
+    # Run async batch
+    async def _run():
+        from core.api_client import BOTClient
+        from core.engine import LedgerEngine
+        from core.audit_logger import AuditLogger
+
+        audit = AuditLogger()
+
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=10.0),
+        ) as client:
+            api = BOTClient(client)
+            engine = LedgerEngine(api)
+
+            def progress_cb(idx, total, fname, error):
+                if error:
+                    print(f"  [{idx}/{total}] {fname} — SKIPPED: {error}")
+                else:
+                    print(f"  [{idx}/{total}] {fname} — OK")
+
+            success, fail, errors = await engine.process_batch(
+                files, start_date=start_date, progress_cb=progress_cb,
+            )
+
+        audit.log_batch_summary(
+            total_files=len(files),
+            success=success,
+            failed=fail,
+            anomalies_detected=0,
+        )
+        audit_path = audit.finalize()
+
+        print(f"\nResults: {success} succeeded, {fail} failed")
+        print(f"Audit log: {audit_path}")
+        if errors:
+            print("Errors:")
+            for e in errors:
+                print(f"  • {e}")
+        return fail
+
+    fail_count = asyncio.run(_run())
+    sys.exit(1 if fail_count > 0 else 0)
 
 
 import traceback  # noqa: E402
@@ -136,3 +252,4 @@ sys.excepthook = global_exception_handler
 
 if __name__ == "__main__":
     main()
+

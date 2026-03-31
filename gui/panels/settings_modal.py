@@ -50,7 +50,7 @@ class SettingsModal(ctk.CTkToplevel):
         super().__init__(master, **kwargs)
 
         self.title("Settings")
-        self.geometry("420x620")
+        self.geometry("420x720")
         self.resizable(False, False)
         self.configure(fg_color=COLOR_MODAL_BG)
 
@@ -62,7 +62,7 @@ class SettingsModal(ctk.CTkToplevel):
 
     def _center(self):
         self.update_idletasks()
-        w, h = 420, 620
+        w, h = 420, 720
         sx = (self.winfo_screenwidth() - w) // 2
         sy = (self.winfo_screenheight() - h) // 2
         self.geometry(f"{w}x{h}+{sx}+{sy}")
@@ -93,6 +93,35 @@ class SettingsModal(ctk.CTkToplevel):
             font=ctk.CTkFont(size=13),
         )
         appearance_menu.pack(padx=30, pady=(4, 16), fill="x")
+
+        # ── Rate Type ─────────────────────────────────────────────────
+        ctk.CTkLabel(
+            self, text="RATE TYPE",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLOR_MODAL_MUTED,
+        ).pack(anchor="w", padx=30)
+
+        # Map display labels to API field names
+        self._rate_type_map = {
+            "Buying TT": "buying_transfer",
+            "Selling": "selling",
+            "Buying Sight": "buying_sight",
+            "Mid Rate": "mid_rate",
+        }
+        self._rate_type_reverse = {v: k for k, v in self._rate_type_map.items()}
+
+        current_api_field = self._settings.get("rate_type", "buying_transfer")
+        current_label = self._rate_type_reverse.get(
+            current_api_field, "Buying TT"
+        )
+        self._rate_type_var = ctk.StringVar(value=current_label)
+        rate_menu = ctk.CTkSegmentedButton(
+            self,
+            values=["Buying TT", "Selling", "Buying Sight", "Mid Rate"],
+            variable=self._rate_type_var,
+            font=ctk.CTkFont(size=12),
+        )
+        rate_menu.pack(padx=30, pady=(4, 16), fill="x")
 
         # ── Auto-Update ──────────────────────────────────────────────
         self._auto_update_var = ctk.StringVar(
@@ -131,7 +160,22 @@ class SettingsModal(ctk.CTkToplevel):
             self, text="", font=ctk.CTkFont(size=11),
             text_color=COLOR_MODAL_SUCCESS,
         )
-        self._lbl_ping.pack(pady=(0, 12))
+        self._lbl_ping.pack(pady=(0, 8))
+
+        # ── Import Offline Rates (CSV) ────────────────────────────────
+        ctk.CTkButton(
+            self, text="Import Offline Rates (CSV)",
+            fg_color="#0F766E", hover_color="#115E59",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            corner_radius=8, height=38,
+            command=self._on_import_csv,
+        ).pack(padx=30, fill="x", pady=(0, 4))
+
+        self._lbl_csv = ctk.CTkLabel(
+            self, text="", font=ctk.CTkFont(size=11),
+            text_color=COLOR_MODAL_MUTED,
+        )
+        self._lbl_csv.pack(pady=(0, 12))
 
         # ── Check for Stable Updates ─────────────────────────────────
         self._btn_update = ctk.CTkButton(
@@ -561,5 +605,56 @@ class SettingsModal(ctk.CTkToplevel):
     def _save_and_close(self):
         self._settings["appearance"] = self._appearance_var.get()
         self._settings["auto_update"] = self._auto_update_var.get() == "on"
+        # v3.1.0: Save rate type
+        selected_label = self._rate_type_var.get()
+        self._settings["rate_type"] = self._rate_type_map.get(
+            selected_label, "buying_transfer"
+        )
         self._mgr.save(self._settings)
         self.destroy()
+
+    # ================================================================== #
+    #  CSV IMPORT
+    # ================================================================== #
+
+    def _on_import_csv(self):
+        """Open a file dialog and import a BOT CSV into the local cache."""
+        from tkinter import filedialog as fd
+
+        csv_path = fd.askopenfilename(
+            title="Select BOT Exchange Rate CSV",
+            filetypes=[
+                ("CSV files", "*.csv"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not csv_path:
+            return
+
+        self._lbl_csv.configure(
+            text="Importing...", text_color=COLOR_MODAL_MUTED,
+        )
+        self.update_idletasks()
+
+        def _worker():
+            try:
+                from core.csv_import import import_bot_csv
+                from core.database import CacheDB
+
+                cache = CacheDB()
+                count = import_bot_csv(csv_path, cache)
+                cache.close()
+                self.after(
+                    0, self._lbl_csv.configure,
+                    {"text": f"✓ Imported {count} rate entries",
+                     "text_color": COLOR_MODAL_SUCCESS},
+                )
+            except Exception as e:
+                self.after(
+                    0, self._lbl_csv.configure,
+                    {"text": f"✗ Import failed: {e}",
+                     "text_color": "#F87171"},
+                )
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()

@@ -20,6 +20,15 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "auto_update": True,
     "output_directory": "",
     "api_timeout_seconds": 10,
+    # v3.1.0: Rate type for formula injection (buying_transfer, selling,
+    #          buying_sight, mid_rate)
+    "rate_type": "buying_transfer",
+    # v3.1.0: Anomaly guardian threshold (±percentage)
+    "anomaly_threshold_pct": 5.0,
+    # v3.1.0: Scheduled auto-processing
+    "scheduler_enabled": False,
+    "scheduler_time": "23:00",
+    "scheduler_paths": [],
 }
 
 SETTINGS_FILENAME = "settings.json"

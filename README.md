@@ -4,11 +4,11 @@
 
 **Enterprise Desktop Application for Bank of Thailand Exchange Rate Automation**
 
-Version 3.0.45  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
+Version 3.1.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-140%20Passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-156%20Passed-brightgreen)](tests/)
 
 ---
 
@@ -20,7 +20,20 @@ The **BOT Exchange Rate Processor** is a standalone desktop application that aut
 
 It replaces a fragmented, error-prone multi-script workflow with a single, production-grade GUI application — built for **zero-downtime corporate environments**, legacy office hardware (4GB RAM, low-resolution monitors), and strict Thai accounting compliance.
 
-### What's New in V3.0 (up to v3.0.44)
+### What's New in V3.1.0 (Enterprise Feature Expansion)
+
+| Feature | Description |
+|---------|-------------|
+| **Rate Anomaly Guardian** | ±5% variance detector protects ledgers from API glitches — anomalous rates flagged in console and skipped |
+| **Audit Trail (CSV)** | Every cell modification logged to `data/logs/Audit_Log_*.csv` with timestamp, file, currency, and anomaly flags |
+| **Live Rate Ticker** | Compact USD/EUR rate display in the header bar — auto-refreshes from cache with API fallback |
+| **Auto-Scheduler** | Background timer for scheduled batch processing with folder-watch and time picker (no full-PC scan) |
+| **Rate Type Selector** | Choose Buying TT, Selling, Buying Sight, or Mid Rate from Settings — controls which rate the formula references |
+| **Offline CSV Import** | Import BOT's official downloadable CSV into local cache for air-gapped or offline environments |
+| **Headless CLI Mode** | `python main.py --headless --input ./ledgers` — run unattended via cron/Task Scheduler |
+| **Multi-Currency Cache** | New `rates_multi` SQLite table supports arbitrary currencies beyond USD/EUR |
+
+### What's New in V3.0 (up to v3.0.45)
 
 | Feature | Description |
 |---------|-------------|
@@ -42,20 +55,21 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                          main.py                                 │
-│        .env Loader → Token Validation → GUI Launch               │
-│        Global Exception Handler (error.log + GUI popup)          │
+│  .env Loader → Token Validation → argparse (GUI / --headless)    │
+│  Global Exception Handler (error.log + GUI popup)                │
 ├──────────────────────────────────────────────────────────────────┤
 │                        gui/app.py                                │
 │   CustomTkinter  ·  Dynamic Theme Module  ·  Auto-Updater        │
-│   Universal Drop Zone  ·  Batch Queue  ·  Progress Bar           │
+│   Universal Drop Zone  ·  Rate Ticker  ·  Scheduler Panel        │
 ├──────────────┬───────────────────────┬───────────────────────────┤
 │  gui/panels/ │   gui/handlers.py     │   core/workers/           │
 │  LiveConsole │   BatchHandler        │   EventBus (thread-safe)  │
 │  Settings    │   Async Bridge        │   Push/Drain Queue        │
-│               │   Revert Handler      │                           │
+│  RateTicker  │   Revert Handler      │                           │
+│  Scheduler   │                       │                           │
 ├──────────────┴───────────────────────┴───────────────────────────┤
 │                   core/engine.py (Orchestrator)                   │
-│          Prescan → Cache → Backup → Dispatch → GC                │
+│     Prescan → Cache → AnomalyGuard → Backup → Dispatch → GC     │
 ├──────────────────────────┬───────────────────────────────────────┤
 │  core/engine_factory.py  │  Platform Router                      │
 │     ├ NativeExcelEngine  │  Windows 11 → COM Engine              │
@@ -65,9 +79,13 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 │  Async BOT   │  Zero-Guess Rollback    │  Timestamped            │
 │  Concurrent  │  SQLite Cache (WAL)     │  Backup + Revert        │
 ├──────────────┼─────────────────────────┼─────────────────────────┤
-│  prescan.py  │  exrate_sheet.py        │  xls_converter.py       │
-│  Date Range  │  Master ExRate Sheet    │  .xls → .xlsx Native    │
-│  Scanner     │  Builder                │  (100% style kept)      │
+│  prescan.py  │  exrate_sheet.py        │  anomaly_guard.py       │
+│  Date Range  │  Master ExRate Sheet    │  ±5% Rate Guardian      │
+│  Scanner     │  Builder                │  CSV Audit Logger       │
+├──────────────┼─────────────────────────┼─────────────────────────┤
+│  scheduler   │  csv_import.py          │  xls_converter.py       │
+│  Auto-Timer  │  Offline BOT CSV        │  .xls → .xlsx Native    │
+│  Folder Watch│  Fallback Importer      │  (100% style kept)      │
 └──────────────┴─────────────────────────┴─────────────────────────┘
 ```
 
@@ -88,7 +106,7 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 - **Decimal Precision** — All rates written as `Decimal` values quantized to 4 decimal places (Thai accounting standard).
 - **Smart Date Pre-Scanner** — Scans all queued Excel files to find the oldest date, then fetches only the necessary API range.
 
-### Desktop Application (V3.0.44)
+### Desktop Application (V3.1.0)
 - **API Token Registration Dialog** — License-key-style popup on first launch to enter BOT API keys.
 - **Dynamic Themes** — True Light and Dark modes (`get_theme` engine deeply coloring all CTk panels).
 - **Live Processing Console** — EventBus-driven, read-only terminal log with color-coded status messages.
@@ -97,6 +115,10 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 - **Drag-and-Drop Batching** — Drop individual `.xlsx` files or entire folders onto the drop zone.
 - **In-Place File Processing** — Overwrites ledgers instantly in identical target paths.
 - **One-Click Revert** — Restore any file instantly from its most recent timestamped backup if an error was made.
+- **Live Rate Ticker** — Real-time USD/EUR rate display in the header bar with auto-refresh.
+- **Auto-Scheduler Panel** — Schedule daily processing with folder-watch and time picker controls.
+- **Rate Type Selector** — Choose the rate type (Buying TT, Selling, Buying Sight, Mid Rate) from Settings.
+- **Offline CSV Import** — Import BOT's official CSV files into local cache for offline operation.
 
 ### Engine & Data Pipeline
 - **Native Format Preservation** — Pure Python converter explicitly pulls `xlrd formatting_info=True` copying exact fonts (Browallia New), header colors, 4-border boundaries, and custom column widths.
@@ -170,12 +192,36 @@ python main.py     # Windows
 ### First Run
 
 The application automatically:
-1. Creates `data/`, `data/input/`, and `data/backups/` directories
+1. Creates `data/`, `data/input/`, `data/backups/`, and `data/logs/` directories
 2. Validates your API keys (popup error if missing)
 3. Initializes SQLite cache at `data/cache.db`
 4. Checks for updates via GitHub Releases API
 
 Drop your `.xlsx` ledger files into the app and click **"Process Batch"**.
+
+---
+
+## Headless CLI Mode (V3.1.0)
+
+For automated/unattended processing via cron jobs or Task Scheduler:
+
+```bash
+# Process a specific directory of ledgers
+python main.py --headless --input /path/to/ledgers/
+
+# Process a single file with a forced start date
+python main.py --headless --input ledger.xlsx --start-date 2025-01-02
+
+# Process default input directory (data/input/)
+python main.py --headless
+```
+
+Headless mode:
+- Skips the GUI entirely
+- Auto-detects start dates from ledger files
+- Prints progress to stdout
+- Generates an audit trail CSV in `data/logs/`
+- Exits with code 0 (success) or 1 (failures)
 
 ---
 
@@ -189,7 +235,7 @@ The project includes a fully automated release pipeline (`.github/workflows/v3-r
 
 ```bash
 # To trigger a release:
-git tag v3.0.44
+git tag v3.1.0
 git push origin main --tags
 ```
 
@@ -221,6 +267,6 @@ This project is developed for internal enterprise use. All rights reserved.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.0.44*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.1.0*
 
 </div>

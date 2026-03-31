@@ -57,6 +57,14 @@ class CacheDB:
                     date           TEXT PRIMARY KEY,
                     holiday_name   TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS rates_multi (
+                    date       TEXT NOT NULL,
+                    currency   TEXT NOT NULL,
+                    rate_type  TEXT NOT NULL,
+                    value      REAL,
+                    PRIMARY KEY (date, currency, rate_type)
+                );
             """)
             self._conn.commit()
 
@@ -224,6 +232,62 @@ class CacheDB:
             self._conn.commit()
 
     # ================================================================== #
+    #  MULTI-CURRENCY RATES (v3.1.0)
+    # ================================================================== #
+
+    def get_multi_rate(
+        self, target_date: date, currency: str, rate_type: str,
+    ) -> Optional[Decimal]:
+        """Get a single rate from the multi-currency table."""
+        date_str = target_date.strftime("%Y-%m-%d")
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM rates_multi "
+                "WHERE date = ? AND currency = ? AND rate_type = ?",
+                (date_str, currency, rate_type),
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return Decimal(str(row[0]))
+
+    def get_multi_rates_bulk(
+        self, start: date, end: date, currency: str, rate_type: str,
+    ) -> Dict[date, Decimal]:
+        """Get all rates for a currency/type in a date range."""
+        s_str = start.strftime("%Y-%m-%d")
+        e_str = end.strftime("%Y-%m-%d")
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT date, value FROM rates_multi "
+                "WHERE date BETWEEN ? AND ? AND currency = ? AND rate_type = ?",
+                (s_str, e_str, currency, rate_type),
+            ).fetchall()
+        result: Dict[date, Decimal] = {}
+        for r in rows:
+            d = datetime.strptime(r[0], "%Y-%m-%d").date()
+            if r[1] is not None:
+                result[d] = Decimal(str(r[1]))
+        return result
+
+    def insert_multi_rates_bulk(
+        self, entries: List[Tuple],
+    ) -> None:
+        """
+        Bulk insert into the multi-currency rates table.
+        Each entry is (date_str, currency, rate_type, value).
+        """
+        if not entries:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO rates_multi "
+                "(date, currency, rate_type, value) "
+                "VALUES (?, ?, ?, ?)",
+                entries,
+            )
+            self._conn.commit()
+
+    # ================================================================== #
     #  CLEANUP
     # ================================================================== #
     def close(self):
@@ -236,9 +300,16 @@ class CacheDB:
         with self._lock:
             rates_count = self._conn.execute("SELECT COUNT(*) FROM rates").fetchone()[0]
             hol_count = self._conn.execute("SELECT COUNT(*) FROM holidays").fetchone()[0]
+            try:
+                multi_count = self._conn.execute(
+                    "SELECT COUNT(*) FROM rates_multi"
+                ).fetchone()[0]
+            except Exception:
+                multi_count = 0
         size_bytes = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
         return {
             "rates": rates_count,
+            "rates_multi": multi_count,
             "holidays": hol_count,
             "size_kb": round(size_bytes / 1024, 1)
         }

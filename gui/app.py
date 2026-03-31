@@ -2,7 +2,7 @@
 """
 gui/app.py
 ---------------------------------------------------------------------------
-BOT Exchange Rate Processor — Enterprise Desktop Edition
+BOT Exchange Rate Processor — Enterprise Desktop Edition (v3.1.0)
 ---------------------------------------------------------------------------
 Zero-emoji, typography-driven corporate UI.
 
@@ -14,6 +14,8 @@ Features:
  - Settings Modal (JSON-backed persistence)
  - Auto-Updater Engine (GitHub Releases API)
  - Revert button — restores corrupted files from automatic backups
+ - Rate Ticker Widget — live USD/EUR rates in header (v3.1.0)
+ - Auto-Scheduler Panel — background scheduled processing (v3.1.0)
 """
 
 import logging
@@ -232,6 +234,21 @@ class BOTExrateApp(ctk.CTk):
         )
         self._btn_settings.pack(side="left", padx=(12, 0))
 
+        # v3.1.0: Rate Ticker — right side of header
+        from gui.panels.rate_ticker import RateTicker
+        from core.database import CacheDB
+        try:
+            self._cache_db = CacheDB()
+            self.rate_ticker = RateTicker(
+                sub_row, cache_db=self._cache_db,
+            )
+            self.rate_ticker.pack(side="left", padx=(16, 0))
+            self.rate_ticker.start()
+        except Exception as e:
+            logger.debug("Rate ticker init failed (non-critical): %s", e)
+            self._cache_db = None
+            self.rate_ticker = None
+
     # ================================================================== #
     #  CARD
     # ================================================================== #
@@ -445,6 +462,15 @@ class BOTExrateApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
             corner_radius=8, command=self._reveal_file
         )
+
+        # ── 6. SCHEDULER PANEL (v3.1.0) ──────────────────────────────
+        from gui.panels.scheduler_panel import SchedulerPanel
+        self.scheduler_panel = SchedulerPanel(
+            self.card,
+            on_start_scheduler=self._on_scheduler_start,
+            on_stop_scheduler=self._on_scheduler_stop,
+        )
+        self.scheduler_panel.pack(pady=(16, 0), padx=50, fill="x")
 
     # ================================================================== #
     #  V2.4: AUTO-DETECT TOGGLE
@@ -889,7 +915,44 @@ class BOTExrateApp(ctk.CTk):
         # ── Live console keeps its dark terminal aesthetic ────────────
         # (intentionally not themed — it stays dark in both modes)
 
+        # ── Rate Ticker ───────────────────────────────────────────────
+        if hasattr(self, "rate_ticker") and self.rate_ticker is not None:
+            self.rate_ticker.apply_theme(t)
+
         logger.debug("Theme applied: %s mode", ctk.get_appearance_mode())
+
+    # ================================================================== #
+    #  V3.1.0: AUTO-SCHEDULER CALLBACKS
+    # ================================================================== #
+    def _on_scheduler_start(self, time_str: str, paths: list):
+        """Start or update the background scheduler."""
+        from core.scheduler import AutoScheduler
+        if not hasattr(self, "_auto_scheduler"):
+            self._auto_scheduler = AutoScheduler()
+
+        def _scheduler_callback(files):
+            """Called by the scheduler when it's time to process."""
+            if not files:
+                return
+            logger.info("Auto-scheduler firing with %d files", len(files))
+            # We need a start_date — use today
+            from datetime import date as _date
+            start_str = _date.today().strftime("%Y-%m-%d")
+            self.after(0, self._set_queue, files)
+            self.after(100, lambda: self.batch_handler.start_batch(files, start_str))
+
+        self._auto_scheduler.start(
+            time_str=time_str,
+            watch_paths=paths,
+            callback=_scheduler_callback,
+        )
+        logger.info("Scheduler started: %s, %d paths", time_str, len(paths))
+
+    def _on_scheduler_stop(self):
+        """Stop the background scheduler."""
+        if hasattr(self, "_auto_scheduler"):
+            self._auto_scheduler.stop()
+            logger.info("Scheduler stopped")
 
 if __name__ == "__main__":
     app = BOTExrateApp()

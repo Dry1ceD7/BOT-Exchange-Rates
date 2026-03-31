@@ -25,10 +25,12 @@ from openpyxl.utils import get_column_letter
 
 from core.api_client import CLIENT_TIMEOUT, BOTClient
 from core.backup_manager import BackupError, BackupManager
+from core.config_manager import SettingsManager
 from core.database import CacheDB
 from core.exrate_sheet import update_master_exrate_sheet
 from core.logic import BOTLogicEngine, safe_to_decimal
 from core.prescan import prescan_oldest_date
+from core.anomaly_guard import AnomalyGuard
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,10 @@ class LedgerEngine:
             "currency": "Cur",
             "out_rate": "EX Rate",
         }
+        # v3.1.0: Load anomaly threshold from settings
+        _settings = SettingsManager().load()
+        threshold = _settings.get("anomaly_threshold_pct", 5.0)
+        self._anomaly_guard = AnomalyGuard(threshold_pct=threshold)
 
     def _emit(self, msg: str, etype: str = "log") -> None:
         """Push event to EventBus if one is attached."""
@@ -327,6 +333,39 @@ class LedgerEngine:
             usd_buying, eur_buying, usd_data, eur_data,
         )
 
+    def _run_anomaly_check(
+        self,
+        usd_buying: Dict[date, Decimal],
+        usd_selling: Dict[date, Decimal],
+        eur_buying: Dict[date, Decimal],
+        eur_selling: Dict[date, Decimal],
+    ) -> int:
+        """
+        v3.1.0: Run anomaly detection across all loaded rates.
+        Returns the number of anomalies found.
+        """
+        rates_bundle = {
+            "USD_buying_transfer": usd_buying,
+            "USD_selling": usd_selling,
+            "EUR_buying_transfer": eur_buying,
+            "EUR_selling": eur_selling,
+        }
+        anomalies = self._anomaly_guard.check_rates_bulk(rates_bundle)
+        for a in anomalies:
+            self._emit(
+                f"⚠ ANOMALY: {a.currency} {a.rate_type} on "
+                f"{a.check_date.strftime('%d %b %Y')}: "
+                f"{a.pct_change:.2f}% change "
+                f"({a.prev_value} → {a.new_value})",
+                etype="warning",
+            )
+        if anomalies:
+            logger.warning(
+                "Anomaly guard: %d suspicious rate(s) detected",
+                len(anomalies),
+            )
+        return len(anomalies)
+
     # ================================================================== #
     #  PROCESS SINGLE LEDGER
     # ================================================================== #
@@ -443,6 +482,16 @@ class LedgerEngine:
             logic_engine, usd_selling, eur_selling,
             usd_buying, eur_buying, usd_data, eur_data,
         ) = await self._preload_api_data(all_target_dates, start_date)
+
+        # v3.1.0: Anomaly detection — check for suspicious rate jumps
+        anomaly_count = self._run_anomaly_check(
+            usd_buying, usd_selling, eur_buying, eur_selling,
+        )
+        if anomaly_count:
+            self._emit(
+                f"⚠ {anomaly_count} anomalous rate(s) detected — check audit log",
+                etype="warning",
+            )
 
         computed_start = self.compute_year_start_date(
             target_year, logic_engine.holidays
