@@ -175,7 +175,22 @@ class SettingsModal(ctk.CTkToplevel):
             self, text="", font=ctk.CTkFont(size=11),
             text_color=COLOR_MODAL_MUTED,
         )
-        self._lbl_csv.pack(pady=(0, 12))
+        self._lbl_csv.pack(pady=(0, 4))
+
+        # ── Export Cached Rates (CSV) ─────────────────────────────────
+        ctk.CTkButton(
+            self, text="Export Cached Rates (CSV)",
+            fg_color="#1D4ED8", hover_color="#1E40AF",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            corner_radius=8, height=38,
+            command=self._on_export_csv,
+        ).pack(padx=30, fill="x", pady=(0, 4))
+
+        self._lbl_csv_export = ctk.CTkLabel(
+            self, text="", font=ctk.CTkFont(size=11),
+            text_color=COLOR_MODAL_MUTED,
+        )
+        self._lbl_csv_export.pack(pady=(0, 12))
 
         # ── Check for Stable Updates ─────────────────────────────────
         self._btn_update = ctk.CTkButton(
@@ -653,6 +668,54 @@ class SettingsModal(ctk.CTkToplevel):
                 self.after(
                     0, self._lbl_csv.configure,
                     {"text": f"✗ Import failed: {e}",
+                     "text_color": "#F87171"},
+                )
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # ================================================================== #
+    #  CSV EXPORT
+    # ================================================================== #
+
+    def _on_export_csv(self):
+        """Open a save-file dialog and export cached rates to CSV."""
+        from tkinter import filedialog as fd
+
+        csv_path = fd.asksaveasfilename(
+            title="Export Cached Rates to CSV",
+            defaultextension=".csv",
+            initialfile="BOT_ExRate_Export.csv",
+            filetypes=[
+                ("CSV files", "*.csv"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not csv_path:
+            return
+
+        self._lbl_csv_export.configure(
+            text="Exporting...", text_color=COLOR_MODAL_MUTED,
+        )
+        self.update_idletasks()
+
+        def _worker():
+            try:
+                from core.csv_export import export_rates_csv
+                from core.database import CacheDB
+
+                cache = CacheDB()
+                count = export_rates_csv(csv_path, cache)
+                cache.close()
+                self.after(
+                    0, self._lbl_csv_export.configure,
+                    {"text": f"✓ Exported {count} rate rows",
+                     "text_color": COLOR_MODAL_SUCCESS},
+                )
+            except Exception as e:
+                self.after(
+                    0, self._lbl_csv_export.configure,
+                    {"text": f"✗ Export failed: {e}",
                      "text_color": "#F87171"},
                 )
 
