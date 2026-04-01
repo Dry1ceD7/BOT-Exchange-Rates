@@ -211,12 +211,14 @@ class BOTExrateApp(ctk.CTk):
     #  HEADER
     # ================================================================== #
     def _build_header(self):
-        self.hdr_frame = ctk.CTkFrame(self, fg_color=COLOR_HEADER_BG, corner_radius=0, height=80)
+        self.hdr_frame = ctk.CTkFrame(
+            self, fg_color=COLOR_HEADER_BG, corner_radius=0,
+            border_width=0,
+        )
         self.hdr_frame.pack(fill="x")
-        self.hdr_frame.pack_propagate(False)
 
         inner = ctk.CTkFrame(self.hdr_frame, fg_color="transparent")
-        inner.place(relx=0.5, rely=0.5, anchor="center")
+        inner.pack(pady=(10, 8))
 
         self.lbl_header_title = ctk.CTkLabel(
             inner, text="Bank of Thailand  —  Ledger Processor",
@@ -252,7 +254,7 @@ class BOTExrateApp(ctk.CTk):
                 inner, cache_db=self._cache_db,
             )
             # Center the ticker below the subtitle row
-            self.rate_ticker.pack(pady=(6, 0))
+            self.rate_ticker.pack(pady=(2, 0))
             self.rate_ticker.start()
         except Exception as e:
             logger.debug("Rate ticker init failed (non-critical): %s", e)
@@ -999,7 +1001,8 @@ class BOTExrateApp(ctk.CTk):
     def _build_footer(self):
         """Build the company license footer bar at the bottom of the window."""
         self.footer_frame = ctk.CTkFrame(
-            self, fg_color="#0C111D", corner_radius=0, height=28,
+            self, fg_color="#0C111D", corner_radius=0,
+            border_width=0, height=26,
         )
         self.footer_frame.pack(fill="x", side="bottom")
         self.footer_frame.pack_propagate(False)
@@ -1013,7 +1016,7 @@ class BOTExrateApp(ctk.CTk):
             font=ctk.CTkFont(size=10),
             text_color="#64748B",
         )
-        self.lbl_footer.place(relx=0.5, rely=0.5, anchor="center")
+        self.lbl_footer.pack(expand=True)
 
 
     def restore_from_tray(self):

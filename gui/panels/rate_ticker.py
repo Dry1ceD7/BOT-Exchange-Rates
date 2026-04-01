@@ -45,7 +45,7 @@ class RateTicker(ctk.CTkFrame):
 
         # ── Build Gimmick Layout ─────────────────────────────────────
         self.container = ctk.CTkFrame(self, fg_color="transparent")
-        self.container.pack(pady=4, padx=10, fill="y")
+        self.container.pack(pady=0, padx=6)
 
         # Left: USD
         self.usd_frame = ctk.CTkFrame(self.container, fg_color="transparent")
