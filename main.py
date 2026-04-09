@@ -28,6 +28,24 @@ from core.paths import get_project_root
 ENV_PATH = os.path.join(get_project_root(), ".env")
 load_dotenv(dotenv_path=ENV_PATH)
 
+# ── Sentry Telemetry (v3.2.4) ───────────────────────────────────────────
+# Conditionally initialize Sentry crash reporting. If SENTRY_DSN is not
+# set, Sentry is completely disabled — zero overhead, zero network calls.
+_SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+if _SENTRY_DSN:
+    try:
+        import sentry_sdk
+
+        from core.version import __version__
+        sentry_sdk.init(
+            dsn=_SENTRY_DSN,
+            release=f"bot-exrate@{__version__}",
+            traces_sample_rate=0.2,  # 20% of transactions for performance monitoring
+            send_default_pii=False,  # Never send user PII
+        )
+    except Exception:
+        pass  # Sentry is optional — never block app startup
+
 # ── Configure root logger — routes ALL log output to file + console ──────
 _LOG_DIR = os.path.join(get_project_root(), "data")
 os.makedirs(_LOG_DIR, exist_ok=True)
@@ -239,6 +257,9 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
     """
     Fallback handler to catch fatal errors when running without a console.
     Crucial for Windows --noconsole mode so crash logs are not lost.
+
+    v3.2.4: Always emits to stderr first (guaranteed), then attempts
+    Sentry upload, file logging, and GUI popup as best-effort layers.
     """
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
@@ -246,7 +267,21 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
 
     error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
 
-    # Write to local error.log
+    # Layer 0: Always emit to stderr — this is the only guaranteed output
+    try:
+        print(f"\n[FATAL] {error_msg}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+    # Layer 1: Forward to Sentry if initialized
+    try:
+        import sentry_sdk
+        sentry_sdk.capture_exception(exc_value)
+        sentry_sdk.flush(timeout=2.0)
+    except Exception:
+        pass
+
+    # Layer 2: Write to local error.log
     log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "error.log")
     try:
         with open(log_path, "a", encoding="utf-8") as f:
@@ -254,7 +289,7 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
     except Exception:
         pass
 
-    # Show GUI popup
+    # Layer 3: Show GUI popup (best-effort, may fail in headless/noconsole)
     try:
         root = tk.Tk()
         root.withdraw()

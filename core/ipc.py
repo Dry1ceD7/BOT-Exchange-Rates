@@ -14,13 +14,23 @@ commands, preventing arbitrary local processes from triggering RESTORE.
 import logging
 import os
 import secrets
-import socket
+import sys
 import threading
+from multiprocessing.connection import Client, Listener
 from typing import Callable, Optional
 
-from core.constants import IPC_NONCE_LENGTH, IPC_PORT
+from core.constants import IPC_NONCE_LENGTH
 
 logger = logging.getLogger(__name__)
+
+# Fallback path logic to ensure safe OS-specific binding
+def _get_ipc_address() -> str:
+    """Return the native OS IPC address (Named Pipe or Domain Socket)."""
+    if sys.platform == "win32":
+        return r"\\.\pipe\bot_exrate_ipc"
+    else:
+        # Use robust tmp directory
+        return "/tmp/bot_exrate_ipc.sock"
 
 def _lockfile_path() -> str:
     """Return the path to the IPC nonce lockfile."""
@@ -35,6 +45,8 @@ def _generate_nonce() -> str:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(nonce)
+    # Ensure only the owner can read/write this file
+    os.chmod(path, 0o600)
     return nonce
 
 
@@ -66,13 +78,12 @@ def ping_running_instance() -> bool:
     if nonce is None:
         return False
 
+    address = _get_ipc_address()
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.5)
-            s.connect(("127.0.0.1", IPC_PORT))
-            s.sendall(f"RESTORE:{nonce}\n".encode("utf-8"))
+        with Client(address) as conn:
+            conn.send(f"RESTORE:{nonce}")
             return True
-    except (ConnectionRefusedError, socket.timeout, OSError):
+    except (ConnectionRefusedError, FileNotFoundError, OSError):
         return False
 
 
@@ -82,7 +93,7 @@ class SingleInstanceServer:
     """
     def __init__(self, on_restore: Callable[[], None]):
         self.on_restore = on_restore
-        self._server: Optional[socket.socket] = None
+        self._listener: Optional[Listener] = None
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._nonce: Optional[str] = None
@@ -91,16 +102,20 @@ class SingleInstanceServer:
         """
         Attempt to bind and listen.
         Returns True if successful (we are the primary instance).
-        Returns False if port is taken.
+        Returns False if port/pipe is taken.
         """
+        address = _get_ipc_address()
         try:
-            self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # Allow address reuse just in case of rapid restarts,
-            # though Windows SO_EXCLUSIVEADDRUSE is sometimes better for singletons.
-            self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self._server.bind(("127.0.0.1", IPC_PORT))
-            self._server.listen(1)
-            self._server.settimeout(1.0)
+            # On Unix, if the socket wasn't cleaned up, remove it first
+            if sys.platform != "win32" and os.path.exists(address):
+                try:
+                    # Test if it's dead
+                    with Client(address):
+                        return False # Someone is still listening
+                except ConnectionRefusedError:
+                    os.remove(address) # It's a dead socket, safe to bind
+
+            self._listener = Listener(address)
             self._running = True
 
             # Generate authentication nonce for this session
@@ -108,33 +123,31 @@ class SingleInstanceServer:
 
             self._thread = threading.Thread(target=self._accept_loop, daemon=True)
             self._thread.start()
-            logger.info("Single-Instance IPC server started on port %d", IPC_PORT)
+            logger.info("Single-Instance IPC server started on %s", address)
             return True
         except OSError as e:
-            logger.warning("Could not bind IPC server (port %d in use): %s", IPC_PORT, e)
-            if self._server:
-                self._server.close()
-                self._server = None
+            logger.warning("Could not bind IPC server (address in use): %s", e)
+            if self._listener:
+                self._listener.close()
+                self._listener = None
             return False
 
     def _accept_loop(self):
-        while self._running and self._server:
+        while self._running and self._listener:
             try:
-                conn, addr = self._server.accept()
-                with conn:
-                    conn.settimeout(1.0)
-                    data = conn.recv(1024)
-                    message = data.decode("utf-8", errors="ignore").strip()
+                # Wait for connection or interruption
+                if not self._listener.poll(1.0):
+                    continue
 
+                with self._listener.accept() as conn:
+                    message = conn.recv()
                     # Authenticate: expect "RESTORE:<nonce>"
                     if message == f"RESTORE:{self._nonce}":
                         logger.info("Authenticated RESTORE signal received.")
                         self.on_restore()
                     else:
-                        logger.warning(
-                            "IPC: rejected unauthenticated command from %s", addr
-                        )
-            except socket.timeout:
+                        logger.warning("IPC: rejected unauthenticated command")
+            except EOFError:
                 continue
             except OSError as e:
                 if self._running:
@@ -144,11 +157,20 @@ class SingleInstanceServer:
     def stop(self):
         self._running = False
         _cleanup_nonce()
-        if self._server:
+        if self._listener:
             try:
-                self._server.close()
+                self._listener.close()
             except OSError:
                 pass
-            self._server = None
+            self._listener = None
         if self._thread and self._thread.is_alive():
             self._thread = None
+
+        # Cleanup Unix socket file
+        if sys.platform != "win32":
+            try:
+                address = _get_ipc_address()
+                if os.path.exists(address):
+                    os.remove(address)
+            except OSError:
+                pass

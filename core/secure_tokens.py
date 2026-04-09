@@ -80,6 +80,10 @@ def get_token(env_key: str) -> Optional[str]:
                     "You can now remove it from .env.",
                     env_key,
                 )
+                # Scrub plaintext token from process environment to prevent
+                # leakage via child processes or library introspection
+                os.environ.pop(env_key, None)
+                logger.debug("Scrubbed '%s' from os.environ after keychain migration.", env_key)
             except Exception as e:
                 logger.warning("Keyring migration failed for %s: %s", env_key, e)
         return token
