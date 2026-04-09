@@ -89,6 +89,7 @@ class TestBOTClient:
     def test_constructor_raises_without_tokens(self, monkeypatch):
         monkeypatch.delenv("BOT_TOKEN_EXG", raising=False)
         monkeypatch.delenv("BOT_TOKEN_HOL", raising=False)
+        monkeypatch.setattr("core.secure_tokens.get_token", lambda x: None)
         with pytest.raises(BOTAPIError, match="Missing BOT API tokens"):
             BOTClient(AsyncMock())
 

@@ -306,6 +306,6 @@ class UpdateManager:
         import sys
         try:
             self.app.destroy()
-        except Exception:
+        except RuntimeError:
             pass
         sys.exit(0)

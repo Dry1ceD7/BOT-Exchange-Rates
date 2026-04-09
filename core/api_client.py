@@ -25,6 +25,8 @@ from tenacity import (
     wait_exponential,
 )
 
+from core.constants import MAX_429_RETRIES
+
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------------
@@ -81,8 +83,11 @@ CLIENT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 class BOTClient:
     def __init__(self, client: httpx.AsyncClient):
         self.client = client
-        self.token_exg = os.environ.get("BOT_TOKEN_EXG")
-        self.token_hol = os.environ.get("BOT_TOKEN_HOL")
+
+        # v3.2.2: Retrieve tokens from OS keychain first, .env fallback
+        from core.secure_tokens import get_token
+        self.token_exg = get_token("BOT_TOKEN_EXG")
+        self.token_hol = get_token("BOT_TOKEN_HOL")
 
         if not self.token_exg or not self.token_hol:
             raise BOTAPIError("Missing BOT API tokens.")
@@ -114,8 +119,8 @@ class BOTClient:
             "accept": "application/json"
         }
 
-        max_429_retries = 10  # safety: max 10 rate-limit waits per request
-        for attempt_429 in range(max_429_retries):
+        max_retries = MAX_429_RETRIES
+        for attempt_429 in range(max_retries):
             response = await self.client.get(url, headers=headers, timeout=30.0)
 
             if response.status_code == 200:
@@ -127,7 +132,7 @@ class BOTClient:
                 wait_time = retry_after + attempt_429  # escalating wait
                 logger.warning(
                     "429 Rate limited (attempt %d/%d). Waiting %ds...",
-                    attempt_429 + 1, max_429_retries, wait_time,
+                    attempt_429 + 1, max_retries, wait_time,
                 )
                 await asyncio.sleep(wait_time)
                 continue
@@ -136,7 +141,7 @@ class BOTClient:
             response.raise_for_status()
 
         raise BOTAPIError(
-            f"BOT API rate limit exceeded after {max_429_retries} waits. "
+            f"BOT API rate limit exceeded after {max_retries} waits. "
             "Please try again in a few minutes."
         )
 

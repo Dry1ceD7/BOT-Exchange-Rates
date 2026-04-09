@@ -101,7 +101,7 @@ def _scan_xlsx(filepath: str, target_col_name: str) -> Optional[date]:
         if wb is not None:
             try:
                 wb.close()
-            except Exception:
+            except OSError:
                 pass
 
     return oldest

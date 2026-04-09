@@ -6,11 +6,14 @@ BOT Exchange Rate Processor — Persistent Settings Manager
 ---------------------------------------------------------------------------
 JSON-backed configuration file for user preferences (appearance, auto-update,
 custom directories). Gracefully handles missing or corrupt config files.
+
+v3.2.2: In-memory caching to avoid re-reading disk on every get() call.
 """
 
 import json
 import logging
 import os
+import threading
 from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
@@ -35,7 +38,7 @@ SETTINGS_FILENAME = "settings.json"
 
 
 class SettingsManager:
-    """Load, save, and manage persistent user settings."""
+    """Load, save, and manage persistent user settings with in-memory cache."""
 
     def __init__(self, config_dir: str | None = None):
         if config_dir is None:
@@ -44,10 +47,21 @@ class SettingsManager:
             config_dir = os.path.join(project_root, "data")
         self._config_dir = config_dir
         self._filepath = os.path.join(config_dir, SETTINGS_FILENAME)
+        self._cache: Dict[str, Any] | None = None
+        self._lock = threading.Lock()
 
     def load(self) -> Dict[str, Any]:
-        """Load settings from disk. Returns defaults on any error."""
+        """Load settings from disk (cached after first read). Returns defaults on any error."""
+        with self._lock:
+            if self._cache is not None:
+                return dict(self._cache)
+        return self._load_from_disk()
+
+    def _load_from_disk(self) -> Dict[str, Any]:
+        """Read settings from disk and update cache."""
         if not os.path.exists(self._filepath):
+            with self._lock:
+                self._cache = dict(DEFAULT_SETTINGS)
             return dict(DEFAULT_SETTINGS)
         try:
             with open(self._filepath, "r", encoding="utf-8") as f:
@@ -55,24 +69,36 @@ class SettingsManager:
             # Merge with defaults to fill any missing keys
             merged = dict(DEFAULT_SETTINGS)
             merged.update(data)
-            return merged
+            with self._lock:
+                self._cache = merged
+            return dict(merged)
         except (json.JSONDecodeError, OSError, TypeError) as e:
             logger.warning(
                 "Settings file corrupt or unreadable (%s). Using defaults.",
                 e,
             )
+            with self._lock:
+                self._cache = dict(DEFAULT_SETTINGS)
             return dict(DEFAULT_SETTINGS)
 
+    def reload(self) -> Dict[str, Any]:
+        """Force re-read from disk, bypassing cache."""
+        with self._lock:
+            self._cache = None
+        return self._load_from_disk()
+
     def save(self, settings: Dict[str, Any]) -> None:
-        """Persist settings to disk."""
+        """Persist settings to disk and update cache."""
         os.makedirs(self._config_dir, exist_ok=True)
         merged = dict(DEFAULT_SETTINGS)
         merged.update(settings)
         with open(self._filepath, "w", encoding="utf-8") as f:
             json.dump(merged, f, indent=2, ensure_ascii=False)
+        with self._lock:
+            self._cache = merged
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Get a single setting value."""
+        """Get a single setting value (from cache)."""
         return self.load().get(key, default)
 
     def set(self, key: str, value: Any) -> None:

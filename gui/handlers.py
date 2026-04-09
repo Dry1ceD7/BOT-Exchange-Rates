@@ -71,14 +71,14 @@ class BatchHandler:
                     100, self.app._show_error,
                     "Network error — please check your internet connection.",
                 )
-            except Exception:
-                pass
+            except RuntimeError:
+                logger.debug("App already destroyed during network error callback")
         except Exception as e:
             self.bus.push({"type": "error", "msg": str(e)})
             try:
                 self.app.after(100, self.app._show_error, str(e))
-            except Exception:
-                pass
+            except RuntimeError:
+                logger.debug("App already destroyed during error callback")
 
     async def _run_batch(
         self,
@@ -113,8 +113,8 @@ class BatchHandler:
                         100, self.app._update_progress,
                         idx, total, fname, error,
                     )
-                except Exception:
-                    pass
+                except RuntimeError:
+                    logger.debug("App already destroyed during progress callback")
 
             success, fail, errors = await engine.process_batch(
                 file_queue,
@@ -131,8 +131,8 @@ class BatchHandler:
                 self.app.after(
                     200, self.app._show_batch_complete, success, fail, errors,
                 )
-            except Exception:
-                pass
+            except RuntimeError:
+                logger.debug("App already destroyed during completion callback")
 
     def start_revert(self, filepath: str):
         """Launch the revert operation in a background thread."""
@@ -157,6 +157,6 @@ class BatchHandler:
         except BackupError as e:
             self.bus.push({"type": "error", "msg": f"Revert failed: {e}"})
             self.app.after(0, self.app._show_revert_error, str(e))
-        except Exception as e:
+        except (OSError, ValueError) as e:
             self.bus.push({"type": "error", "msg": f"Revert failed: {e}"})
             self.app.after(0, self.app._show_revert_error, str(e))

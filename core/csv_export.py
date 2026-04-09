@@ -38,12 +38,8 @@ def export_rates_csv(csv_path: str, cache_db) -> int:
     """
     exported = 0
 
-    # Fetch all rows from the rates table
-    with cache_db._lock:
-        rows = cache_db._conn.execute(
-            "SELECT date, usd_buying, usd_selling, eur_buying, eur_selling "
-            "FROM rates ORDER BY date ASC"
-        ).fetchall()
+    # Fetch all rows via public API (no private member access)
+    rows = cache_db.get_all_rates()
 
     os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
 

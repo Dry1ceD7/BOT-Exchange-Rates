@@ -10,6 +10,9 @@ data/cache.db
 data/cache.db-wal
 data/cache.db-shm
 data/backups/
+data/.ipc_nonce
+data/app.log*
+data/settings.json
 
 # ---- Python ----
 __pycache__/

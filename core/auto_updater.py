@@ -17,6 +17,7 @@ v3.1.2 — Fixed install path resolution:
 Security: Read-only GET request. No tokens required for public repos.
 """
 
+import hashlib
 import logging
 import os
 import platform
@@ -176,7 +177,7 @@ def check_for_update(
     except httpx.RequestError as e:
         logger.warning("Network error checking for updates: %s", e)
         result["error"] = f"Network error: {e}"
-    except Exception as e:
+    except (ValueError, KeyError, OSError) as e:
         logger.warning("Unexpected error in auto-updater: %s", e)
         result["error"] = str(e)
 
@@ -187,11 +188,17 @@ def get_installer_asset_url(tag: str) -> dict:
     """
     Fetch the installer .exe asset URL from a specific GitHub release.
 
+    Also looks for a .sha256 checksum file in the release assets for
+    integrity verification.
+
     Returns:
         {"url": str | None, "filename": str | None,
-         "size": int | None, "error": str | None}
+         "size": int | None, "sha256_url": str | None, "error": str | None}
     """
-    result = {"url": None, "filename": None, "size": None, "error": None}
+    result = {
+        "url": None, "filename": None, "size": None,
+        "sha256_url": None, "error": None,
+    }
     try:
         resp = httpx.get(
             f"https://api.github.com/repos/Dry1ceD7/"
@@ -202,20 +209,60 @@ def get_installer_asset_url(tag: str) -> dict:
         resp.raise_for_status()
         data = resp.json()
 
-        # Look for .exe installer asset
+        # Look for .exe installer asset and optional .sha256 checksum
         for asset in data.get("assets", []):
             name = asset.get("name", "")
             if name.lower().endswith(".exe"):
                 result["url"] = asset.get("browser_download_url")
                 result["filename"] = name
                 result["size"] = asset.get("size", 0)
-                return result
+            elif name.lower().endswith(".sha256"):
+                result["sha256_url"] = asset.get("browser_download_url")
 
-        result["error"] = "No .exe installer found in release assets"
-    except Exception as e:
+        if result["url"] is None:
+            result["error"] = "No .exe installer found in release assets"
+    except httpx.HTTPStatusError as e:
+        logger.warning("GitHub API returned %s: %s", e.response.status_code, e)
+        result["error"] = f"HTTP {e.response.status_code}"
+    except httpx.RequestError as e:
         logger.warning("Failed to get installer asset: %s", e)
         result["error"] = str(e)
     return result
+
+
+def _fetch_expected_checksum(sha256_url: str) -> Optional[str]:
+    """Download and parse a .sha256 checksum file.
+
+    The file is expected to contain a single SHA-256 hex digest
+    (optionally followed by a filename, like sha256sum output).
+    Returns the hex digest string, or None on any error.
+    """
+    try:
+        resp = httpx.get(sha256_url, timeout=10.0, follow_redirects=True)
+        resp.raise_for_status()
+        # Format: "abcdef123456...  filename.exe" or just "abcdef123456..."
+        line = resp.text.strip().split()[0]
+        if len(line) == 64:  # valid SHA-256 hex length
+            return line.lower()
+    except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
+        logger.warning("Could not fetch checksum from %s: %s", sha256_url, e)
+    return None
+
+
+def _verify_file_sha256(filepath: str, expected_hash: str) -> bool:
+    """Verify that a file's SHA-256 matches the expected hash."""
+    sha256 = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            sha256.update(chunk)
+    actual = sha256.hexdigest().lower()
+    if actual != expected_hash:
+        logger.error(
+            "Checksum mismatch! Expected %s, got %s", expected_hash, actual
+        )
+        return False
+    logger.info("SHA-256 checksum verified: %s", actual)
+    return True
 
 
 def download_update(
@@ -223,6 +270,7 @@ def download_update(
     dest_dir: Optional[str] = None,
     filename: Optional[str] = None,
     progress_cb=None,
+    expected_sha256: Optional[str] = None,
 ) -> dict:
     """
     Download the update installer to a temp directory.
@@ -232,6 +280,9 @@ def download_update(
       - File lock conflicts with the running application
       - Writing into the inner PyInstaller _MEIXXXXXX folder
 
+    v3.2.2: If expected_sha256 is provided, verify file integrity
+    after download. The download is rejected if the hash does not match.
+
     The Inno Setup installer will then copy files to the correct
     install directory via the /DIR= flag.
 
@@ -240,6 +291,7 @@ def download_update(
         dest_dir: Where to save (defaults to system temp dir)
         filename: Override filename (defaults to URL basename)
         progress_cb: Optional callback(downloaded_bytes, total_bytes)
+        expected_sha256: Optional hex SHA-256 hash to verify download
 
     Returns:
         {"path": str | None, "error": str | None}
@@ -273,6 +325,16 @@ def download_update(
                     if progress_cb and total > 0:
                         progress_cb(downloaded, total)
 
+        # Verify integrity if a checksum was provided
+        if expected_sha256:
+            if not _verify_file_sha256(tmp_path, expected_sha256):
+                os.remove(tmp_path)
+                result["error"] = (
+                    "Download integrity check failed (SHA-256 mismatch). "
+                    "The file may be corrupted or tampered with."
+                )
+                return result
+
         # Rename from .downloading to final filename
         if os.path.exists(final_path):
             os.remove(final_path)
@@ -280,7 +342,7 @@ def download_update(
 
         result["path"] = final_path
         logger.info("Update downloaded to: %s", final_path)
-    except Exception as e:
+    except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
         logger.error("Download failed: %s", e)
         result["error"] = str(e)
         # Cleanup partial download
@@ -407,7 +469,7 @@ def apply_update(
         )
     except subprocess.TimeoutExpired:
         result["error"] = "Installer timed out after 120 seconds"
-    except Exception as e:
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
         logger.error("Update apply failed: %s", e)
         result["error"] = str(e)
 

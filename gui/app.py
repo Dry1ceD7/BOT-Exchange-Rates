@@ -73,7 +73,7 @@ HAS_DND = False
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
     HAS_DND = True
-except Exception as e:
+except ImportError as e:
     logger.debug("tkinterdnd2 not available: %s", e)
 
 
@@ -83,7 +83,7 @@ def parse_drop_data(raw: str, tk_root=None) -> List[str]:
     if tk_root is not None:
         try:
             return list(tk_root.tk.splitlist(raw))
-        except Exception as e:
+        except (RuntimeError, ValueError) as e:
             logger.debug("Tcl splitlist failed: %s", e)
     # Fallback: regex parser
     results = []
@@ -153,7 +153,7 @@ class BOTExrateApp(ctk.CTk):
             try:
                 TkinterDnD._require(self)
                 self.dnd_enabled = True
-            except Exception as e:
+            except (RuntimeError, OSError) as e:
                 logger.debug("DnD init failed: %s", e)
 
         # Auto-updater manager (extracted module)
@@ -204,7 +204,7 @@ class BOTExrateApp(ctk.CTk):
                 logger.info("Window icon set from: %s", png_path)
             else:
                 logger.debug("No icon file found at %s or %s", ico_path, png_path)
-        except Exception as e:
+        except (OSError, RuntimeError) as e:
             logger.debug("Icon loading failed (non-critical): %s", e)
 
     # ================================================================== #
@@ -256,7 +256,7 @@ class BOTExrateApp(ctk.CTk):
             # Center the ticker below the subtitle row
             self.rate_ticker.pack(pady=(2, 0))
             self.rate_ticker.start()
-        except Exception as e:
+        except (RuntimeError, OSError) as e:
             logger.debug("Rate ticker init failed (non-critical): %s", e)
             self._cache_db = None
             self.rate_ticker = None
@@ -401,9 +401,9 @@ class BOTExrateApp(ctk.CTk):
                     try:
                         child.drop_target_register(DND_FILES)
                         child.dnd_bind("<<Drop>>", self._on_drop)
-                    except Exception as e:
+                    except (RuntimeError, OSError) as e:
                         logger.debug("DnD bind failed for child widget: %s", e)
-            except Exception as e:
+            except (RuntimeError, OSError) as e:
                 logger.warning("DnD registration failed: %s", e)
                 self.dnd_enabled = False
 
@@ -785,6 +785,11 @@ class BOTExrateApp(ctk.CTk):
         fp = self.last_processed_path
         if not fp or not os.path.exists(fp):
             return
+        # SEC-04: Validate path before passing to subprocess
+        fp = os.path.realpath(fp)
+        if not os.path.isfile(fp):
+            logger.warning("Reveal target is not a file: %s", fp)
+            return
         try:
             system = platform.system()
             if system == "Darwin":
@@ -792,8 +797,10 @@ class BOTExrateApp(ctk.CTk):
             elif system == "Windows":
                 subprocess.Popen(["explorer", "/select,", os.path.normpath(fp)])
             else:
-                subprocess.Popen(["xdg-open", os.path.dirname(fp)])
-        except Exception as e:
+                parent = os.path.dirname(fp)
+                if os.path.isdir(parent):
+                    subprocess.Popen(["xdg-open", parent])
+        except OSError as e:
             logger.debug("File manager open failed: %s", e)
             self.lbl_status.configure(
                 text="Could not open file manager.", text_color=COLOR_WARNING
@@ -944,7 +951,7 @@ class BOTExrateApp(ctk.CTk):
                 try:
                     if child.cget("height") == 1:
                         child.configure(fg_color=t["divider"])
-                except Exception:
+                except (RuntimeError, AttributeError):
                     pass
 
         # ── Live console keeps its dark terminal aesthetic ────────────

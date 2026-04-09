@@ -288,6 +288,22 @@ class CacheDB:
             self._conn.commit()
 
     # ================================================================== #
+    #  EXPORT HELPERS
+    # ================================================================== #
+
+    def get_all_rates(self) -> list:
+        """
+        Returns all cached rates as a list of tuples:
+        [(date_str, usd_buying, usd_selling, eur_buying, eur_selling), ...]
+        Ordered by date ascending. Used by csv_export.
+        """
+        with self._lock:
+            return self._conn.execute(
+                "SELECT date, usd_buying, usd_selling, eur_buying, eur_selling "
+                "FROM rates ORDER BY date ASC"
+            ).fetchall()
+
+    # ================================================================== #
     #  CLEANUP
     # ================================================================== #
     def close(self):
@@ -304,7 +320,7 @@ class CacheDB:
                 multi_count = self._conn.execute(
                     "SELECT COUNT(*) FROM rates_multi"
                 ).fetchone()[0]
-            except Exception:
+            except sqlite3.OperationalError:
                 multi_count = 0
         size_bytes = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
         return {

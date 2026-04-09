@@ -16,6 +16,8 @@ import threading
 from datetime import datetime
 from typing import Callable, List, Optional
 
+from core.constants import POLL_INTERVAL_SECONDS as _DEFAULT_POLL_INTERVAL
+
 logger = logging.getLogger(__name__)
 
 # Supported Excel extensions (same as gui/app.py)
@@ -41,7 +43,7 @@ class AutoScheduler:
         scheduler.stop()
     """
 
-    POLL_INTERVAL_SECONDS = 30
+    POLL_INTERVAL_SECONDS = _DEFAULT_POLL_INTERVAL
 
     def __init__(self):
         self._timer: Optional[threading.Timer] = None
@@ -166,7 +168,7 @@ class AutoScheduler:
             if files and self._callback is not None:
                 try:
                     self._callback(files)
-                except Exception as e:
+                except (OSError, ValueError, RuntimeError) as e:
                     logger.error("Scheduler callback failed: %s", e)
             elif not files:
                 logger.info(

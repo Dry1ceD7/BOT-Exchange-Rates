@@ -32,7 +32,7 @@ def get_theme() -> dict:
         # System mode — try to detect, default to dark on failure
         try:
             is_dark = ctk.AppearanceModeTracker.detect_appearance_mode() == 1
-        except Exception:
+        except (AttributeError, RuntimeError):
             is_dark = True
 
     if is_dark:

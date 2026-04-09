@@ -13,8 +13,9 @@ import os
 import threading
 from typing import Optional
 
-import customtkinter as ctk
 import httpx
+
+import customtkinter as ctk
 
 from core.config_manager import SettingsManager
 
@@ -324,7 +325,7 @@ class SettingsModal(ctk.CTkToplevel):
                     self.after(0, self._ping_done,
                                f"API returned HTTP {resp.status_code}",
                                "#F87171")
-            except Exception as e:
+            except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
                 self.after(0, self._ping_done, f"✗ {e}", "#F87171")
 
         threading.Thread(target=_ping_worker, daemon=True).start()
@@ -361,7 +362,7 @@ class SettingsModal(ctk.CTkToplevel):
                     self.after(0, self._update_done,
                                f"✓ Up to date (V{__version__})",
                                COLOR_MODAL_SUCCESS, None)
-            except Exception as e:
+            except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
                 self.after(0, self._update_done,
                            f"Error: {e}", "#F87171", None)
 
@@ -414,7 +415,7 @@ class SettingsModal(ctk.CTkToplevel):
                     versions.append((tag, label, is_pre))
 
                 self.after(0, self._show_versions, versions)
-            except Exception as e:
+            except (httpx.RequestError, httpx.HTTPStatusError, OSError, ValueError) as e:
                 self.after(0, self._versions_error, str(e))
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -508,7 +509,7 @@ class SettingsModal(ctk.CTkToplevel):
                 self.after(0, self._dl_done,
                            "✅ Downloaded — restart to install",
                            COLOR_MODAL_SUCCESS, True, installer_path)
-            except Exception as e:
+            except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
                 self.after(0, self._dl_done, f"Error: {e}", "#F87171", False)
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -587,7 +588,7 @@ class SettingsModal(ctk.CTkToplevel):
         # Close the settings modal first
         try:
             self.grab_release()
-        except Exception:
+        except RuntimeError:
             pass
         self.destroy()
 
@@ -664,7 +665,7 @@ class SettingsModal(ctk.CTkToplevel):
                     {"text": f"✓ Imported {count} rate entries",
                      "text_color": COLOR_MODAL_SUCCESS},
                 )
-            except Exception as e:
+            except (OSError, ValueError, KeyError) as e:
                 self.after(
                     0, self._lbl_csv.configure,
                     {"text": f"✗ Import failed: {e}",
@@ -712,7 +713,7 @@ class SettingsModal(ctk.CTkToplevel):
                     {"text": f"✓ Exported {count} rate rows",
                      "text_color": COLOR_MODAL_SUCCESS},
                 )
-            except Exception as e:
+            except (OSError, ValueError) as e:
                 self.after(
                     0, self._lbl_csv_export.configure,
                     {"text": f"✗ Export failed: {e}",

@@ -14,12 +14,15 @@ import gc
 import logging
 import os
 import re
+import shutil
+import threading
 import traceback
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import httpx
+import openpyxl
 from openpyxl.cell.cell import MergedCell
 from openpyxl.utils import get_column_letter
 
@@ -27,6 +30,13 @@ from core.anomaly_guard import AnomalyGuard
 from core.api_client import CLIENT_TIMEOUT, BOTClient
 from core.backup_manager import BackupError, BackupManager
 from core.config_manager import SettingsManager
+from core.constants import (
+    BACKUP_MAX_AGE_DAYS,
+    DEFAULT_ANOMALY_THRESHOLD_PCT,
+    MAX_FILE_SIZE_MB,
+    MIN_DISK_SPACE_MB,
+    PREFORMAT_BUFFER_ROWS,
+)
 from core.database import CacheDB
 from core.exrate_sheet import update_master_exrate_sheet
 from core.logic import BOTLogicEngine, safe_to_decimal
@@ -54,21 +64,26 @@ class MissingColumnError(Exception):
 # -------------------------------------------------------------------------
 _backup_singleton = None
 _cache_singleton = None
+_singleton_lock = threading.Lock()
 
 
 def _get_backup() -> BackupManager:
     global _backup_singleton
     if _backup_singleton is None:
-        _backup_singleton = BackupManager()
+        with _singleton_lock:
+            if _backup_singleton is None:  # double-check after lock
+                _backup_singleton = BackupManager()
     return _backup_singleton
 
 
 def _get_cache() -> CacheDB:
     global _cache_singleton
     if _cache_singleton is None:
-        import atexit
-        _cache_singleton = CacheDB()
-        atexit.register(_cache_singleton.close)
+        with _singleton_lock:
+            if _cache_singleton is None:  # double-check after lock
+                import atexit
+                _cache_singleton = CacheDB()
+                atexit.register(_cache_singleton.close)
     return _cache_singleton
 
 
@@ -84,7 +99,7 @@ SKIP_SHEET_NAMES = {"ExRate", "Exrate USD", "Exrate EUR"}
 
 
 class LedgerEngine:
-    MAX_FILE_SIZE_MB = 50
+    MAX_FILE_SIZE_MB = MAX_FILE_SIZE_MB
     MAX_FILE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
     def __init__(self, api_client: BOTClient, event_bus=None):
@@ -99,7 +114,9 @@ class LedgerEngine:
         }
         # v3.1.0: Load anomaly threshold from settings
         _settings = SettingsManager().load()
-        threshold = _settings.get("anomaly_threshold_pct", 5.0)
+        threshold = _settings.get(
+            "anomaly_threshold_pct", DEFAULT_ANOMALY_THRESHOLD_PCT
+        )
         self._anomaly_guard = AnomalyGuard(threshold_pct=threshold)
 
     def _emit(self, msg: str, etype: str = "log") -> None:
@@ -420,7 +437,8 @@ class LedgerEngine:
                 if has_exrate and not has_month_tabs:
                     self._emit("Standalone ExRate file detected — updating rates")
                     return await self.update_exrate_standalone(filepath)
-            except Exception as exc:
+            except (ValueError, TypeError, KeyError,
+                    openpyxl.utils.exceptions.InvalidFileException) as exc:
                 logger.debug("Standalone detection probe failed: %s", exc)
 
         # ── Reject unsupported formats ─────────────────────────────────
@@ -467,11 +485,15 @@ class LedgerEngine:
                     )
                     if parsed_date:
                         all_target_dates.add(parsed_date)
-        except Exception:
+        except (ValueError, TypeError, KeyError,
+                openpyxl.utils.exceptions.InvalidFileException):
             raise
         finally:
             if wb_scan is not None:
-                wb_scan.close()
+                try:
+                    wb_scan.close()
+                except OSError:
+                    pass
                 del wb_scan
                 wb_scan = None
             gc.collect()
@@ -504,62 +526,9 @@ class LedgerEngine:
         )
 
         # ── Build holiday names lookup ───────────────────────────────
-        sub_pattern = re.compile(r'^Substitution for (.*)\((.*?)\)$')
-
-        holidays_names: Dict[date, str] = {}
-        master_holidays_set = set(logic_engine.holidays)
-
-        for year in {
-            d.year
-            for d in (all_target_dates | {computed_start, date.today()})
-        }:
-            cached_hols = self.cache.get_holidays(year)
-            for h_str, h_name in cached_hols:
-                try:
-                    h_obj = datetime.strptime(h_str, "%Y-%m-%d").date()
-                    holidays_names[h_obj] = h_name
-
-                    m = sub_pattern.search(h_name)
-                    if m:
-                        real_name = m.group(1).strip()
-                        date_str = m.group(2).strip()
-                        date_str_clean = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', date_str)
-                        date_str_clean = re.sub(r'^[A-Za-z]+\s+', '', date_str_clean)
-                        try:
-                            real_dt = datetime.strptime(date_str_clean, '%d %B %Y').date()
-                            holidays_names[real_dt] = real_name
-                            master_holidays_set.add(real_dt)
-                        except (ValueError, TypeError):
-                            pass
-                except (ValueError, TypeError):
-                    logger.debug("Skipped unparseable holiday name: %s", h_str)
-
-            # ── STATIC HOLIDAY OVERLAY (GAP FILLER) ──────────────────
-            static_holidays = {
-                (1, 1): "New Year's Day",
-                (4, 6): "Chakri Memorial Day",
-                (4, 13): "Songkran Festival",
-                (4, 14): "Songkran Festival",
-                (4, 15): "Songkran Festival",
-                (5, 1): "National Labour Day",
-                (6, 3): "H.M. Queen Suthida's Birthday",
-                (7, 28): "H.M. King Maha Vajiralongkorn's Birthday",
-                (8, 12): "H.M. Queen Sirikit The Queen Mother's Birthday / Mother's Day",
-                (10, 13): "H.M. King Bhumibol Adulyadej The Great Memorial Day",
-                (10, 23): "Chulalongkorn Day",
-                (12, 5): "H.M. King Bhumibol Adulyadej The Great's Birthday / Father's Day",
-                (12, 10): "Constitution Day",
-                (12, 31): "New Year's Eve",
-            }
-            for (month, day), name in static_holidays.items():
-                try:
-                    fixed_dt = date(year, month, day)
-                    if fixed_dt not in holidays_names:
-                        holidays_names[fixed_dt] = name
-                        master_holidays_set.add(fixed_dt)
-                except ValueError:
-                    pass
-
+        master_holidays_set, holidays_names = self._build_holiday_lookup(
+            all_target_dates, computed_start, logic_engine
+        )
         # ══════════════════════════════════════════════════════════════
         #  openpyxl ENGINE
         # ══════════════════════════════════════════════════════════════
@@ -568,7 +537,7 @@ class LedgerEngine:
 
         try:
             wb = openpyxl.load_workbook(filepath)
-        except Exception:
+        except (OSError, openpyxl.utils.exceptions.InvalidFileException):
             raise
 
         try:
@@ -798,7 +767,7 @@ class LedgerEngine:
 
                 # ── Pre-format Date column for manual entry ───────────
                 # Apply "DD/MM/YYYY" to a small buffer zone below data
-                max_preformat = ws.max_row + 50
+                max_preformat = ws.max_row + PREFORMAT_BUFFER_ROWS
                 for r in range(mapping["header_row"] + 1, max_preformat + 1):
                     cell = ws.cell(row=r, column=src_idx)
                     if not isinstance(cell, MergedCell):
@@ -811,6 +780,14 @@ class LedgerEngine:
                     f"— {os.path.basename(filepath)}"
                 )
             else:
+                # ERR-03: Check disk space before saving
+                drive_stat = shutil.disk_usage(os.path.dirname(filepath))
+                free_mb = drive_stat.free // (1024 * 1024)
+                if free_mb < MIN_DISK_SPACE_MB:
+                    raise OSError(
+                        f"Insufficient disk space ({free_mb}MB free, "
+                        f"need {MIN_DISK_SPACE_MB}MB). File NOT saved."
+                    )
                 wb.save(filepath)
                 logger.info(
                     "Overwritten in-place: %s",
@@ -819,12 +796,13 @@ class LedgerEngine:
             wb.close()
             del wb  # release file handle immediately
             wb = None
-        except Exception:
+        except (OSError, ValueError, KeyError,
+                openpyxl.utils.exceptions.InvalidFileException):
             # On ANY error, close the workbook to release the file lock
             if wb is not None:
                 try:
                     wb.close()
-                except Exception:
+                except OSError:
                     logger.debug("Failed to close workbook during error handling")
                 del wb
                 wb = None
@@ -847,7 +825,7 @@ class LedgerEngine:
     ) -> Tuple[int, int, List[str]]:
         """Batch processing with pre-edit backup, cache, and auto-cleanup."""
         if not dry_run:
-            self.backup.cleanup_old_backups(max_age_days=7)
+            self.backup.cleanup_old_backups(max_age_days=BACKUP_MAX_AGE_DAYS)
         total = len(filepaths)
         success = 0
         errors: List[str] = []
@@ -866,7 +844,8 @@ class LedgerEngine:
                 errors.append(err_msg)
                 if progress_cb:
                     progress_cb(idx + 1, total, fname, str(e))
-            except Exception as e:
+            except (OSError, ValueError, KeyError,
+                    openpyxl.utils.exceptions.InvalidFileException) as e:
                 err_msg = f"{fname}: {e!s}"
                 errors.append(err_msg)
                 logger.error(

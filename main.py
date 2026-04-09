@@ -10,6 +10,7 @@ launches the GUI.
 """
 
 import logging
+import logging.handlers
 import os
 import sys
 
@@ -35,8 +36,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(name)-24s  %(levelname)-7s  %(message)s",
     handlers=[
-        logging.FileHandler(
+        logging.handlers.RotatingFileHandler(
             os.path.join(_LOG_DIR, "app.log"),
+            maxBytes=5_000_000,   # 5 MB per file
+            backupCount=3,        # keep app.log.1, .2, .3
             encoding="utf-8",
         ),
         logging.StreamHandler(),

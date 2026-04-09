@@ -16,6 +16,8 @@ import os
 from datetime import datetime
 from typing import Optional
 
+import atexit
+
 from core.paths import get_project_root
 
 logger = logging.getLogger(__name__)
@@ -30,10 +32,9 @@ class AuditLogger:
     what the old value was, what the new value is, whether a
     holiday rollback was used, and whether an anomaly flag was raised.
 
-    Usage:
-        audit = AuditLogger()
-        audit.log_row_change(filename="ledger.xlsx", ...)
-        audit.finalize()
+    Supports context manager protocol:
+        with AuditLogger() as audit:
+            audit.log_row_change(filename="ledger.xlsx", ...)
     """
 
     HEADERS = [
@@ -63,8 +64,29 @@ class AuditLogger:
         self._writer = csv.writer(self._file)
         self._writer.writerow(self.HEADERS)
         self._row_count = 0
+        self._closed = False
+
+        # Safety net: guarantee file handle cleanup on interpreter exit
+        atexit.register(self._atexit_cleanup)
 
         logger.info("Audit log opened: %s", self._filepath)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.finalize()
+        return False  # do not suppress exceptions
+
+    def _atexit_cleanup(self):
+        """Ensure file is closed even if finalize() was never called."""
+        if not self._closed:
+            try:
+                self._file.flush()
+                self._file.close()
+            except (OSError, ValueError):
+                pass
+            self._closed = True
 
     @property
     def filepath(self) -> str:
@@ -148,11 +170,13 @@ class AuditLogger:
         Returns:
             Path to the completed audit log.
         """
-        try:
-            self._file.flush()
-            self._file.close()
-        except Exception as e:
-            logger.warning("Audit log close warning: %s", e)
+        if not self._closed:
+            try:
+                self._file.flush()
+                self._file.close()
+            except (OSError, ValueError) as e:
+                logger.warning("Audit log close warning: %s", e)
+            self._closed = True
 
         logger.info(
             "Audit log finalized: %s (%d entries)",

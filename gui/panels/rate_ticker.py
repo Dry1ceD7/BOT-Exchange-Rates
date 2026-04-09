@@ -131,7 +131,7 @@ class RateTicker(ctk.CTkFrame):
                 api_rates = self._fetch_today_from_api()
                 if api_rates:
                     self.after(0, self._update_display, api_rates)
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             logger.debug("Rate ticker refresh failed: %s", e)
 
     def _read_from_cache(self) -> Optional[Dict]:
@@ -193,7 +193,7 @@ class RateTicker(ctk.CTkFrame):
 
             return results if results else None
 
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             logger.debug("Ticker API fetch failed: %s", e)
             return None
 

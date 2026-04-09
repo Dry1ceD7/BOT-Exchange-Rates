@@ -56,7 +56,7 @@ def _load_tray_icon() -> "Image.Image | None":
         # Fallback: generate a tiny coloured square
         img = Image.new("RGB", (64, 64), color=(59, 130, 246))
         return img
-    except Exception as e:
+    except (OSError, ValueError) as e:
         logger.debug("Tray icon load failed: %s", e)
         return None
 
@@ -167,5 +167,5 @@ class TrayManager:
         if self._icon:
             try:
                 self._icon.stop()
-            except Exception:
+            except (RuntimeError, OSError):
                 pass
