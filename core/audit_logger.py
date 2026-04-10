@@ -10,13 +10,12 @@ modification for external auditor review.
 Output: data/logs/Audit_Log_YYYYMMDD_HHMMSS.csv
 """
 
+import atexit
 import csv
 import logging
 import os
 from datetime import datetime
 from typing import Optional
-
-import atexit
 
 from core.paths import get_project_root
 

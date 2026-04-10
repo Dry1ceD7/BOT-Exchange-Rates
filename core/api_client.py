@@ -10,7 +10,6 @@ Enforces strict JSON schema validation via Pydantic v2.
 
 import asyncio
 import logging
-import os
 import random
 from datetime import date, timedelta
 from typing import List, Optional

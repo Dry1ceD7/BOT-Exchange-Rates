@@ -333,7 +333,6 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
         app.btn_export_exrate.configure(state="normal")
 
     def _worker():
-        import httpx
         from openpyxl import Workbook
 
         from core.api_client import CLIENT_TIMEOUT, BOTClient

@@ -454,7 +454,7 @@ class LedgerEngine:
 
         wb_scan = None
         try:
-            import openpyxl
+
             wb_scan = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
             for sheet_name in wb_scan.sheetnames:
                 if sheet_name in SKIP_SHEET_NAMES:
@@ -891,9 +891,8 @@ class LedgerEngine:
         Returns:
             Path to the saved file.
         """
-        import re
 
-        import openpyxl
+
         from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
         # ── Defaults ──────────────────────────────────────────────────

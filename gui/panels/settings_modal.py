@@ -13,9 +13,8 @@ import os
 import threading
 from typing import Optional
 
-import httpx
-
 import customtkinter as ctk
+import httpx
 
 from core.config_manager import SettingsManager
 
