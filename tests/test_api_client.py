@@ -70,9 +70,15 @@ class TestBOTClient:
 
     @pytest.fixture(autouse=True)
     def setup_env(self, monkeypatch):
-        """Set BOT tokens so constructor doesn't raise."""
-        monkeypatch.setenv("BOT_TOKEN_EXG", "test_exg_token")
-        monkeypatch.setenv("BOT_TOKEN_HOL", "test_hol_token")
+        """Patch get_token so constructor uses test tokens, not real keychain."""
+        _test_tokens = {
+            "BOT_TOKEN_EXG": "test_exg_token",
+            "BOT_TOKEN_HOL": "test_hol_token",
+        }
+        monkeypatch.setattr(
+            "core.secure_tokens.get_token",
+            lambda key: _test_tokens.get(key),
+        )
 
     @pytest.fixture
     def mock_http_client(self):

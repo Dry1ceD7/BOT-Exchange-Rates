@@ -50,13 +50,7 @@ logger = logging.getLogger(__name__)
 
 
 class FileSizeLimitError(Exception):
-    pass
-
-
-class MissingColumnError(Exception):
-    pass
-
-
+    """Raised when the input workbook exceeds the configured size limit."""
 
 
 # -------------------------------------------------------------------------
@@ -102,7 +96,13 @@ class LedgerEngine:
     MAX_FILE_SIZE_MB = MAX_FILE_SIZE_MB
     MAX_FILE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
-    def __init__(self, api_client: BOTClient, event_bus=None):
+    def __init__(self, api_client: BOTClient, event_bus=None) -> None:
+        """Initialize the processing engine.
+
+        Args:
+            api_client: Authenticated BOT API client for rate data.
+            event_bus: Optional event bus for GUI status updates.
+        """
         self.api = api_client
         self.backup = _get_backup()
         self.cache = _get_cache()
@@ -384,29 +384,18 @@ class LedgerEngine:
         return len(anomalies)
 
     # ================================================================== #
-    #  PROCESS SINGLE LEDGER
+    #  PRIVATE HELPERS — Extracted from process_ledger for readability
     # ================================================================== #
-    async def process_ledger(
-        self,
-        filepath: str,
-        start_date: Optional[str] = None,
-        dry_run: bool = False,
-    ) -> str:
-        """Process a single ledger file end-to-end."""
 
-        filepath = os.path.abspath(filepath)
+    async def _detect_standalone_exrate(
+        self, filepath: str,
+    ) -> Optional[str]:
+        """Detect if the file is a standalone ExRate workbook (no month tabs).
 
-        self._check_memory_guardrail(filepath)
-        self._emit("Size check passed")
-        if dry_run:
-            self._emit("[SIM] Backup skipped (dry run)")
-        else:
-            self.backup.create_backup(filepath)
-            self._emit("Backup created")
-
-        # ── Standalone ExRate detection ────────────────────────────────
-        # If the file contains an ExRate sheet but no month tabs with
-        # Date/Cur columns, treat it as a standalone ExRate file.
+        Returns the result of update_exrate_standalone() if standalone,
+        or None if the file should be processed normally. Also validates
+        that the file format is supported (.xlsx or .xlsm).
+        """
         if filepath.lower().endswith(".xlsx"):
             try:
                 import openpyxl as _opx
@@ -441,21 +430,30 @@ class LedgerEngine:
                     openpyxl.utils.exceptions.InvalidFileException) as exc:
                 logger.debug("Standalone detection probe failed: %s", exc)
 
-        # ── Reject unsupported formats ─────────────────────────────────
+        # Reject unsupported formats
         if not filepath.lower().endswith((".xlsx", ".xlsm")):
             raise ValueError(
                 f"Unsupported format: {os.path.basename(filepath)}. "
                 "Only .xlsx and .xlsm files are supported."
             )
 
-        # ── Pre-scan dates for API data loading ──────────────────────
+        return None  # Not standalone — proceed with normal processing
+
+    def _prescan_target_dates(self, filepath: str) -> Set[date]:
+        """Scan the workbook in read-only mode to extract all target dates.
+
+        Opens the workbook in read-only mode, scans all non-skipped sheets
+        for the source date column, and returns a set of all parsed dates.
+        The workbook is properly closed and garbage-collected after scanning.
+        """
         self._emit("Scanning dates from workbook")
         all_target_dates: Set[date] = set()
 
         wb_scan = None
         try:
-
-            wb_scan = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
+            wb_scan = openpyxl.load_workbook(
+                filepath, read_only=True, data_only=True,
+            )
             for sheet_name in wb_scan.sheetnames:
                 if sheet_name in SKIP_SHEET_NAMES:
                     continue
@@ -497,6 +495,37 @@ class LedgerEngine:
                 del wb_scan
                 wb_scan = None
             gc.collect()
+
+        return all_target_dates
+
+    # ================================================================== #
+    #  PROCESS SINGLE LEDGER
+    # ================================================================== #
+    async def process_ledger(
+        self,
+        filepath: str,
+        start_date: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> str:
+        """Process a single ledger file end-to-end."""
+
+        filepath = os.path.abspath(filepath)
+
+        self._check_memory_guardrail(filepath)
+        self._emit("Size check passed")
+        if dry_run:
+            self._emit("[SIM] Backup skipped (dry run)")
+        else:
+            self.backup.create_backup(filepath)
+            self._emit("Backup created")
+
+        # ── Standalone ExRate detection + format validation ─────────────
+        standalone_result = await self._detect_standalone_exrate(filepath)
+        if standalone_result is not None:
+            return standalone_result
+
+        # ── Pre-scan dates for API data loading ──────────────────────
+        all_target_dates = self._prescan_target_dates(filepath)
 
         # ── Date hierarchy ───────────────────────────────────────────
         target_year = (

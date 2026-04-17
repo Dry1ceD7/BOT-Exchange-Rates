@@ -983,9 +983,13 @@ class BOTExrateApp(ctk.CTk):
             if not files:
                 return
             logger.info("Auto-scheduler firing with %d files", len(files))
-            # We need a start_date — use today
-            from datetime import date as _date
-            start_str = _date.today().strftime("%Y-%m-%d")
+            # Use prescan to detect the oldest date in the ledgers,
+            # matching the manual processing path instead of hardcoding today.
+            from core.engine import LedgerEngine
+            oldest, was_detected = LedgerEngine.prescan_oldest_date(files)
+            start_str = oldest.strftime("%Y-%m-%d")
+            flag = "auto-detected" if was_detected else "fallback"
+            logger.info("Scheduler start_date: %s (%s)", start_str, flag)
             self.after(0, self._set_queue, files)
             self.after(100, lambda: self.batch_handler.start_batch(files, start_str))
 

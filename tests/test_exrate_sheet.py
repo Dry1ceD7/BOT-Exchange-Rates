@@ -94,7 +94,7 @@ class TestMergeRateData:
             all_dates, {}, set(), {},
             {}, {}, {}, {},
         )
-        assert merged[sat]["holidays_weekend"] == "weekend"
+        assert merged[sat]["holidays_weekend"] == "Weekend"
 
     def test_holiday_label(self):
         d = date(2025, 3, 10)  # Monday

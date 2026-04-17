@@ -9,10 +9,13 @@ a registration dialog, ensures required directories exist, then
 launches the GUI.
 """
 
+import argparse
 import logging
 import logging.handlers
 import os
 import sys
+import traceback
+import types
 
 # Explicitly insert current directory to Python Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -80,9 +83,10 @@ def _ensure_directories():
 
 # ── Token Check + Registration Dialog ───────────────────────────────────
 def _tokens_present() -> bool:
-    """Return True if both BOT API tokens are set in the environment."""
-    return bool(os.environ.get("BOT_TOKEN_EXG")) and bool(
-        os.environ.get("BOT_TOKEN_HOL")
+    """Return True if both BOT API tokens are available (keychain or env)."""
+    from core.secure_tokens import get_token
+    return bool(get_token("BOT_TOKEN_EXG")) and bool(
+        get_token("BOT_TOKEN_HOL")
     )
 
 
@@ -116,7 +120,6 @@ def main():
         sys.exit(0)
 
     # ── v3.1.0: CLI argument parsing ─────────────────────────────────
-    import argparse
     parser = argparse.ArgumentParser(
         description="BOT Exchange Rate Processor — Enterprise Desktop Edition",
     )
@@ -158,7 +161,7 @@ def main():
         ipc_server.stop()
 
 
-def _run_headless(args):
+def _run_headless(args: argparse.Namespace) -> None:
     """Run the processor in headless (CLI) mode without GUI."""
     import asyncio
 
@@ -220,7 +223,7 @@ def _run_headless(args):
             api = BOTClient(client)
             engine = LedgerEngine(api)
 
-            def progress_cb(idx, total, fname, error):
+            def progress_cb(idx: int, total: int, fname: str, error: str | None) -> None:
                 if error:
                     print(f"  [{idx}/{total}] {fname} — SKIPPED: {error}")
                 else:
@@ -250,10 +253,11 @@ def _run_headless(args):
     sys.exit(1 if fail_count > 0 else 0)
 
 
-import traceback  # noqa: E402
-
-
-def global_exception_handler(exc_type, exc_value, exc_traceback):
+def global_exception_handler(
+    exc_type: type,
+    exc_value: BaseException,
+    exc_traceback: types.TracebackType | None,
+) -> None:
     """
     Fallback handler to catch fatal errors when running without a console.
     Crucial for Windows --noconsole mode so crash logs are not lost.

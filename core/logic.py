@@ -13,7 +13,7 @@ objects.
 
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # -------------------------------------------------------------------------
 # EXCEPTIONS
@@ -21,10 +21,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 class RateNotFoundError(Exception):
     """Raised when a valid rate cannot be found within the strict rollback limit."""
-    pass
-
-class DateExtractionError(Exception):
-    """Raised when the input date format is entirely unreadable."""
     pass
 
 # -------------------------------------------------------------------------
@@ -147,7 +143,7 @@ class BOTLogicEngine:
 # UTILITIES
 # -------------------------------------------------------------------------
 
-def safe_to_decimal(value: Any) -> Optional[Decimal]:
+def safe_to_decimal(value: object) -> Optional[Decimal]:
     """Strictly converts a float/string payload to a highly precise Decimal."""
     if value is None or value == "":
         return None

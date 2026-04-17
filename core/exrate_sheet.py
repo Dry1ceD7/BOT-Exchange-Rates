@@ -169,9 +169,9 @@ def _merge_rate_data(
 
         holiday_label = ""
         if is_weekend and is_holiday:
-            holiday_label = f"weekend; {holidays_names.get(d, 'Holiday')}"
+            holiday_label = f"Weekend; {holidays_names.get(d, 'Holiday')}"
         elif is_weekend:
-            holiday_label = "weekend"
+            holiday_label = "Weekend"
         elif is_holiday:
             holiday_label = holidays_names.get(d, "Holiday")
 
@@ -234,5 +234,3 @@ def _write_merged_data(ws, merged, holidays_set, thin_border, start_row):
                 ws.cell(row=current_row, column=col).fill = weekend_fill
 
         current_row += 1
-
-

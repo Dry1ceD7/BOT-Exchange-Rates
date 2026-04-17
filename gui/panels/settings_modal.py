@@ -17,6 +17,7 @@ import customtkinter as ctk
 import httpx
 
 from core.config_manager import SettingsManager
+from core.secure_tokens import get_token
 
 logger = logging.getLogger(__name__)
 
@@ -282,8 +283,8 @@ class SettingsModal(ctk.CTkToplevel):
         dialog = TokenRegistrationDialog(
             self,
             env_path=env_path,
-            prefill_exg=os.environ.get("BOT_TOKEN_EXG", ""),
-            prefill_hol=os.environ.get("BOT_TOKEN_HOL", ""),
+            prefill_exg=get_token("BOT_TOKEN_EXG") or "",
+            prefill_hol=get_token("BOT_TOKEN_HOL") or "",
         )
         self.wait_window(dialog)
 
@@ -298,7 +299,7 @@ class SettingsModal(ctk.CTkToplevel):
 
         def _ping_worker():
             try:
-                token = os.environ.get("BOT_TOKEN_EXG", "")
+                token = get_token("BOT_TOKEN_EXG") or ""
                 headers = {"accept": "application/json"}
                 if token:
                     # Match the real api_client.py header format:

@@ -14,7 +14,7 @@ or when internet connectivity is unavailable.
 import csv
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -155,7 +155,7 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
 
 
 def _find_column(
-    field_map: dict, candidates: list,
+    field_map: dict[str, str], candidates: list[str],
 ) -> Optional[str]:
     """
     Find a column name from a list of candidates
@@ -168,7 +168,7 @@ def _find_column(
     return None
 
 
-def _parse_csv_date(raw: str):
+def _parse_csv_date(raw: str) -> Optional[date]:
     """Parse a date string from BOT CSV format."""
     formats = [
         "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y",

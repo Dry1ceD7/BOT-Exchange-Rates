@@ -154,9 +154,6 @@ class BatchHandler:
             self.app.after(
                 0, self.app._show_revert_success, filepath, backup_name,
             )
-        except BackupError as e:
-            self.bus.push({"type": "error", "msg": f"Revert failed: {e}"})
-            self.app.after(0, self.app._show_revert_error, str(e))
-        except (OSError, ValueError) as e:
+        except (BackupError, OSError, ValueError) as e:
             self.bus.push({"type": "error", "msg": f"Revert failed: {e}"})
             self.app.after(0, self.app._show_revert_error, str(e))

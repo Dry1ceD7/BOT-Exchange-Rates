@@ -5,7 +5,7 @@ gui/panels/token_dialog.py
 BOT Exchange Rate Processor — API Token Registration Dialog
 ---------------------------------------------------------------------------
 License-key-style popup that collects BOT API tokens on first use.
-Writes validated tokens to .env and injects them into os.environ.
+Writes validated tokens to .env (legacy), OS keychain, and os.environ.
 
 SFFB: Strict < 200 lines.
 """
@@ -18,6 +18,7 @@ from typing import Optional
 import customtkinter as ctk
 
 from core.paths import get_project_root
+from core.secure_tokens import set_token
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         dialog = TokenRegistrationDialog(root)
         root.wait_window(dialog)
         if dialog.activated:
-            # tokens are now in os.environ and .env
+            # tokens are now in keychain, os.environ, and .env
     """
 
     def __init__(
@@ -206,12 +207,16 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
             logger.error("Failed to write .env: %s", e)
             return
 
-        # Inject into current process
+        # Store in OS keychain (primary secure storage)
+        set_token("BOT_TOKEN_EXG", exg)
+        set_token("BOT_TOKEN_HOL", hol)
+
+        # Also inject into current process for immediate availability
         os.environ["BOT_TOKEN_EXG"] = exg
         os.environ["BOT_TOKEN_HOL"] = hol
 
         self.activated = True
-        logger.info("API tokens activated and saved to .env")
+        logger.info("API tokens activated and saved to keychain + .env")
         self.grab_release()
         self.destroy()
 

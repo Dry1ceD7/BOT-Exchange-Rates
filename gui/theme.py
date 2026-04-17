@@ -93,34 +93,3 @@ def get_theme() -> dict:
             "switch_track": "#CBD5E1",
             "switch_thumb": "#4A5568",
         }
-
-
-def get_color_aliases() -> dict:
-    """Return legacy COLOR_* aliases for backward compatibility.
-
-    Returns a dict mapping alias names (without 'COLOR_' prefix) to values.
-    """
-    t = get_theme()
-    return {
-        "BG_DARK":       t["bg"],
-        "HEADER_BG":     t["header_bg"],
-        "HEADER_TEXT":    t["header_text"],
-        "HEADER_SUB":    t["header_sub"],
-        "CARD_BG":       t["card_bg"],
-        "CARD_BORDER":   t["card_border"],
-        "DIVIDER":       t["divider"],
-        "SECTION_BG":    t["section_bg"],
-        "TEXT_PRIMARY":   t["text_primary"],
-        "TEXT_SECONDARY": t["text_secondary"],
-        "TEXT_MUTED":     t["text_muted"],
-        "TRUST_BLUE":    t["trust_blue"],
-        "BLUE_HOVER":    t["blue_hover"],
-        "SUCCESS":       t["success"],
-        "SUCCESS_HOVER": t["success_hover"],
-        "WARNING":       t["warning"],
-        "WARNING_HOVER": t["warning_hover"],
-        "REVERT_BG":     t["revert_bg"],
-        "REVERT_HOVER":  t["revert_hover"],
-        "ERROR_TEXT":     t["error_text"],
-        "PROCESS_TEXT":   t["process_text"],
-    }

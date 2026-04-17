@@ -133,13 +133,24 @@ class SingleInstanceServer:
             return False
 
     def _accept_loop(self):
+        import select
+
         while self._running and self._listener:
             try:
-                # Wait for connection or interruption
-                if not self._listener.poll(1.0):
-                    continue
+                # Use select() to poll the listener socket with a timeout,
+                # allowing the loop to check self._running periodically.
+                # Listener.poll() does NOT exist — it's a Connection method.
+                if sys.platform != "win32":
+                    sock = self._listener._listener._socket
+                    readable, _, _ = select.select([sock], [], [], 1.0)
+                    if not readable:
+                        continue
+                # On Windows named pipes, select() doesn't work.
+                # We rely on the short timeout from Client side and
+                # the daemon thread flag to stop on shutdown.
 
-                with self._listener.accept() as conn:
+                conn = self._listener.accept()
+                try:
                     message = conn.recv()
                     # Authenticate: expect "RESTORE:<nonce>"
                     if message == f"RESTORE:{self._nonce}":
@@ -147,6 +158,10 @@ class SingleInstanceServer:
                         self.on_restore()
                     else:
                         logger.warning("IPC: rejected unauthenticated command")
+                except EOFError:
+                    pass
+                finally:
+                    conn.close()
             except EOFError:
                 continue
             except OSError as e:

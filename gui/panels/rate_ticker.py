@@ -10,7 +10,6 @@ fallback on startup. Auto-refreshes every 60 seconds.
 """
 
 import logging
-import os
 import threading
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -109,16 +108,26 @@ class RateTicker(ctk.CTkFrame):
         )
         self.lbl_eur_sell.pack(side="left", padx=4)
 
-    def start(self) -> None:
-        """Begin the refresh cycle."""
-        self._refresh()
 
-    def _refresh(self) -> None:
-        """Fetch latest rates and update display."""
-        threading.Thread(
-            target=self._fetch_rates_bg, daemon=True,
-        ).start()
-        self.after(self.REFRESH_MS, self._refresh)
+    def start(self) -> None:
+        """Begin the refresh cycle with a single persistent worker thread."""
+        self._stop_event = threading.Event()
+        self._worker = threading.Thread(
+            target=self._worker_loop, daemon=True, name="RateTickerWorker",
+        )
+        self._worker.start()
+
+    def stop(self) -> None:
+        """Signal the worker thread to stop."""
+        if hasattr(self, "_stop_event"):
+            self._stop_event.set()
+
+    def _worker_loop(self) -> None:
+        """Persistent background thread: fetch rates on a timer."""
+        while not self._stop_event.is_set():
+            self._fetch_rates_bg()
+            # Wait for REFRESH_MS or until stop is signaled
+            self._stop_event.wait(timeout=self.REFRESH_MS / 1000.0)
 
     def _fetch_rates_bg(self) -> None:
         """Background thread: read from cache, fallback to API."""
@@ -152,7 +161,9 @@ class RateTicker(ctk.CTkFrame):
         """Lightweight API call to get today's rates."""
         try:
             import httpx
-            token = os.environ.get("BOT_TOKEN_EXG", "")
+
+            from core.secure_tokens import get_token
+            token = get_token("BOT_TOKEN_EXG")
             if not token:
                 return None
 
@@ -193,7 +204,7 @@ class RateTicker(ctk.CTkFrame):
 
             return results if results else None
 
-        except (OSError, ValueError, RuntimeError) as e:
+        except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
             logger.debug("Ticker API fetch failed: %s", e)
             return None
 

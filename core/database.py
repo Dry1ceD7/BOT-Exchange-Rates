@@ -26,7 +26,13 @@ class CacheDB:
     Persists to data/cache.db. Tables are auto-created on init.
     """
 
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str = None) -> None:
+        """Initialize the SQLite cache.
+
+        Args:
+            db_path: Path to the SQLite database file. Defaults to
+                     data/cache.db in the project root.
+        """
         if db_path is None:
             from core.paths import get_project_root
             project_root = get_project_root()
@@ -250,24 +256,6 @@ class CacheDB:
             return None
         return Decimal(str(row[0]))
 
-    def get_multi_rates_bulk(
-        self, start: date, end: date, currency: str, rate_type: str,
-    ) -> Dict[date, Decimal]:
-        """Get all rates for a currency/type in a date range."""
-        s_str = start.strftime("%Y-%m-%d")
-        e_str = end.strftime("%Y-%m-%d")
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT date, value FROM rates_multi "
-                "WHERE date BETWEEN ? AND ? AND currency = ? AND rate_type = ?",
-                (s_str, e_str, currency, rate_type),
-            ).fetchall()
-        result: Dict[date, Decimal] = {}
-        for r in rows:
-            d = datetime.strptime(r[0], "%Y-%m-%d").date()
-            if r[1] is not None:
-                result[d] = Decimal(str(r[1]))
-        return result
 
     def insert_multi_rates_bulk(
         self, entries: List[Tuple],
