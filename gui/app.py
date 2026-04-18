@@ -32,6 +32,10 @@ import customtkinter as ctk
 
 from core.backup_manager import BackupManager
 from core.config_manager import SettingsManager
+from core.enterprise import (
+    load_job_history_stats,
+    summarize_validation,
+)
 from core.version import __version__ as APP_VERSION
 from core.workers.event_bus import EventBus
 from gui.handlers import BatchHandler
@@ -116,9 +120,12 @@ class BOTExrateApp(ctk.CTk):
 
         self.file_queue: List[str] = []
         self.last_processed_path: Optional[str] = None
+        self._last_validation_summary: Optional[dict] = None
         self.backup_mgr = BackupManager()
         self.event_bus = EventBus()
         self.batch_handler = BatchHandler(self, event_bus=self.event_bus)
+        self._settings_mgr = SettingsManager()
+        self._settings = self._settings_mgr.load()
 
         # Center window
         self.update_idletasks()
@@ -147,12 +154,36 @@ class BOTExrateApp(ctk.CTk):
         self._build_footer()
         self._build_card()
         self._build_live_console()
+        self._refresh_runtime_settings()
         self._updater.check_for_updates()
 
         # v3.2.0: System Tray — minimize to tray on close
         from gui.panels.tray_manager import TrayManager
         self._tray = TrayManager(self)
         self._tray.setup()
+
+    def _refresh_runtime_settings(self) -> None:
+        """Reload persisted settings to apply runtime governance rules."""
+        self._settings = SettingsManager().load()
+
+    def _is_admin_mode(self) -> bool:
+        return self._settings.get("usage_mode", "admin") == "admin"
+
+    def _effective_dry_run(self) -> bool:
+        dry_run = self._dry_run_var.get() == "on"
+        if not self._is_admin_mode() and not self._settings.get("operator_write_access", False):
+            dry_run = True
+        return dry_run
+
+    def _validation_summary_text(self, summary: dict) -> str:
+        totals = summary.get("totals", {})
+        return (
+            f"Files: {summary.get('file_count', 0)}\n"
+            f"Scanned rows: {totals.get('scanned_rows', 0)}\n"
+            f"Missing dates: {totals.get('missing_dates', 0)}\n"
+            f"Unmatched currencies: {totals.get('unmatched_currencies', 0)}\n"
+            f"Rows with existing formulas (skip candidates): {totals.get('skipped_rows', 0)}"
+        )
 
     def _set_app_icon(self):
         """Load and set the application window icon (works in source + frozen mode)."""
@@ -610,12 +641,36 @@ class BOTExrateApp(ctk.CTk):
     def _on_process_click(self):
         if not self.file_queue:
             return
+        self._refresh_runtime_settings()
         self.btn_process.configure(state="disabled")
         self.btn_revert.configure(state="disabled")
         self.btn_reveal.pack_forget()
         total = len(self.file_queue)
         self.progressbar.configure(mode="determinate")
         self.progressbar.set(0)
+        self._last_validation_summary = summarize_validation(self.file_queue)
+
+        dry_run = self._effective_dry_run()
+        if dry_run and self._dry_run_var.get() != "on":
+            messagebox.showinfo(
+                "Operator Mode",
+                "Write-back is locked for Operator mode. The batch will run as simulation.",
+            )
+        if self._settings.get("require_approval_before_write", False) and not dry_run:
+            approved = messagebox.askyesno(
+                "Approve Write-Back",
+                "Validation Summary:\n\n"
+                f"{self._validation_summary_text(self._last_validation_summary)}\n\n"
+                "Proceed with file modifications?",
+            )
+            if not approved:
+                self.btn_process.configure(state="normal")
+                self.btn_revert.configure(state="normal")
+                self.lbl_status.configure(
+                    text="Write-back canceled by approver.",
+                    text_color=_get_colors()["warning"],
+                )
+                return
 
         is_auto = self.auto_detect_var.get() == "on"
 
@@ -653,7 +708,6 @@ class BOTExrateApp(ctk.CTk):
                             text=f"Connecting to BOT API...  fallback range  (0 of {total})",
                             text_color=_get_colors()["warning"]
                         )
-                    dry_run = self._dry_run_var.get() == "on"
                     self.batch_handler.start_batch(
                         self.file_queue, start_date_str, dry_run=dry_run,
                     )
@@ -672,7 +726,6 @@ class BOTExrateApp(ctk.CTk):
                 text=f"Connecting to BOT API...  (0 of {total})",
                 text_color=_get_colors()["process_text"]
             )
-            dry_run = self._dry_run_var.get() == "on"
             self.batch_handler.start_batch(
                 self.file_queue, start_date_str, dry_run=dry_run,
             )
@@ -691,6 +744,7 @@ class BOTExrateApp(ctk.CTk):
             )
 
     def _show_batch_complete(self, success: int, fail: int, errors: List[str]):
+        self._refresh_runtime_settings()
         self.progressbar.set(1)
         self.btn_process.configure(state="normal")
         self.btn_revert.configure(state="normal")
@@ -707,6 +761,17 @@ class BOTExrateApp(ctk.CTk):
         if self.file_queue:
             self.last_processed_path = self.file_queue[-1]
             self.btn_reveal.pack(pady=(12, 14))
+        if self._last_validation_summary:
+            stats = load_job_history_stats(
+                limit=int(self._settings.get("job_history_limit", 30))
+            )
+            messagebox.showinfo(
+                "Validation & Reporting",
+                f"{self._validation_summary_text(self._last_validation_summary)}\n\n"
+                f"Recent runs: {stats.get('runs', 0)}  |  "
+                f"Successful: {stats.get('success_runs', 0)}  |  "
+                f"Failed: {stats.get('failed_runs', 0)}",
+            )
         # Force UI refresh so the user sees the updated state immediately
         self.update_idletasks()
 
@@ -819,6 +884,7 @@ class BOTExrateApp(ctk.CTk):
         modal = SettingsModal(self)
         modal.grab_set()
         self.wait_window(modal)
+        self._refresh_runtime_settings()
         self._apply_theme()
 
     def _apply_theme(self):
@@ -832,6 +898,13 @@ class BOTExrateApp(ctk.CTk):
     # ================================================================== #
     def _on_scheduler_start(self, time_str: str, paths: list):
         """Start or update the background scheduler."""
+        self._refresh_runtime_settings()
+        if not self._is_admin_mode():
+            self.lbl_status.configure(
+                text="Scheduler changes require Admin mode.",
+                text_color=_get_colors()["warning"],
+            )
+            return
         from core.scheduler import AutoScheduler
         if not hasattr(self, "_auto_scheduler"):
             self._auto_scheduler = AutoScheduler()
@@ -860,6 +933,13 @@ class BOTExrateApp(ctk.CTk):
 
     def _on_scheduler_stop(self):
         """Stop the background scheduler."""
+        self._refresh_runtime_settings()
+        if not self._is_admin_mode():
+            self.lbl_status.configure(
+                text="Scheduler changes require Admin mode.",
+                text_color=_get_colors()["warning"],
+            )
+            return
         if hasattr(self, "_auto_scheduler"):
             self._auto_scheduler.stop()
             logger.info("Scheduler stopped")

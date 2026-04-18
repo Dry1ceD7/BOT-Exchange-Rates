@@ -56,9 +56,16 @@ class SchedulerPanel(ctk.CTkFrame):
         self._on_stop = on_stop_scheduler
         self._mgr = SettingsManager()
         self._settings = self._mgr.load()
+        self._admin_mode = self._settings.get("usage_mode", "admin") == "admin"
 
         self._build_ui()
         self._load_persisted_state()
+        if not self._admin_mode:
+            self._toggle.configure(state="disabled")
+            self._lbl_status.configure(
+                text="Scheduler locked (Operator mode).",
+                text_color=get_theme()["warning"],
+            )
 
     def _build_ui(self):
         t = get_theme()

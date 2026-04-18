@@ -44,6 +44,10 @@ from core.excel_io import (
     zero_touch_write,
 )
 from core.exrate_sheet import update_master_exrate_sheet
+from core.enterprise import (
+    fetch_fallback_rates,
+    load_holiday_overlays,
+)
 from core.logic import BOTLogicEngine, safe_to_decimal
 from core.prescan import prescan_oldest_date
 
@@ -221,6 +225,7 @@ class LedgerEngine:
         all_d = set(dates) | {force_start, today}
         min_date, max_date = min(all_d), max(all_d)
         years = {d.year for d in all_d}
+        settings = SettingsManager().load()
 
         # ── HOLIDAYS: Cache-first ────────────────────────────────────
         holidays_list = []
@@ -249,6 +254,24 @@ class LedgerEngine:
                 except (ValueError, TypeError):
                     logger.debug("Skipped unparseable API holiday: %s", h.date)
             self.cache.insert_holidays(hol_entries)
+
+        # ── Optional holiday overlays (CSV/JSON/TXT) ────────────────
+        overlay_path = str(settings.get("holiday_overlay_path", "")).strip()
+        if overlay_path:
+            overlay_rows = load_holiday_overlays(overlay_path)
+            if overlay_rows:
+                self.cache.insert_holidays(overlay_rows)
+                for d_str, _name in overlay_rows:
+                    try:
+                        holidays_list.append(
+                            datetime.strptime(d_str, "%Y-%m-%d").date()
+                        )
+                    except (ValueError, TypeError):
+                        logger.debug("Skipped invalid overlay holiday: %s", d_str)
+                self._emit(
+                    f"Holiday overlays loaded: {len(overlay_rows)} entries",
+                    etype="success",
+                )
 
         logic_engine = BOTLogicEngine(
             holidays=holidays_list, max_rollback_days=10
@@ -300,10 +323,24 @@ class LedgerEngine:
 
             # ── Concurrent USD + EUR fetch (different params, safe) ────
             # Each request has its own 429 handler + tenacity retries.
-            usd_data, eur_data = await asyncio.gather(
-                self.api.get_exchange_rates(fetch_start, fetch_end, "USD"),
-                self.api.get_exchange_rates(fetch_start, fetch_end, "EUR"),
-            )
+            try:
+                usd_data, eur_data = await asyncio.gather(
+                    self.api.get_exchange_rates(fetch_start, fetch_end, "USD"),
+                    self.api.get_exchange_rates(fetch_start, fetch_end, "EUR"),
+                )
+            except Exception as api_error:
+                if not settings.get("enable_fx_fallback", True):
+                    raise
+                self._emit(
+                    "Primary BOT rates failed — using fallback FX source",
+                    etype="warning",
+                )
+                logger.warning("BOT API fetch failed, fallback enabled: %s", api_error)
+                async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT) as fb_client:
+                    usd_data, eur_data = await asyncio.gather(
+                        fetch_fallback_rates(fetch_start, fetch_end, "USD", fb_client),
+                        fetch_fallback_rates(fetch_start, fetch_end, "EUR", fb_client),
+                    )
 
             rate_cache = {}
             for r in usd_data:

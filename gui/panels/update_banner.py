@@ -54,6 +54,7 @@ class UpdateManager:
         settings = SettingsManager().load()
         if not settings.get("auto_update", True):
             return
+        silent_update = settings.get("silent_update", False)
 
         def _worker():
             from core.auto_updater import check_for_update
@@ -61,7 +62,11 @@ class UpdateManager:
             if result.get("update_available"):
                 ver = result.get("latest_version", "?")
                 url = result.get("download_url", "")
-                self._safe_after(0, self._show_banner, ver, url)
+                if silent_update:
+                    # Enterprise mode: no approval banner; use default install path.
+                    self._safe_after(0, self._do_download, ver)
+                else:
+                    self._safe_after(0, self._show_banner, ver, url)
 
         threading.Thread(target=_worker, daemon=True).start()
 

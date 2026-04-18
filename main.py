@@ -26,6 +26,8 @@ from tkinter import messagebox
 
 from dotenv import load_dotenv
 
+from core.config_manager import SettingsManager
+from core.enterprise import record_job_history, send_webhook_notification
 from core.paths import get_project_root
 
 # Securely load API Keys to os.environ BEFORE anything else
@@ -136,7 +138,13 @@ def main():
         "--start-date", "-s", type=str, default=None,
         help="Start date for rate extraction (YYYY-MM-DD). Defaults to auto-detect.",
     )
+    parser.add_argument(
+        "--profile", type=str, default=None,
+        help="Settings profile name to use (e.g., default, finance, ops).",
+    )
     args = parser.parse_args()
+    if args.profile:
+        SettingsManager().set_active_profile(args.profile)
 
     if args.headless:
         _run_headless(args)
@@ -212,11 +220,14 @@ def _run_headless(args: argparse.Namespace) -> None:
 
     # Run async batch
     async def _run():
+        import time
+
         from core.api_client import BOTClient
         from core.audit_logger import AuditLogger
         from core.engine import LedgerEngine
 
         audit = AuditLogger()
+        t0 = time.monotonic()
 
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -233,6 +244,8 @@ def _run_headless(args: argparse.Namespace) -> None:
             success, fail, errors = await engine.process_batch(
                 files, start_date=start_date, progress_cb=progress_cb,
             )
+        duration = round(time.monotonic() - t0, 2)
+        settings = SettingsManager().load()
 
         audit.log_batch_summary(
             total_files=len(files),
@@ -248,6 +261,30 @@ def _run_headless(args: argparse.Namespace) -> None:
             print("Errors:")
             for e in errors:
                 print(f"  • {e}")
+        record_job_history(
+            {
+                "source": "headless",
+                "dry_run": False,
+                "total_files": len(files),
+                "success": success,
+                "failed": fail,
+                "duration_sec": duration,
+                "start_date": start_date,
+            }
+        )
+        if settings.get("notification_enabled") and settings.get("notification_webhook_url"):
+            send_webhook_notification(
+                settings.get("notification_webhook_url", ""),
+                {
+                    "event": "batch_complete",
+                    "app": "BOT Exchange Rate Processor",
+                    "source": "headless",
+                    "total": len(files),
+                    "success": success,
+                    "failed": fail,
+                    "duration_sec": duration,
+                },
+            )
         return fail
 
     fail_count = asyncio.run(_run())
@@ -310,4 +347,3 @@ sys.excepthook = global_exception_handler
 
 if __name__ == "__main__":
     main()
-

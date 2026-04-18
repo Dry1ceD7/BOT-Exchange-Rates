@@ -149,3 +149,32 @@ class TestSettingsManagerReload:
         # reload() should bypass cache
         settings = mgr.reload()
         assert settings["appearance"] == "dark"
+
+
+class TestSettingsManagerProfilesAndPolicy:
+    """Tests for profile routing and policy override behavior."""
+
+    def test_set_active_profile_changes_target_file(self, config_dir):
+        mgr = SettingsManager(config_dir=config_dir)
+        mgr.set_active_profile("finance")
+        mgr.save({"appearance": "dark"})
+        prof_path = os.path.join(config_dir, "settings.finance.json")
+        assert os.path.exists(prof_path)
+
+        # Fresh manager should resolve profile from active_profile.txt
+        mgr2 = SettingsManager(config_dir=config_dir)
+        assert mgr2.profile == "finance"
+        assert mgr2.get("appearance") == "dark"
+
+    def test_policy_overrides_loaded_values(self, config_dir, monkeypatch):
+        mgr = SettingsManager(config_dir=config_dir)
+        mgr.save({"auto_update": True, "usage_mode": "admin"})
+        policy_path = os.path.join(config_dir, "policy.json")
+        with open(policy_path, "w", encoding="utf-8") as f:
+            json.dump({"auto_update": False, "usage_mode": "operator"}, f)
+        monkeypatch.setenv("BOT_POLICY_PATH", policy_path)
+
+        mgr2 = SettingsManager(config_dir=config_dir)
+        settings = mgr2.load()
+        assert settings["auto_update"] is False
+        assert settings["usage_mode"] == "operator"

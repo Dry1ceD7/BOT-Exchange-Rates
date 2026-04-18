@@ -13,12 +13,15 @@ import asyncio
 import logging
 import os
 import threading
+import time
 from typing import List, Optional
 
 import httpx
 
 from core.api_client import BOTClient
+from core.config_manager import SettingsManager
 from core.engine import LedgerEngine
+from core.enterprise import record_job_history, send_webhook_notification
 from core.workers.event_bus import EventBus
 
 logger = logging.getLogger(__name__)
@@ -87,6 +90,7 @@ class BatchHandler:
         dry_run: bool = False,
     ):
         """Async batch executor."""
+        t0 = time.monotonic()
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
         ) as client:
@@ -122,6 +126,32 @@ class BatchHandler:
                 progress_cb=progress_cb,
                 dry_run=dry_run,
             )
+            duration = round(time.monotonic() - t0, 2)
+            settings = SettingsManager().load()
+            history_row = {
+                "source": "gui",
+                "dry_run": dry_run,
+                "total_files": len(file_queue),
+                "success": success,
+                "failed": fail,
+                "duration_sec": duration,
+                "start_date": start_date,
+            }
+            record_job_history(history_row)
+            if settings.get("notification_enabled") and settings.get("notification_webhook_url"):
+                send_webhook_notification(
+                    settings.get("notification_webhook_url", ""),
+                    {
+                        "event": "batch_complete",
+                        "app": "BOT Exchange Rate Processor",
+                        "source": "gui",
+                        "dry_run": dry_run,
+                        "total": len(file_queue),
+                        "success": success,
+                        "failed": fail,
+                        "duration_sec": duration,
+                    },
+                )
             label = "Simulation" if dry_run else "Batch"
             self.bus.push({
                 "type": "success",
