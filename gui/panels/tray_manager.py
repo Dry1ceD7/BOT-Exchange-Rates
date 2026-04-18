@@ -23,6 +23,7 @@ import os
 import platform
 import sys
 import threading
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -73,13 +74,13 @@ class TrayManager:
     def __init__(self, app):
         self._app = app
         self._icon: "pystray.Icon | None" = None
-        self._tray_thread: threading.Thread | None = None
+        self._tray_thread: Optional[threading.Thread] = None
         self._is_hidden = False
 
     @property
     def supported(self) -> bool:
         """True if the current platform supports system tray."""
-        return HAS_PYSTRAY and platform.system() == "Windows"
+        return HAS_PYSTRAY and platform.system() in ("Windows", "Darwin")
 
     def setup(self) -> None:
         """Install the close-to-tray handler and start the tray icon."""
@@ -136,7 +137,10 @@ class TrayManager:
     def _on_show(self, icon=None, item=None) -> None:
         """Restore the window from the tray."""
         # Schedule on the Tk main thread
-        self._app.after(0, self._restore_window)
+        try:
+            self._app.after(0, self._restore_window)
+        except RuntimeError:
+            pass  # app already destroyed
 
     def _restore_window(self) -> None:
         """Bring the window back and focus it."""
@@ -152,7 +156,10 @@ class TrayManager:
         if self._icon:
             self._icon.stop()
         # Schedule destroy on the Tk main thread
-        self._app.after(0, self._app.destroy)
+        try:
+            self._app.after(0, self._app.destroy)
+        except RuntimeError:
+            pass  # app already destroyed
 
     def restore_if_hidden(self) -> None:
         """

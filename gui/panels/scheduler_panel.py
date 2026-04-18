@@ -22,17 +22,9 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 from core.config_manager import SettingsManager
+from gui.theme import MONO_FONT, get_theme
 
 logger = logging.getLogger(__name__)
-
-# Colors — follow the app's dark-mode first design
-COLOR_PANEL_BG = ("#F0F4F8", "#162032")
-COLOR_PANEL_BORDER = ("#D1D9E6", "#2D3E55")
-COLOR_ACCENT = "#3B82F6"
-COLOR_SUCCESS = "#22C55E"
-COLOR_WARNING = "#F59E0B"
-COLOR_TEXT = ("#1A202C", "#F1F5F9")
-COLOR_TEXT_MUTED = ("#64748B", "#94A3B8")
 
 
 class SchedulerPanel(ctk.CTkFrame):
@@ -50,12 +42,13 @@ class SchedulerPanel(ctk.CTkFrame):
         on_stop_scheduler: Optional[Callable] = None,
         **kwargs,
     ):
+        t = get_theme()
         super().__init__(
             master,
-            fg_color=COLOR_PANEL_BG,
+            fg_color=t["sched_bg"],
             corner_radius=10,
             border_width=1,
-            border_color=COLOR_PANEL_BORDER,
+            border_color=t["sched_border"],
             **kwargs,
         )
 
@@ -68,15 +61,18 @@ class SchedulerPanel(ctk.CTkFrame):
         self._load_persisted_state()
 
     def _build_ui(self):
+        t = get_theme()
+
         # ── Header row with toggle ────────────────────────────────────
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=12, pady=(10, 4))
 
-        ctk.CTkLabel(
+        self._lbl_title = ctk.CTkLabel(
             header, text="⏰ Auto-Processing",
             font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=COLOR_TEXT,
-        ).pack(side="left")
+            text_color=t["text_primary"],
+        )
+        self._lbl_title.pack(side="left")
 
         self._enable_var = ctk.StringVar(value="off")
         self._toggle = ctk.CTkSwitch(
@@ -85,7 +81,7 @@ class SchedulerPanel(ctk.CTkFrame):
             variable=self._enable_var,
             onvalue="on", offvalue="off",
             width=46,
-            progress_color=COLOR_SUCCESS,
+            progress_color=t["success"],
             command=self._on_toggle,
         )
         self._toggle.pack(side="right")
@@ -100,7 +96,7 @@ class SchedulerPanel(ctk.CTkFrame):
         ctk.CTkLabel(
             time_row, text="Run at:",
             font=ctk.CTkFont(size=12),
-            text_color=COLOR_TEXT_MUTED,
+            text_color=t["text_muted"],
         ).pack(side="left")
 
         self._hour_var = ctk.StringVar(value="23")
@@ -110,18 +106,19 @@ class SchedulerPanel(ctk.CTkFrame):
             values=[f"{h:02d}" for h in range(24)],
             width=60, height=28,
             font=ctk.CTkFont(size=12),
-            fg_color=("#E2E8F0", "#2D3E55"),
-            button_color=(COLOR_ACCENT, COLOR_ACCENT),
+            fg_color=t["option_bg"],
+            button_color=t["trust_blue"],
             corner_radius=6,
             command=self._on_config_change,
         )
         self._hour_menu.pack(side="left", padx=(8, 2))
 
-        ctk.CTkLabel(
+        self._lbl_colon = ctk.CTkLabel(
             time_row, text=":",
             font=ctk.CTkFont(size=14, weight="bold"),
-            text_color=COLOR_TEXT,
-        ).pack(side="left")
+            text_color=t["text_primary"],
+        )
+        self._lbl_colon.pack(side="left")
 
         self._minute_var = ctk.StringVar(value="00")
         self._minute_menu = ctk.CTkOptionMenu(
@@ -130,8 +127,8 @@ class SchedulerPanel(ctk.CTkFrame):
             values=["00", "15", "30", "45"],
             width=60, height=28,
             font=ctk.CTkFont(size=12),
-            fg_color=("#E2E8F0", "#2D3E55"),
-            button_color=(COLOR_ACCENT, COLOR_ACCENT),
+            fg_color=t["option_bg"],
+            button_color=t["trust_blue"],
             corner_radius=6,
             command=self._on_config_change,
         )
@@ -144,14 +141,14 @@ class SchedulerPanel(ctk.CTkFrame):
         ctk.CTkLabel(
             paths_header, text="Watch Folders:",
             font=ctk.CTkFont(size=12),
-            text_color=COLOR_TEXT_MUTED,
+            text_color=t["text_muted"],
         ).pack(side="left")
 
         self._btn_remove = ctk.CTkButton(
             paths_header, text="✕ Remove",
             width=80, height=26,
             font=ctk.CTkFont(size=11),
-            fg_color="#DC2626", hover_color="#B91C1C",
+            fg_color=t["revert_bg"], hover_color=t["revert_hover"],
             corner_radius=6,
             command=self._on_remove_path,
         )
@@ -161,7 +158,7 @@ class SchedulerPanel(ctk.CTkFrame):
             paths_header, text="+ Add Folder",
             width=100, height=26,
             font=ctk.CTkFont(size=11),
-            fg_color=COLOR_ACCENT, hover_color="#2563EB",
+            fg_color=t["trust_blue"], hover_color=t["blue_hover"],
             corner_radius=6,
             command=self._on_add_path,
         )
@@ -171,10 +168,10 @@ class SchedulerPanel(ctk.CTkFrame):
         self._path_list = ctk.CTkTextbox(
             self._content,
             height=60,
-            font=ctk.CTkFont(family="Consolas", size=10),
-            fg_color=("#FFFFFF", "#0F172A"),
+            font=ctk.CTkFont(family=MONO_FONT, size=10),
+            fg_color=t["path_list_bg"],
             border_width=1,
-            border_color=COLOR_PANEL_BORDER,
+            border_color=t["sched_border"],
             corner_radius=6,
         )
         self._path_list.pack(fill="x", padx=12, pady=(0, 4))
@@ -184,7 +181,7 @@ class SchedulerPanel(ctk.CTkFrame):
         self._lbl_status = ctk.CTkLabel(
             self._content, text="",
             font=ctk.CTkFont(size=11),
-            text_color=COLOR_TEXT_MUTED,
+            text_color=t["text_muted"],
         )
         self._lbl_status.pack(padx=12, pady=(0, 8))
 
@@ -254,9 +251,20 @@ class SchedulerPanel(ctk.CTkFrame):
             self._on_config_change()
 
     def _on_remove_path(self):
-        """Remove the last folder from the watch list."""
-        if self._paths:
-            self._paths.pop()
+        """Remove a selected folder from the watch list via a simple dialog."""
+        if not self._paths:
+            return
+        # If only one path, just remove it directly
+        if len(self._paths) == 1:
+            self._paths.clear()
+            self._refresh_path_list()
+            self._on_config_change()
+            return
+        # Show a selection dialog for multiple paths
+        from gui.panels._path_chooser import choose_path_to_remove
+        idx = choose_path_to_remove(self, self._paths)
+        if idx is not None and 0 <= idx < len(self._paths):
+            self._paths.pop(idx)
             self._refresh_path_list()
             self._on_config_change()
 
@@ -272,12 +280,13 @@ class SchedulerPanel(ctk.CTkFrame):
 
     def _update_status(self):
         """Update the status label."""
+        t = get_theme()
         n = len(self._paths)
         time_str = f"{self._hour_var.get()}:{self._minute_var.get()}"
         if n == 0:
             self._lbl_status.configure(
                 text="⚠ No folders selected — add at least one.",
-                text_color=COLOR_WARNING,
+                text_color=t["warning"],
             )
         else:
             self._lbl_status.configure(
@@ -285,7 +294,7 @@ class SchedulerPanel(ctk.CTkFrame):
                     f"Next run: {time_str} — "
                     f"watching {n} folder{'s' if n != 1 else ''}"
                 ),
-                text_color=COLOR_SUCCESS,
+                text_color=t["success"],
             )
 
     def _save_config(self):
@@ -304,3 +313,15 @@ class SchedulerPanel(ctk.CTkFrame):
             "time": f"{self._hour_var.get()}:{self._minute_var.get()}",
             "paths": list(self._paths),
         }
+
+    def apply_theme(self, t: dict) -> None:
+        """Re-apply theme colors to the scheduler panel."""
+        self.configure(
+            fg_color=t["sched_bg"],
+            border_color=t["sched_border"],
+        )
+        if hasattr(self, "_lbl_title"):
+            self._lbl_title.configure(text_color=t["text_primary"])
+        if hasattr(self, "_lbl_status"):
+            # Don't override status color (success/warning) — only update if idle
+            pass

@@ -19,18 +19,9 @@ import customtkinter as ctk
 
 from core.paths import get_project_root
 from core.secure_tokens import set_token
+from gui.theme import MONO_FONT, get_theme
 
 logger = logging.getLogger(__name__)
-
-# ── Theme Constants ──────────────────────────────────────────────────────
-COLOR_BG = "#0F172A"
-COLOR_CARD = "#1E293B"
-COLOR_TEXT = "#F1F5F9"
-COLOR_MUTED = "#94A3B8"
-COLOR_ACCENT = "#3B82F6"
-COLOR_SUCCESS = "#22C55E"
-COLOR_ERROR = "#F87171"
-COLOR_ENTRY_BG = "#334155"
 
 BOT_PORTAL_URL = "https://apiportal.bot.or.th/"
 MIN_KEY_LENGTH = 8
@@ -60,10 +51,11 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         self.activated = False
         self._env_path = env_path or os.path.join(get_project_root(), ".env")
 
+        t = get_theme()
         self.title("BOT Exchange Rate — API Registration")
         self.geometry("520x520")
         self.resizable(False, False)
-        self.configure(fg_color=COLOR_BG)
+        self.configure(fg_color=t["modal_bg"])
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._prefill_exg = prefill_exg
@@ -73,6 +65,10 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         self._build_ui()
         self._center()
         self.grab_set()
+
+        # ── Keyboard accessibility ─────────────────────────────────
+        self.bind("<Escape>", lambda e: self._on_close())
+        self.focus_set()
 
     # ── Layout ───────────────────────────────────────────────────────────
 
@@ -84,34 +80,36 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         self.geometry(f"{w}x{h}+{sx}+{sy}")
 
     def _build_ui(self):
+        t = get_theme()
+
         # Header
         ctk.CTkLabel(
             self, text="API Registration",
             font=ctk.CTkFont(size=22, weight="bold"),
-            text_color=COLOR_TEXT,
+            text_color=t["modal_text"],
         ).pack(pady=(28, 4))
 
         ctk.CTkLabel(
             self, text="Enter your Bank of Thailand API keys to activate",
             font=ctk.CTkFont(size=13),
-            text_color=COLOR_MUTED,
+            text_color=t["modal_muted"],
         ).pack(pady=(0, 20))
 
         # Card frame
-        card = ctk.CTkFrame(self, fg_color=COLOR_CARD, corner_radius=12)
+        card = ctk.CTkFrame(self, fg_color=t["card_bg"], corner_radius=12)
         card.pack(padx=30, fill="x")
 
         # ── Exchange Rate Key ────────────────────────────────────────
         ctk.CTkLabel(
             card, text="EXCHANGE RATE API KEY",
             font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=COLOR_MUTED,
+            text_color=t["modal_muted"],
         ).pack(anchor="w", padx=20, pady=(18, 4))
 
         self._entry_exg = ctk.CTkEntry(
             card, height=40, corner_radius=8,
-            fg_color=COLOR_ENTRY_BG, border_color=COLOR_ACCENT,
-            text_color=COLOR_TEXT, font=ctk.CTkFont(size=13, family="Courier"),
+            fg_color=t["modal_entry_bg"], border_color=t["modal_accent"],
+            text_color=t["modal_text"], font=ctk.CTkFont(size=13, family=MONO_FONT),
             placeholder_text="Paste your exchange rate API key here",
             show="•",
         )
@@ -123,13 +121,13 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         ctk.CTkLabel(
             card, text="HOLIDAY API KEY",
             font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=COLOR_MUTED,
+            text_color=t["modal_muted"],
         ).pack(anchor="w", padx=20, pady=(14, 4))
 
         self._entry_hol = ctk.CTkEntry(
             card, height=40, corner_radius=8,
-            fg_color=COLOR_ENTRY_BG, border_color=COLOR_ACCENT,
-            text_color=COLOR_TEXT, font=ctk.CTkFont(size=13, family="Courier"),
+            fg_color=t["modal_entry_bg"], border_color=t["modal_accent"],
+            text_color=t["modal_text"], font=ctk.CTkFont(size=13, family=MONO_FONT),
             placeholder_text="Paste your holiday API key here",
             show="•",
         )
@@ -140,7 +138,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         # ── Show Keys toggle ─────────────────────────────────────────
         self._chk_show = ctk.CTkCheckBox(
             card, text="Show keys",
-            font=ctk.CTkFont(size=12), text_color=COLOR_MUTED,
+            font=ctk.CTkFont(size=12), text_color=t["modal_muted"],
             command=self._toggle_visibility,
             checkbox_height=18, checkbox_width=18,
         )
@@ -149,14 +147,14 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         # ── Status Label ─────────────────────────────────────────────
         self._lbl_status = ctk.CTkLabel(
             self, text="", font=ctk.CTkFont(size=12),
-            text_color=COLOR_ERROR,
+            text_color=t["error_text"],
         )
         self._lbl_status.pack(pady=(12, 4))
 
         # ── Activate Button ──────────────────────────────────────────
         ctk.CTkButton(
             self, text="Activate",
-            fg_color=COLOR_SUCCESS, hover_color="#16A34A",
+            fg_color=t["modal_success"], hover_color=t["success_hover"],
             font=ctk.CTkFont(size=15, weight="bold"),
             corner_radius=10, height=44,
             command=self._on_activate,
@@ -167,7 +165,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
             self,
             text="Don't have keys? Register at apiportal.bot.or.th",
             font=ctk.CTkFont(size=12, underline=True),
-            text_color=COLOR_ACCENT, cursor="hand2",
+            text_color=t["modal_accent"], cursor="hand2",
         )
         link.pack(pady=(0, 20))
         link.bind("<Button-1>", lambda _: webbrowser.open(BOT_PORTAL_URL))
@@ -181,19 +179,20 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         self._entry_hol.configure(show=char)
 
     def _on_activate(self):
+        t = get_theme()
         exg = self._entry_exg.get().strip()
         hol = self._entry_hol.get().strip()
 
         # Validate
         if not exg or not hol:
             self._lbl_status.configure(
-                text="Both API keys are required.", text_color=COLOR_ERROR,
+                text="Both API keys are required.", text_color=t["error_text"],
             )
             return
         if len(exg) < MIN_KEY_LENGTH or len(hol) < MIN_KEY_LENGTH:
             self._lbl_status.configure(
                 text="API keys appear too short. Please check and try again.",
-                text_color=COLOR_ERROR,
+                text_color=t["error_text"],
             )
             return
 
@@ -202,7 +201,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
             self._write_env(exg, hol)
         except OSError as e:
             self._lbl_status.configure(
-                text="Failed to save .env: %s" % e, text_color=COLOR_ERROR,
+                text="Failed to save .env: %s" % e, text_color=t["error_text"],
             )
             logger.error("Failed to write .env: %s", e)
             return

@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import threading
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -40,14 +40,14 @@ SETTINGS_FILENAME = "settings.json"
 class SettingsManager:
     """Load, save, and manage persistent user settings with in-memory cache."""
 
-    def __init__(self, config_dir: str | None = None):
+    def __init__(self, config_dir: Optional[str] = None):
         if config_dir is None:
             from core.paths import get_project_root
             project_root = get_project_root()
             config_dir = os.path.join(project_root, "data")
         self._config_dir = config_dir
         self._filepath = os.path.join(config_dir, SETTINGS_FILENAME)
-        self._cache: Dict[str, Any] | None = None
+        self._cache: Optional[Dict[str, Any]] = None
         self._lock = threading.Lock()
 
     def load(self) -> Dict[str, Any]:

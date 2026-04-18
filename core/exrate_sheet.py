@@ -10,7 +10,7 @@ Builds and updates the unified "ExRate" master tab in Excel workbooks.
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -122,7 +122,7 @@ def _read_existing_data(ws, data_start_row: int) -> Dict[date, dict]:
     return existing
 
 
-def _parse_cell_date(cell_val) -> date | None:
+def _parse_cell_date(cell_val) -> Optional[date]:
     """Parse a date from a cell value."""
     if isinstance(cell_val, datetime):
         return cell_val.date()

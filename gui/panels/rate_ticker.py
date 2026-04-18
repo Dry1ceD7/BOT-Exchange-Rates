@@ -17,7 +17,10 @@ from typing import Dict, Optional
 
 import customtkinter as ctk
 
+from gui.theme import MONO_FONT, get_theme
+
 logger = logging.getLogger(__name__)
+
 
 
 class RateTicker(ctk.CTkFrame):
@@ -34,6 +37,7 @@ class RateTicker(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent", **kwargs)
 
         self._cache = cache_db
+        self._destroyed = False
         self._rates: Dict[str, Optional[Decimal]] = {
             "usd_buying": None,
             "usd_selling": None,
@@ -41,6 +45,8 @@ class RateTicker(ctk.CTkFrame):
             "eur_selling": None,
         }
         self._prev_rates: Dict[str, Optional[Decimal]] = dict(self._rates)
+
+        t = get_theme()
 
         # ── Build Gimmick Layout ─────────────────────────────────────
         self.container = ctk.CTkFrame(self, fg_color="transparent")
@@ -52,21 +58,21 @@ class RateTicker(ctk.CTkFrame):
 
         self.lbl_usd_title = ctk.CTkLabel(
             self.usd_frame, text="🇺🇸 USD",
-            font=ctk.CTkFont(weight="bold", size=13), text_color="#E2E8F0"
+            font=ctk.CTkFont(weight="bold", size=13), text_color=t["ticker_value"]
         )
         self.lbl_usd_title.pack(side="left", padx=(0, 8))
 
         self.lbl_usd_buy = ctk.CTkLabel(
             self.usd_frame, text="BUY --/--",
-            font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
-            text_color="#94A3B8"
+            font=ctk.CTkFont(family=MONO_FONT, size=12, weight="bold"),
+            text_color=t["ticker_label"]
         )
         self.lbl_usd_buy.pack(side="left", padx=4)
 
         self.lbl_usd_sell = ctk.CTkLabel(
             self.usd_frame, text="SELL --/--",
-            font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
-            text_color="#94A3B8"
+            font=ctk.CTkFont(family=MONO_FONT, size=12, weight="bold"),
+            text_color=t["ticker_label"]
         )
         self.lbl_usd_sell.pack(side="left", padx=4)
 
@@ -75,12 +81,12 @@ class RateTicker(ctk.CTkFrame):
         self.live_frame.pack(side="left", padx=20)
         self.lbl_live = ctk.CTkLabel(
             self.live_frame, text="● LIVE",
-            font=ctk.CTkFont(size=9, weight="bold"), text_color="#ef4444"
+            font=ctk.CTkFont(size=9, weight="bold"), text_color=t["ticker_live"]
         )
         self.lbl_live.pack(side="left", padx=(0, 4))
         self.lbl_time = ctk.CTkLabel(
             self.live_frame, text="--:--",
-            font=ctk.CTkFont(size=9, weight="bold"), text_color="#94A3B8"
+            font=ctk.CTkFont(size=9, weight="bold"), text_color=t["ticker_label"]
         )
         self.lbl_time.pack(side="left")
 
@@ -90,21 +96,21 @@ class RateTicker(ctk.CTkFrame):
 
         self.lbl_eur_title = ctk.CTkLabel(
             self.eur_frame, text="🇪🇺 EUR",
-            font=ctk.CTkFont(weight="bold", size=13), text_color="#E2E8F0"
+            font=ctk.CTkFont(weight="bold", size=13), text_color=t["ticker_value"]
         )
         self.lbl_eur_title.pack(side="left", padx=(0, 8))
 
         self.lbl_eur_buy = ctk.CTkLabel(
             self.eur_frame, text="BUY --/--",
-            font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
-            text_color="#94A3B8"
+            font=ctk.CTkFont(family=MONO_FONT, size=12, weight="bold"),
+            text_color=t["ticker_label"]
         )
         self.lbl_eur_buy.pack(side="left", padx=4)
 
         self.lbl_eur_sell = ctk.CTkLabel(
             self.eur_frame, text="SELL --/--",
-            font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
-            text_color="#94A3B8"
+            font=ctk.CTkFont(family=MONO_FONT, size=12, weight="bold"),
+            text_color=t["ticker_label"]
         )
         self.lbl_eur_sell.pack(side="left", padx=4)
 
@@ -118,9 +124,23 @@ class RateTicker(ctk.CTkFrame):
         self._worker.start()
 
     def stop(self) -> None:
-        """Signal the worker thread to stop."""
+        """Signal the worker thread to stop and wait for clean exit."""
+        self._destroyed = True
         if hasattr(self, "_stop_event"):
             self._stop_event.set()
+        if hasattr(self, "_worker") and self._worker.is_alive():
+            self._worker.join(timeout=3)
+            if self._worker.is_alive():
+                logger.warning("RateTicker worker did not exit within 3s")
+
+    def _safe_after(self, ms, fn, *args) -> None:
+        """Thread-safe self.after() — ignores RuntimeError post-destroy."""
+        if self._destroyed:
+            return
+        try:
+            self.after(ms, fn, *args)
+        except RuntimeError:
+            self._destroyed = True
 
     def _worker_loop(self) -> None:
         """Persistent background thread: fetch rates on a timer."""
@@ -134,12 +154,12 @@ class RateTicker(ctk.CTkFrame):
         try:
             rates = self._read_from_cache()
             if rates:
-                self.after(0, self._update_display, rates)
+                self._safe_after(0, self._update_display, rates)
             else:
                 # Try a lightweight API fetch for today only
                 api_rates = self._fetch_today_from_api()
                 if api_rates:
-                    self.after(0, self._update_display, api_rates)
+                    self._safe_after(0, self._update_display, api_rates)
         except (OSError, ValueError, RuntimeError) as e:
             logger.debug("Rate ticker refresh failed: %s", e)
 
@@ -197,10 +217,13 @@ class RateTicker(ctk.CTkFrame):
                         prefix = ccy.lower()
                         bt = rec.get("buying_transfer")
                         sl = rec.get("selling")
-                        if bt is not None:
-                            results[f"{prefix}_buying"] = Decimal(str(bt))
-                        if sl is not None:
-                            results[f"{prefix}_selling"] = Decimal(str(sl))
+                        try:
+                            if bt is not None and str(bt).strip():
+                                results[f"{prefix}_buying"] = Decimal(str(bt))
+                            if sl is not None and str(sl).strip():
+                                results[f"{prefix}_selling"] = Decimal(str(sl))
+                        except Exception:
+                            logger.debug("Invalid rate value for %s: bt=%r sl=%r", ccy, bt, sl)
 
             return results if results else None
 
@@ -239,12 +262,16 @@ class RateTicker(ctk.CTkFrame):
         self.lbl_time.configure(text=datetime.now().strftime("%H:%M:%S"))
 
         # Make the LIVE dot blink slightly between updates
+        t = get_theme()
         current_color = self.lbl_live.cget("text_color")
-        self.lbl_live.configure(text_color="#ef4444" if current_color != "#ef4444" else "#dc2626")
+        self.lbl_live.configure(
+            text_color=t["ticker_live"] if current_color != t["ticker_live"] else t["ticker_live_alt"]
+        )
 
     def _format_single(self, rate: Optional[Decimal], trend_key: str) -> tuple:
+        t = get_theme()
         if rate is None:
-            return "--.--", "#64748B"
+            return "--.--", t["ticker_muted"]
 
         val_str = f"{float(rate):.4f}"
         prev = self._prev_rates.get(trend_key)
@@ -252,14 +279,18 @@ class RateTicker(ctk.CTkFrame):
 
         if prev is not None and curr is not None and prev != curr:
             if curr > prev:
-                return f"{val_str} ▲", "#22C55E"
+                return f"{val_str} ▲", t["ticker_up"]
             else:
-                return f"{val_str} ▼", "#EF4444"
-        return f"{val_str} ●", "#3B82F6"
+                return f"{val_str} ▼", t["ticker_down"]
+        return f"{val_str} ●", t["ticker_neutral"]
 
     def apply_theme(self, theme: dict) -> None:
         """Re-apply colors for dark/light mode transitions."""
-        text_primary = theme.get("header_text", "#FFFFFF")
-
-        self.lbl_usd_title.configure(text_color=text_primary)
-        self.lbl_eur_title.configure(text_color=text_primary)
+        self.lbl_usd_title.configure(text_color=theme.get("ticker_value", "#FFFFFF"))
+        self.lbl_eur_title.configure(text_color=theme.get("ticker_value", "#FFFFFF"))
+        self.lbl_usd_buy.configure(text_color=theme.get("ticker_label", "#94A3B8"))
+        self.lbl_usd_sell.configure(text_color=theme.get("ticker_label", "#94A3B8"))
+        self.lbl_eur_buy.configure(text_color=theme.get("ticker_label", "#94A3B8"))
+        self.lbl_eur_sell.configure(text_color=theme.get("ticker_label", "#94A3B8"))
+        self.lbl_live.configure(text_color=theme.get("ticker_live", "#ef4444"))
+        self.lbl_time.configure(text_color=theme.get("ticker_label", "#94A3B8"))

@@ -87,7 +87,7 @@ def show_exrate_dialog(app) -> None:
             row_frame, text=ccy, variable=var,
             font=ctk.CTkFont(size=13),
             text_color=t["text_primary"],
-            fg_color="#6366F1", hover_color="#4F46E5",
+            fg_color=t["accent_indigo"], hover_color=t["accent_indigo_hover"],
             width=120,
         ).pack(side="left", padx=4, pady=2)
 
@@ -116,7 +116,7 @@ def show_exrate_dialog(app) -> None:
             row_frame2, text=label, variable=var,
             font=ctk.CTkFont(size=13),
             text_color=t["text_primary"],
-            fg_color="#6366F1", hover_color="#4F46E5",
+            fg_color=t["accent_indigo"], hover_color=t["accent_indigo_hover"],
             width=180,
         ).pack(side="left", padx=4, pady=2)
 
@@ -149,7 +149,7 @@ def show_exrate_dialog(app) -> None:
         onvalue="manual", offvalue="auto",
         font=ctk.CTkFont(size=13),
         text_color=t["text_primary"],
-        progress_color="#6366F1",
+        progress_color=t["accent_indigo"],
         command=lambda: _toggle_date_mode(),
     ).pack(anchor="w", padx=12, pady=(8, 0))
 
@@ -229,26 +229,28 @@ def show_exrate_dialog(app) -> None:
             manual_frame.pack_forget()
             auto_label.pack(anchor="w", padx=12, pady=(2, 8))
 
+    # ── Validation error label (reused, not stacked) ────────────────────
+    _err_label = ctk.CTkLabel(
+        dialog, text="",
+        text_color=t["error_text"],
+        font=ctk.CTkFont(size=12),
+    )
+    _err_label.pack(pady=(0, 4))
+
     # ── Create Button ─────────────────────────────────────────────────
     def _on_create():
+        _err_label.configure(text="")  # clear previous error
+
         currencies = [c for c, v in cur_vars.items() if v.get()]
         rate_types = {
             lbl: EXRATE_RATE_TYPES[lbl]
             for lbl, v in rate_vars.items() if v.get()
         }
         if not currencies:
-            ctk.CTkLabel(
-                dialog, text="Select at least one currency",
-                text_color="#EF4444",
-                font=ctk.CTkFont(size=12),
-            ).pack(pady=(0, 4))
+            _err_label.configure(text="Select at least one currency")
             return
         if not rate_types:
-            ctk.CTkLabel(
-                dialog, text="Select at least one rate type",
-                text_color="#EF4444",
-                font=ctk.CTkFont(size=12),
-            ).pack(pady=(0, 4))
+            _err_label.configure(text="Select at least one rate type")
             return
 
         # Get date range
@@ -259,11 +261,7 @@ def show_exrate_dialog(app) -> None:
                 e_date = date(int(end_year.get()), int(end_month.get()),
                               int(end_day.get()))
             except ValueError:
-                ctk.CTkLabel(
-                    dialog, text="Invalid date entered",
-                    text_color="#EF4444",
-                    font=ctk.CTkFont(size=12),
-                ).pack(pady=(0, 4))
+                _err_label.configure(text="Invalid date entered")
                 return
             date_range = (s_date, e_date)
         else:
@@ -274,7 +272,7 @@ def show_exrate_dialog(app) -> None:
 
     ctk.CTkButton(
         dialog, text="Create ExRate File",
-        fg_color="#6366F1", hover_color="#4F46E5",
+        fg_color=t["accent_indigo"], hover_color=t["accent_indigo_hover"],
         font=ctk.CTkFont(size=14, weight="bold"),
         corner_radius=10, height=44,
         command=_on_create,
@@ -284,8 +282,15 @@ def show_exrate_dialog(app) -> None:
 def _create_exrate_file(app, currencies, rate_types, date_range=None):
     """Create a new standalone ExRate file — fully independent, pulls from BOT API.
 
+    Uses a callback interface to communicate with the parent window.
+    The `app` parameter is only used for:
+      - app.after() (thread-safe scheduling)
+      - app.event_bus (for LedgerEngine progress)
+    All UI updates go through callbacks registered on `app` via the
+    _get_ui_callbacks() helper.
+
     Args:
-        app: The BOTExrateApp instance for UI callbacks.
+        app: The BOTExrateApp instance for scheduling + event bus.
         currencies: List of currency codes.
         rate_types: Dict of {label: api_key}.
         date_range: Optional (start_date, end_date) tuple.
@@ -301,36 +306,54 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
     if not dest:
         return
 
-    # Disable button and start progress bar
-    app.btn_export_exrate.configure(state="disabled")
-    app.lbl_status.configure(
-        text="Creating ExRate file...", text_color=t["text_secondary"],
-    )
-    app.progressbar.configure(mode="indeterminate")
-    app.progressbar.start()
+    # ── Callback interface — decoupled from widget internals ─────────
+    def _set_export_button(state: str):
+        if hasattr(app, "btn_export_exrate"):
+            app.btn_export_exrate.configure(state=state)
+
+    def _set_status(text: str, color: str):
+        if hasattr(app, "lbl_status"):
+            app.lbl_status.configure(text=text, text_color=color)
+
+    def _set_progress(mode: str = "determinate", value: float = 0, running: bool = False):
+        if hasattr(app, "progressbar"):
+            if mode:
+                app.progressbar.configure(mode=mode)
+            if running:
+                app.progressbar.start()
+            else:
+                app.progressbar.stop()
+                app.progressbar.set(value)
+
+    def _on_complete(dest_path: str):
+        if hasattr(app, "last_processed_path"):
+            app.last_processed_path = dest_path
+        if hasattr(app, "btn_reveal"):
+            app.btn_reveal.pack(pady=(12, 14))
+
+    # ── Start: disable button + indeterminate progress ───────────────
+    _set_export_button("disabled")
+    _set_status("Creating ExRate file...", t["text_secondary"])
+    _set_progress("indeterminate", running=True)
     app.update_idletasks()
 
     def _status_cb(msg: str):
-        app.after(0, app.lbl_status.configure,
-                  {"text": msg, "text_color": t["text_secondary"]})
+        try:
+            app.after(0, _set_status, msg, t["text_secondary"])
+        except RuntimeError:
+            pass  # app destroyed during ExRate generation
 
     def _done(success: bool, message: str):
         """Main-thread callback to restore UI state."""
-        app.progressbar.stop()
-        app.progressbar.configure(mode="determinate")
+        _set_progress("determinate", value=1.0 if success else 0.0)
         if success:
-            app.progressbar.set(1)
-            app.lbl_status.configure(
-                text=message, text_color=t["success"],
-            )
-            app.last_processed_path = dest
-            app.btn_reveal.pack(pady=(12, 14))
+            _set_status(message, t["success"])
+            _on_complete(dest)
         else:
-            app.progressbar.set(0)
-            app.lbl_status.configure(
-                text=message, text_color=t["error_text"],
-            )
-        app.btn_export_exrate.configure(state="normal")
+            _set_status(message, t["error_text"])
+        _set_export_button("normal")
+
+    event_bus = getattr(app, "event_bus", None)
 
     def _worker():
         from openpyxl import Workbook
@@ -348,7 +371,7 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
             async def _run():
                 async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT) as client:
                     api = BOTClient(client)
-                    engine = LedgerEngine(api, event_bus=app.event_bus)
+                    engine = LedgerEngine(api, event_bus=event_bus)
                     return await engine.update_exrate_standalone(
                         dest,
                         progress_cb=_status_cb,
@@ -360,16 +383,26 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
             loop = asyncio.new_event_loop()
             try:
                 loop.run_until_complete(_run())
-                app.after(0, _done, True,
-                          f"✓ ExRate created: {os.path.basename(dest)}")
+                try:
+                    app.after(0, _done, True,
+                              f"✓ ExRate created: {os.path.basename(dest)}")
+                except RuntimeError:
+                    pass
             except (httpx.RequestError, httpx.HTTPStatusError,
                     OSError, ValueError) as e:
                 logger.error("ExRate standalone failed: %s", e)
-                app.after(0, _done, False, f"Failed: {e}")
+                try:
+                    app.after(0, _done, False, f"Failed: {e}")
+                except RuntimeError:
+                    pass
             finally:
                 loop.close()
         except (OSError, ValueError) as e:
             logger.error("ExRate file creation failed: %s", e)
-            app.after(0, _done, False, f"Failed: {e}")
+            try:
+                app.after(0, _done, False, f"Failed: {e}")
+            except RuntimeError:
+                pass
 
-    threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=_worker, daemon=True, name="ExRateWorker").start()
+

@@ -5,6 +5,7 @@ core/engine.py
 BOT Exchange Rate Processor — Cache-First Orchestrator
 ---------------------------------------------------------------------------
 Slim orchestrator. Heavy logic extracted to:
+  - core/excel_io.py → Excel I/O operations (formulas, indexing, writing)
   - core/exrate_sheet.py → Master ExRate sheet builder
   - core/prescan.py → Smart date pre-scanner
 """
@@ -23,8 +24,6 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import httpx
 import openpyxl
-from openpyxl.cell.cell import MergedCell
-from openpyxl.utils import get_column_letter
 
 from core.anomaly_guard import AnomalyGuard
 from core.api_client import CLIENT_TIMEOUT, BOTClient
@@ -35,9 +34,15 @@ from core.constants import (
     DEFAULT_ANOMALY_THRESHOLD_PCT,
     MAX_FILE_SIZE_MB,
     MIN_DISK_SPACE_MB,
-    PREFORMAT_BUFFER_ROWS,
 )
 from core.database import CacheDB
+from core.excel_io import (
+    build_exrate_index,
+    inject_xlookup_formulas,
+    scan_sheet_headers,
+    write_custom_exrate_data,
+    zero_touch_write,
+)
 from core.exrate_sheet import update_master_exrate_sheet
 from core.logic import BOTLogicEngine, safe_to_decimal
 from core.prescan import prescan_oldest_date
@@ -96,16 +101,24 @@ class LedgerEngine:
     MAX_FILE_SIZE_MB = MAX_FILE_SIZE_MB
     MAX_FILE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
-    def __init__(self, api_client: BOTClient, event_bus=None) -> None:
+    def __init__(
+        self,
+        api_client: BOTClient,
+        event_bus=None,
+        backup: Optional[BackupManager] = None,
+        cache: Optional[CacheDB] = None,
+    ) -> None:
         """Initialize the processing engine.
 
         Args:
             api_client: Authenticated BOT API client for rate data.
             event_bus: Optional event bus for GUI status updates.
+            backup: Optional BackupManager instance (defaults to singleton).
+            cache: Optional CacheDB instance (defaults to singleton).
         """
         self.api = api_client
-        self.backup = _get_backup()
-        self.cache = _get_cache()
+        self.backup = backup or _get_backup()
+        self.cache = cache or _get_cache()
         self._bus = event_bus
         self.target_cols = {
             "source_date": "Date",
@@ -182,26 +195,11 @@ class LedgerEngine:
 
 
 
-    # ── Zero-Touch Write (Global Formatting Protocol) ─────────────
+    # ── Zero-Touch Write (delegates to excel_io) ──────────────────
     @staticmethod
     def _zero_touch_write(ws, row: int, col: int, value) -> None:
-        """
-        Write a value to a monthly-tab cell WITHOUT touching formatting.
-
-        Zero-Touch Protocol: ONLY writes cell.value.
-        NEVER reads, copies, or re-applies font/fill/border/alignment.
-
-        In openpyxl, assigning cell.value does NOT alter the cell's
-        existing styles. Touching style attributes (even via .copy())
-        creates new style objects that can differ from the originals.
-
-        Silently skips MergedCell instances (read-only).
-        """
-        cell = ws.cell(row=row, column=col)
-        if isinstance(cell, MergedCell):
-            return
-        # Value-only write. Formatting is NEVER touched.
-        cell.value = value
+        """Write a value without touching formatting. Delegates to excel_io."""
+        zero_touch_write(ws, row, col, value)
 
     # ================================================================== #
     #  CACHE-FIRST DATA LOADING (v2.6.1)
@@ -498,6 +496,57 @@ class LedgerEngine:
 
         return all_target_dates
 
+    def _build_holiday_lookup(
+        self,
+        all_target_dates: Set[date],
+        computed_start: date,
+        logic_engine,
+    ) -> Tuple[Set[date], Dict[date, str]]:
+        """Build holiday sets and name mappings from cached holiday data.
+
+        Parses substitution holiday names (e.g., "Substitution for
+        Songkran Day (15th April 2025)") to map the original holiday
+        date as well.
+
+        Returns:
+            Tuple of (master_holidays_set, holidays_names dict).
+        """
+        sub_pattern = re.compile(r'^Substitution for (.*)\\((.*?)\\)$')
+        holidays_names: Dict[date, str] = {}
+        master_holidays_set = set(logic_engine.holidays)
+
+        for year in {
+            d.year
+            for d in (all_target_dates | {computed_start, date.today()})
+        }:
+            cached_hols = self.cache.get_holidays(year)
+            for h_str, h_name in cached_hols:
+                try:
+                    h_obj = datetime.strptime(h_str, "%Y-%m-%d").date()
+                    holidays_names[h_obj] = h_name
+                    m = sub_pattern.search(h_name)
+                    if m:
+                        real_name = m.group(1).strip()
+                        date_str = m.group(2).strip()
+                        date_str_clean = re.sub(
+                            r'(\d+)(st|nd|rd|th)', r'\1', date_str
+                        )
+                        date_str_clean = re.sub(
+                            r'^[A-Za-z]+\s+', '', date_str_clean
+                        )
+                        try:
+                            real_dt = datetime.strptime(
+                                date_str_clean, '%d %B %Y'
+                            ).date()
+                            holidays_names[real_dt] = real_name
+                            master_holidays_set.add(real_dt)
+                        except (ValueError, TypeError):
+                            pass
+                except (ValueError, TypeError):
+                    pass
+
+        return master_holidays_set, holidays_names
+
     # ================================================================== #
     #  PROCESS SINGLE LEDGER
     # ================================================================== #
@@ -570,42 +619,8 @@ class LedgerEngine:
             raise
 
         try:
-            # Re-scan sheets for the openpyxl path (uses full workbook, not read-only)
-            sheet_maps = {}
-            for sheet_name in wb.sheetnames:
-                if sheet_name in SKIP_SHEET_NAMES:
-                    continue
-                ws = wb[sheet_name]
-                header_row_idx = None
-                col_indices_local: Dict[str, int] = {}
-                for row_idx, row in enumerate(
-                    ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
-                ):
-                    row_strs = [
-                        str(c).strip() if c is not None else "" for c in row
-                    ]
-                    if self.target_cols["source_date"] in row_strs:
-                        header_row_idx = row_idx
-                        for ci, val in enumerate(row_strs):
-                            if val == self.target_cols["source_date"]:
-                                col_indices_local["source"] = ci
-                            elif val == self.target_cols["currency"]:
-                                col_indices_local["currency"] = ci
-                            elif val == self.target_cols["out_rate"]:
-                                col_indices_local["out_rate"] = ci
-                        break
-
-                if header_row_idx is None or "source" not in col_indices_local:
-                    logger.info(
-                        "Sheet '%s' missing source date column — skipped.",
-                        sheet_name,
-                    )
-                    continue
-
-                sheet_maps[sheet_name] = {
-                    "header_row": header_row_idx,
-                    "columns": col_indices_local,
-                }
+            # Scan monthly tabs for header/column mappings
+            sheet_maps = scan_sheet_headers(wb, self.target_cols)
 
             # ── STEP 1: Build ExRate master sheet ────────────────────────
             update_master_exrate_sheet(
@@ -614,193 +629,20 @@ class LedgerEngine:
             )
 
             # ── STEP 2: Build in-memory ExRate lookup index ──────────────
-            exrate_index: Dict[date, dict] = {}
-            if "ExRate" in wb.sheetnames:
-                ws_exrate = wb["ExRate"]
-                for row_idx in range(2, (ws_exrate.max_row or 1) + 1):
-                    cell_val = ws_exrate.cell(row=row_idx, column=1).value
-                    row_date = None
-                    if isinstance(cell_val, datetime):
-                        row_date = cell_val.date()
-                    elif isinstance(cell_val, date):
-                        row_date = cell_val
-                    if row_date:
-                        exrate_index[row_date] = {
-                            "usd_buying": ws_exrate.cell(
-                                row=row_idx, column=2
-                            ).value,
-                            "usd_selling": ws_exrate.cell(
-                                row=row_idx, column=3
-                            ).value,
-                            "eur_buying": ws_exrate.cell(
-                                row=row_idx, column=4
-                            ).value,
-                            "eur_selling": ws_exrate.cell(
-                                row=row_idx, column=5
-                            ).value,
-                        }
+            build_exrate_index(wb)
 
-            # ── STEP 3: Cross-Tab Lookup — Write formulas into monthly tabs ──
-            #
-            # Writes a SINGLE IFS formula per row to the "EX Rate" column
-            # that dynamically checks the Cur column for the currency.
-            #
-            # This means:
-            #   - Formula can be dragged down without breaking
-            #   - Currency is checked inside the formula via IFS()
-            #   - THB → 1, USD → ExRate col B, EUR → ExRate col D
-            #
-            # CRITICAL: Date Normalization
-            # Monthly tab dates may be stored as TEXT STRINGS (e.g.,
-            # "10/03/2025") which lookups cannot match against the
-            # DATE SERIAL NUMBERS in ExRate. We normalize by writing
-            # the parsed date object back to the cell.
-            #
-            # Formula strategy (exact match):
-            #   XLOOKUP match_mode 0 = exact match
-            #
-            # ExRate layout (data starts at row 2, sorted ascending):
-            #   A=Date, B=USD Buy, C=USD Sell, D=EUR Buy, E=EUR Sell
-
-            # Determine ExRate data boundaries for bounded formula ranges
-            exrate_last_row = 2  # minimum
+            # ── STEP 3: Inject XLOOKUP formulas into monthly tabs ────────
+            exrate_last_row = 2
             if "ExRate" in wb.sheetnames:
                 ws_ex = wb["ExRate"]
                 exrate_last_row = max(ws_ex.max_row or 2, 2)
 
-            for sheet_name, mapping in sheet_maps.items():
-                ws = wb[sheet_name]
-                cols = mapping["columns"]
-                src_idx = cols["source"] + 1
-                cur_idx = cols.get("currency")
-                out_rate_idx = cols.get("out_rate")
-                if out_rate_idx is None or cur_idx is None:
-                    continue
-                out_col = out_rate_idx + 1  # 1-indexed
-                cur_col = cur_idx + 1       # 1-indexed
-
-                # Column letters for cell references in formulas
-                date_letter = get_column_letter(src_idx)
-                cur_letter = get_column_letter(cur_col)
-                N = exrate_last_row  # last data row in ExRate
-
-                skipped = 0
-                written = 0
-                overwritten = 0
-                for row_idx in range(
-                    mapping["header_row"] + 1, ws.max_row + 1
-                ):
-                    src_cell = ws.cell(row=row_idx, column=src_idx)
-                    out_cell = ws.cell(row=row_idx, column=out_col)
-
-                    # Skip merged cells — they are read-only
-                    if isinstance(src_cell, MergedCell):
-                        continue
-                    if isinstance(out_cell, MergedCell):
-                        continue
-
-                    # ── Date Normalization ─────────────────────────
-                    # Ensure dates are proper date objects so XLOOKUP
-                    # can match the date serial in ExRate.
-                    #
-                    # v3.1.2: Respect the user's existing date format.
-                    # If the cell already has a custom date-type format
-                    # (e.g. "dd/mm/yyyy", "d mmm yyyy"), keep it.
-                    # Only apply the default "dd mmm yyyy" when the
-                    # cell has no date format (General, @, or text).
-                    inv_date = self._parse_date(src_cell.value)
-                    if inv_date:
-                        existing_fmt = src_cell.number_format or "General"
-                        src_cell.value = inv_date
-                        # Preserve user-set date formats; apply default
-                        # only for generic/text cells
-                        if existing_fmt in (
-                            "General", "@", "0", "general",
-                        ):
-                            src_cell.number_format = "dd mmm yyyy"
-                        else:
-                            src_cell.number_format = existing_fmt
-
-
-                    # ── Build the expected XLOOKUP formula ─────────
-                    # Uses relative refs for Cur & Date (row-dynamic
-                    # so drag-down works per-row), absolute refs for
-                    # ExRate ranges.
-                    #
-                    # Formula is ALWAYS built — even for empty rows —
-                    # so it serves as a drag-down placeholder.
-                    # When neither Cur nor Date exist, the IFS formula
-                    # gracefully returns "" (no #N/A errors).
-                    #
-                    # Logic:
-                    #   THB → 1
-                    #   USD → XLOOKUP Date → ExRate!B (USD Buying TT)
-                    #   EUR → XLOOKUP Date → ExRate!D (EUR Buying TT)
-                    #   Other/blank → ""
-                    date_ref = f"{date_letter}{row_idx}"
-                    cur_ref = f"{cur_letter}{row_idx}"
-
-                    formula = (
-                        f"=IF(OR({cur_ref}=\"\",{date_ref}=\"\"),\"\","
-                        f"_xlfn.IFS("
-                        f"{cur_ref}=\"THB\",1,"
-                        f"{cur_ref}=\"USD\","
-                        f"IFERROR(_xlfn.XLOOKUP({date_ref},"
-                        f"ExRate!$A$2:$A${N},"
-                        f"ExRate!$B$2:$B${N},\"\",0),\"\"),"
-                        f"{cur_ref}=\"EUR\","
-                        f"IFERROR(_xlfn.XLOOKUP({date_ref},"
-                        f"ExRate!$A$2:$A${N},"
-                        f"ExRate!$D$2:$D${N},\"\",0),\"\"),"
-                        f"TRUE,\"\"))"
-                    )
-
-                    # ── Skip-if-identical: exact formula match ─────
-                    # Only skip if the cell already contains the EXACT
-                    # same formula. Any old/different formula gets
-                    # overwritten to ensure correctness.
-                    existing_val = out_cell.value
-                    if (
-                        isinstance(existing_val, str)
-                        and existing_val == formula
-                    ):
-                        skipped += 1
-                        continue
-
-                    # Track if we're replacing an old formula
-                    if existing_val is not None:
-                        if isinstance(existing_val, str) and existing_val.startswith("="):
-                            overwritten += 1
-
-                    self._zero_touch_write(ws, row_idx, out_col, formula)
-                    written += 1
-
-                if skipped or overwritten or written:
-                    logger.info(
-                        "Sheet '%s': %d identical (skipped), "
-                        "%d old formulas replaced, %d new written",
-                        sheet_name, skipped, overwritten,
-                        written - overwritten,
-                    )
-                    if dry_run:
-                        self._emit(
-                            f"[SIM] {sheet_name}: Would inject {written} formulas "
-                            f"(replaced {overwritten}) and normalize {written} dates"
-                        )
-                    else:
-                        self._emit(
-                            f"{sheet_name}: {skipped} skipped, "
-                            f"{overwritten} replaced, "
-                            f"{written - overwritten} new"
-                        )
-
-                # ── Pre-format Date column for manual entry ───────────
-                # Apply "DD/MM/YYYY" to a small buffer zone below data
-                max_preformat = ws.max_row + PREFORMAT_BUFFER_ROWS
-                for r in range(mapping["header_row"] + 1, max_preformat + 1):
-                    cell = ws.cell(row=r, column=src_idx)
-                    if not isinstance(cell, MergedCell):
-                        cell.number_format = "DD/MM/YYYY"
+            inject_xlookup_formulas(
+                wb, sheet_maps, exrate_last_row,
+                parse_date_fn=self._parse_date,
+                emit_fn=self._emit,
+                dry_run=dry_run,
+            )
 
             # ── Save & Cleanup ───────────────────────────────────────────
             if dry_run:
@@ -922,7 +764,7 @@ class LedgerEngine:
         """
 
 
-        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
 
         # ── Defaults ──────────────────────────────────────────────────
         if not currencies:
@@ -1112,90 +954,10 @@ class LedgerEngine:
         ws = wb["ExRate"]
         _status("Writing custom ExRate data...")
 
-        # Styles
-        header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-        header_fill = PatternFill(
-            start_color="1A365D", end_color="1A365D", fill_type="solid"
+        write_custom_exrate_data(
+            ws, rate_data, col_specs, headers,
+            all_dates, holidays_set, holidays_names_map,
         )
-        header_align = Alignment(horizontal="center", vertical="center")
-        data_font = Font(name="Calibri", size=10)
-        date_align = Alignment(horizontal="center")
-        thin_border = Border(
-            left=Side(style="thin"), right=Side(style="thin"),
-            top=Side(style="thin"), bottom=Side(style="thin"),
-        )
-        holiday_fill = PatternFill(
-            start_color="FFF3CD", end_color="FFF3CD", fill_type="solid",
-        )
-        weekend_fill = PatternFill(
-            start_color="E8E8E8", end_color="E8E8E8", fill_type="solid",
-        )
-
-        # Clear existing content
-        for row_idx in range(1, max(ws.max_row or 1, 1) + 1):
-            for col_idx in range(1, max(ws.max_column or 1, 1) + 1):
-                ws.cell(row=row_idx, column=col_idx).value = None
-
-        # Write headers
-        for col_idx, h in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col_idx, value=h)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = header_align
-            cell.border = thin_border
-
-        # Set column widths
-        ws.column_dimensions["A"].width = 14
-        for i in range(len(col_specs)):
-            col_letter = openpyxl.utils.get_column_letter(i + 2)
-            ws.column_dimensions[col_letter].width = 18
-        last_col_letter = openpyxl.utils.get_column_letter(len(headers))
-        ws.column_dimensions[last_col_letter].width = 40
-
-        # Write data rows
-        for row_offset, d in enumerate(all_dates):
-            row_idx = row_offset + 2
-            is_weekend = d.weekday() >= 5
-            is_holiday = d in holidays_set
-
-            # Date
-            cell_date = ws.cell(row=row_idx, column=1, value=d)
-            cell_date.number_format = "DD/MM/YYYY"
-            cell_date.font = data_font
-            cell_date.alignment = date_align
-            cell_date.border = thin_border
-
-            # Rate columns
-            for col_offset, (ccy, api_field) in enumerate(col_specs):
-                val = rate_data.get(ccy, {}).get(api_field, {}).get(d)
-                cell = ws.cell(row=row_idx, column=col_offset + 2, value=val)
-                cell.number_format = "0.0000"
-                cell.font = data_font
-                cell.border = thin_border
-
-            # Holiday/Weekend label
-            if is_weekend and is_holiday:
-                label = f"Weekend; {holidays_names_map.get(d, 'Holiday')}"
-            elif is_weekend:
-                label = "Weekend"
-            elif is_holiday:
-                label = holidays_names_map.get(d, "Holiday")
-            else:
-                label = ""
-
-            cell_label = ws.cell(
-                row=row_idx, column=len(headers), value=label,
-            )
-            cell_label.font = data_font
-            cell_label.border = thin_border
-
-            # Row fill
-            if is_holiday:
-                for ci in range(1, len(headers) + 1):
-                    ws.cell(row=row_idx, column=ci).fill = holiday_fill
-            elif is_weekend:
-                for ci in range(1, len(headers) + 1):
-                    ws.cell(row=row_idx, column=ci).fill = weekend_fill
 
         wb.save(filepath)
         wb.close()

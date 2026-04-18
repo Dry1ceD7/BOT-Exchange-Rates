@@ -155,3 +155,91 @@ class TestBOTClient:
 
         holidays = asyncio.run(bot_client.get_holidays(2025))
         assert holidays == []
+
+    def test_fetch_json_handles_429(self, bot_client, mock_http_client):
+        """429 responses are retried with escalating backoff."""
+        rate_limited = MagicMock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {"Retry-After": "0"}
+        rate_limited.raise_for_status = MagicMock()
+
+        success_resp = MagicMock()
+        success_resp.status_code = 200
+        success_resp.json.return_value = {
+            "result": {
+                "data": [
+                    {"Date": "2025-04-14", "HolidayDescription": "Songkran"},
+                ]
+            }
+        }
+
+        # First call 429, second call success
+        mock_http_client.get = AsyncMock(
+            side_effect=[rate_limited, success_resp]
+        )
+
+        holidays = asyncio.run(bot_client.get_holidays(2025))
+        assert len(holidays) == 1
+        assert holidays[0].description == "Songkran"
+
+    def test_fetch_json_returns_empty_on_404(self, bot_client, mock_http_client):
+        """404 responses return empty dict without raising."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.raise_for_status = MagicMock()
+        mock_http_client.get = AsyncMock(return_value=mock_resp)
+
+        holidays = asyncio.run(bot_client.get_holidays(2025))
+        assert holidays == []
+
+    def test_schema_validation_error_raises(self, bot_client, mock_http_client):
+        """Invalid API payload raises BOTAPIError with schema info."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "result": {
+                "data": {
+                    "data_detail": [
+                        {
+                            # Missing required "period" field
+                            "currency_id": "USD",
+                        }
+                    ]
+                }
+            }
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_http_client.get = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(BOTAPIError, match="Schema mismatch"):
+            asyncio.run(bot_client.get_exchange_rates(
+                date(2025, 3, 10), date(2025, 3, 10), "USD"
+            ))
+
+    def test_multi_chunk_pagination(self, bot_client, mock_http_client):
+        """Date ranges > 30 days are split into multiple API chunks."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "result": {
+                "data": {
+                    "data_detail": [
+                        {
+                            "period": "2025-01-15",
+                            "currency_id": "USD",
+                            "buying_transfer": 33.0,
+                        }
+                    ]
+                }
+            }
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_http_client.get = AsyncMock(return_value=mock_resp)
+
+        # 62-day range → should produce 2 API calls (Jan1-Jan31, Feb1-Mar3)
+        rates = asyncio.run(bot_client.get_exchange_rates(
+            date(2025, 1, 1), date(2025, 3, 3), "USD"
+        ))
+
+        assert mock_http_client.get.call_count == 2
+        assert len(rates) == 2  # 1 result per chunk * 2 chunks

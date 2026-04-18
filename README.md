@@ -4,11 +4,11 @@
 
 **Enterprise Desktop Application for Bank of Thailand Exchange Rate Automation**
 
-Version 3.2.5  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
+Version 3.2.6  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-156%20Passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-230%20Passed-brightgreen)](tests/)
 
 ---
 
@@ -19,6 +19,16 @@ Version 3.2.5  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Rele
 The **BOT Exchange Rate Processor** is a standalone desktop application that automates the extraction, resolution, and embedding of official Bank of Thailand (BOT) exchange rates into financial accounting ledgers (`.xlsx`).
 
 It replaces a fragmented, error-prone multi-script workflow with a single, production-grade GUI application — built for **zero-downtime corporate environments**, legacy office hardware (4GB RAM, low-resolution monitors), and strict Thai accounting compliance.
+
+### What's New in V3.2.6 (Enterprise UI Stabilization)
+
+| Feature | Description |
+|---------|-------------|
+| **macOS Tkinter Engine Upgrade** | Included `run.sh` to seamlessly launch via Python 3.12 (Tk 8.6+). This entirely eliminates custom UI blank-screen failures on macOS. |
+| **Theme Hardening** | Removed ALL hardcoded hexadecimal colors; now completely powered by dynamic theme tokens via `theme.py` ensuring flawless Dark/Light OS transitions. |
+| **Thread & Concurrency Safety** | Total coverage with `_safe_after()` guards securing UI modifications on background tasks (e.g. rate ticking, banners) from teardown sequence crashes. |
+| **Python 3.9+ Universal Syntax** | Removed PEP 604 (`X | None`) to fully support Python 3.9 production environments without compromising type definitions by adapting standard `Optional[X]`. |
+| **Robust Application Stability** | Defensive programming against malformed API returns (`decimal.InvalidOperation`) added; PIL/Pillow dynamically loaded handling icon processing safely. |
 
 ### What's New in V3.1.0 (Enterprise Feature Expansion)
 

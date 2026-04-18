@@ -128,3 +128,28 @@ class TestAnomalyGuardBulk:
         anomalies = guard.check_rates_bulk(rates)
         assert len(anomalies) == 1
         assert anomalies[0].currency == "EUR"
+
+    def test_bulk_ignores_malformed_keys(self):
+        """Keys without underscore separator are silently skipped."""
+        guard = AnomalyGuard(threshold_pct=5.0)
+        rates = {
+            "MALFORMED": {
+                date(2025, 1, 2): Decimal("100"),
+                date(2025, 1, 3): Decimal("200"),
+            },
+        }
+        anomalies = guard.check_rates_bulk(rates)
+        assert len(anomalies) == 0
+
+    def test_bulk_skips_none_values(self):
+        """None values in the series are skipped — prev stays unchanged."""
+        guard = AnomalyGuard(threshold_pct=5.0)
+        rates = {
+            "USD_selling": {
+                date(2025, 1, 2): Decimal("33.00"),
+                date(2025, 1, 3): None,
+                date(2025, 1, 6): Decimal("33.10"),  # compared to 33.00
+            },
+        }
+        anomalies = guard.check_rates_bulk(rates)
+        assert len(anomalies) == 0

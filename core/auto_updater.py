@@ -256,7 +256,7 @@ def _verify_file_sha256(filepath: str, expected_hash: str) -> bool:
         for chunk in iter(lambda: f.read(65536), b""):
             sha256.update(chunk)
     actual = sha256.hexdigest().lower()
-    if actual != expected_hash:
+    if actual != expected_hash.lower():
         logger.error(
             "Checksum mismatch! Expected %s, got %s", expected_hash, actual
         )
@@ -416,6 +416,16 @@ def apply_update(
             bat_path = os.path.join(
                 tempfile.gettempdir(), "bot_exrate_updater.bat"
             )
+
+            # H-02: Validate paths — reject shell metacharacters
+            _UNSAFE_CHARS = set('&|<>^%!')
+            for _path in (new_exe_path, install_dir, current_exe):
+                if _UNSAFE_CHARS.intersection(_path):
+                    result["error"] = (
+                        f"Unsafe characters in path: {_path}"
+                    )
+                    return result
+
             with open(bat_path, "w") as f:
                 f.write("@echo off\n")
                 # Wait 3s for app to exit fully
@@ -440,12 +450,13 @@ def apply_update(
                     close_fds=True,
                 )
             else:
+                import shlex
                 subprocess.Popen(
                     [
                         "sh", "-c",
-                        f"sleep 3 && '{new_exe_path}' /VERYSILENT "
-                        f"/DIR='{install_dir}' && "
-                        f"open '{current_exe}'",
+                        f"sleep 3 && {shlex.quote(new_exe_path)} /VERYSILENT "
+                        f"/DIR={shlex.quote(install_dir)} && "
+                        f"open {shlex.quote(current_exe)}",
                     ],
                     start_new_session=True,
                 )

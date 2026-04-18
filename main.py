@@ -16,6 +16,7 @@ import os
 import sys
 import traceback
 import types
+from typing import Optional
 
 # Explicitly insert current directory to Python Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -223,7 +224,7 @@ def _run_headless(args: argparse.Namespace) -> None:
             api = BOTClient(client)
             engine = LedgerEngine(api)
 
-            def progress_cb(idx: int, total: int, fname: str, error: str | None) -> None:
+            def progress_cb(idx: int, total: int, fname: str, error: Optional[str]) -> None:
                 if error:
                     print(f"  [{idx}/{total}] {fname} — SKIPPED: {error}")
                 else:
@@ -256,7 +257,7 @@ def _run_headless(args: argparse.Namespace) -> None:
 def global_exception_handler(
     exc_type: type,
     exc_value: BaseException,
-    exc_traceback: types.TracebackType | None,
+    exc_traceback: Optional[types.TracebackType],
 ) -> None:
     """
     Fallback handler to catch fatal errors when running without a console.

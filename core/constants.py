@@ -16,6 +16,9 @@ import os
 MAX_FILE_SIZE_MB: int = int(os.environ.get("BOT_MAX_FILE_MB", "50"))
 """Maximum allowed Excel file size in megabytes."""
 
+SUPPORTED_EXCEL_EXTENSIONS: tuple = (".xlsx", ".xlsm")
+"""File extensions accepted for processing."""
+
 PREFORMAT_BUFFER_ROWS: int = 50
 """Number of rows below data to pre-format with DD/MM/YYYY."""
 
@@ -36,9 +39,6 @@ API_CONNECT_TIMEOUT_SECONDS: float = 10.0
 """Default httpx connect timeout."""
 
 # ── IPC ──────────────────────────────────────────────────────────────────
-IPC_PORT: int = int(os.environ.get("BOT_IPC_PORT", "45654"))
-"""Localhost port for single-instance IPC socket."""
-
 IPC_NONCE_LENGTH: int = 32
 """Length of hex nonce for IPC authentication."""
 

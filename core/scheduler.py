@@ -16,12 +16,16 @@ import threading
 from datetime import datetime
 from typing import Callable, List, Optional
 
-from core.constants import POLL_INTERVAL_SECONDS as _DEFAULT_POLL_INTERVAL
+from core.constants import (
+    POLL_INTERVAL_SECONDS as _DEFAULT_POLL_INTERVAL,
+)
+from core.constants import (
+    SUPPORTED_EXCEL_EXTENSIONS,
+)
 
 logger = logging.getLogger(__name__)
 
-# Supported Excel extensions (same as gui/app.py)
-EXCEL_EXTENSIONS = (".xlsx", ".xlsm")
+
 
 
 class AutoScheduler:
@@ -193,7 +197,7 @@ class AutoScheduler:
             for fname in sorted(os.listdir(path)):
                 if fname.startswith("."):
                     continue
-                if fname.lower().endswith(EXCEL_EXTENSIONS):
+                if fname.lower().endswith(SUPPORTED_EXCEL_EXTENSIONS):
                     full = os.path.join(path, fname)
                     norm = os.path.normpath(full)
                     if norm not in seen:

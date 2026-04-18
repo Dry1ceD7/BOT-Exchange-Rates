@@ -151,9 +151,15 @@ class BatchHandler:
             backup_used = backup_mgr.restore_latest(filepath)
             backup_name = os.path.basename(backup_used)
             self.bus.push({"type": "success", "msg": f"Reverted from: {backup_name}"})
-            self.app.after(
-                0, self.app._show_revert_success, filepath, backup_name,
-            )
+            try:
+                self.app.after(
+                    0, self.app._show_revert_success, filepath, backup_name,
+                )
+            except RuntimeError:
+                logger.debug("App already destroyed during revert success callback")
         except (BackupError, OSError, ValueError) as e:
             self.bus.push({"type": "error", "msg": f"Revert failed: {e}"})
-            self.app.after(0, self.app._show_revert_error, str(e))
+            try:
+                self.app.after(0, self.app._show_revert_error, str(e))
+            except RuntimeError:
+                logger.debug("App already destroyed during revert error callback")

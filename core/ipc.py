@@ -141,10 +141,21 @@ class SingleInstanceServer:
                 # allowing the loop to check self._running periodically.
                 # Listener.poll() does NOT exist — it's a Connection method.
                 if sys.platform != "win32":
-                    sock = self._listener._listener._socket
-                    readable, _, _ = select.select([sock], [], [], 1.0)
-                    if not readable:
-                        continue
+                    try:
+                        # NOTE: _listener._listener._socket is an
+                        # undocumented internal of multiprocessing.
+                        # Wrapped in try/except for cross-version safety.
+                        sock = self._listener._listener._socket
+                        readable, _, _ = select.select([sock], [], [], 1.0)
+                        if not readable:
+                            continue
+                    except AttributeError:
+                        # Fallback: brief sleep to avoid hot-looping,
+                        # accept() below will block until a connection.
+                        import time
+                        time.sleep(1.0)
+                        if not self._running:
+                            break
                 # On Windows named pipes, select() doesn't work.
                 # We rely on the short timeout from Client side and
                 # the daemon thread flag to stop on shutdown.
