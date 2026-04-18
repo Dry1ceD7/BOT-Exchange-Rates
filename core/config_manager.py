@@ -58,10 +58,14 @@ class SettingsManager:
                 return dict(self._cache)
         return self._load_from_disk()
 
-    def _load_from_disk(self) -> Dict[str, Any]:
-        """Read settings from disk and update cache."""
+    def _load_from_disk(self, force: bool = False) -> Dict[str, Any]:
+        """Read settings from disk and update cache.
+
+        Args:
+            force: When True, bypasses cache and always reads from disk.
+        """
         with self._lock:
-            if self._cache is not None:
+            if not force and self._cache is not None:
                 return dict(self._cache)
             if not os.path.exists(self._filepath):
                 self._cache = dict(DEFAULT_SETTINGS)
@@ -86,24 +90,39 @@ class SettingsManager:
         """Force re-read from disk, bypassing cache."""
         with self._lock:
             self._cache = None
-        return self._load_from_disk()
+        return self._load_from_disk(force=True)
 
     def save(self, settings: Dict[str, Any]) -> None:
         """Persist settings to disk and update cache."""
         os.makedirs(self._config_dir, exist_ok=True)
         merged = dict(DEFAULT_SETTINGS)
         merged.update(settings)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=self._config_dir,
-            prefix="settings.",
-            suffix=".tmp",
-            delete=False,
-        ) as tmp:
-            json.dump(merged, tmp, indent=2, ensure_ascii=False)
-            tmp_path = tmp.name
-        os.replace(tmp_path, self._filepath)
+        tmp_path: Optional[str] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self._config_dir,
+                prefix="settings.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp:
+                json.dump(merged, tmp, indent=2, ensure_ascii=False)
+                tmp_path = tmp.name
+            os.replace(tmp_path, self._filepath)
+        except OSError:
+            try:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+        finally:
+            try:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
         with self._lock:
             self._cache = merged
 

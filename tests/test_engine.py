@@ -9,6 +9,7 @@ Uses mocked API client and temporary files.
 
 import asyncio
 from datetime import date, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import openpyxl
@@ -221,13 +222,10 @@ class TestBatchAndHolidayLookup:
             lambda year: [substitution_entry] if year == 2025 else [],
         )
 
-        class _Logic:
-            holidays = []
-
         holidays_set, holidays_names = engine._build_holiday_lookup(
             all_target_dates={date(2025, 4, 16)},
             computed_start=date(2024, 12, 30),
-            logic_engine=_Logic(),
+            logic_engine=SimpleNamespace(holidays=[]),
         )
 
         assert date(2025, 4, 16) in holidays_names
@@ -237,7 +235,7 @@ class TestBatchAndHolidayLookup:
     def test_process_batch_tracks_anomaly_totals(self, engine, monkeypatch):
         async def _fake_process_ledger(*args, **kwargs):
             engine._last_anomaly_count = 2
-            return "/tmp/fake.xlsx"
+            return "fake.xlsx"
 
         monkeypatch.setattr(engine, "process_ledger", _fake_process_ledger)
         success, failed, errors = asyncio.run(

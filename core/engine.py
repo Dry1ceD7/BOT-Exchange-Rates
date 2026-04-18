@@ -522,7 +522,8 @@ class LedgerEngine:
         Returns:
             Tuple of (master_holidays_set, holidays_names dict).
         """
-        sub_pattern = re.compile(r"^Substitution for (.*)\((.*?)\)$")
+        # Expected BOT format: "Substitution for Songkran Day (15th April 2025)"
+        sub_pattern = re.compile(r"^Substitution for ([^(]+)\s*\((.*?)\)$")
         holidays_names: Dict[date, str] = {}
         master_holidays_set = set(logic_engine.holidays)
 
