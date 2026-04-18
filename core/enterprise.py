@@ -21,6 +21,7 @@ import os
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 import httpx
 import openpyxl
@@ -197,9 +198,11 @@ async def fetch_fallback_rates(
     end_date: date,
     currency: str,
     client: httpx.AsyncClient,
+    base_url: str = "https://api.frankfurter.app",
 ) -> List[FallbackRateRecord]:
     """Fetch fallback FX rates from Frankfurter and map to BOT-like fields."""
-    url = f"https://api.frankfurter.app/{start_date.isoformat()}..{end_date.isoformat()}"
+    base = base_url.rstrip("/")
+    url = f"{base}/{start_date.isoformat()}..{end_date.isoformat()}"
     params = {"from": currency.upper(), "to": "THB"}
     resp = await client.get(url, params=params, timeout=20.0)
     resp.raise_for_status()
@@ -234,6 +237,14 @@ async def fetch_fallback_rates(
 def send_webhook_notification(webhook_url: str, payload: dict) -> bool:
     """Send a simple JSON webhook notification."""
     if not webhook_url:
+        return False
+    try:
+        parsed = urlparse(webhook_url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            logger.warning("Rejected non-HTTPS or invalid webhook URL")
+            return False
+    except ValueError:
+        logger.warning("Rejected malformed webhook URL")
         return False
     try:
         resp = httpx.post(webhook_url, json=payload, timeout=5.0)

@@ -36,6 +36,10 @@ from core.constants import (
     MIN_DISK_SPACE_MB,
 )
 from core.database import CacheDB
+from core.enterprise import (
+    fetch_fallback_rates,
+    load_holiday_overlays,
+)
 from core.excel_io import (
     build_exrate_index,
     inject_xlookup_formulas,
@@ -44,10 +48,6 @@ from core.excel_io import (
     zero_touch_write,
 )
 from core.exrate_sheet import update_master_exrate_sheet
-from core.enterprise import (
-    fetch_fallback_rates,
-    load_holiday_overlays,
-)
 from core.logic import BOTLogicEngine, safe_to_decimal
 from core.prescan import prescan_oldest_date
 
@@ -336,10 +336,17 @@ class LedgerEngine:
                     etype="warning",
                 )
                 logger.warning("BOT API fetch failed, fallback enabled: %s", api_error)
+                fallback_base = str(
+                    settings.get("fx_fallback_base_url", "https://api.frankfurter.app")
+                ).strip() or "https://api.frankfurter.app"
                 async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT) as fb_client:
                     usd_data, eur_data = await asyncio.gather(
-                        fetch_fallback_rates(fetch_start, fetch_end, "USD", fb_client),
-                        fetch_fallback_rates(fetch_start, fetch_end, "EUR", fb_client),
+                        fetch_fallback_rates(
+                            fetch_start, fetch_end, "USD", fb_client, base_url=fallback_base
+                        ),
+                        fetch_fallback_rates(
+                            fetch_start, fetch_end, "EUR", fb_client, base_url=fallback_base
+                        ),
                     )
 
             rate_cache = {}

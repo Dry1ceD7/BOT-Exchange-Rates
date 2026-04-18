@@ -39,6 +39,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # v3.3.0: Validation + external data
     "holiday_overlay_path": "",
     "enable_fx_fallback": True,
+    "fx_fallback_base_url": "https://api.frankfurter.app",
     # v3.3.0: Notifications and reporting
     "notification_enabled": False,
     "notification_webhook_url": "",

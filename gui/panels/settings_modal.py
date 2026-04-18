@@ -12,11 +12,11 @@ SFFB: Strict < 200 lines.  (Previously 731 → now ~130)
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
+from tkinter import filedialog, messagebox
 from typing import Optional
 
 import customtkinter as ctk
-from tkinter import filedialog, messagebox
 
 from core.config_manager import SettingsManager
 from core.enterprise import load_job_history_stats, mask_secret
@@ -370,7 +370,15 @@ class SettingsModal(ctk.CTkToplevel):
         )
         self.wait_window(dialog)
         if getattr(dialog, "activated", False):
-            self._settings["token_last_rotated"] = datetime.now().strftime("%Y-%m-%d")
+            now = datetime.now()
+            self._settings["token_last_rotated"] = now.strftime("%Y-%m-%d")
+            try:
+                rot_days = max(1, int(self._token_rotation_var.get().strip()))
+            except (TypeError, ValueError):
+                rot_days = int(self._settings.get("token_rotation_days", 90))
+            self._settings["token_expiry_date"] = (
+                now + timedelta(days=rot_days)
+            ).strftime("%Y-%m-%d")
 
     def _save_and_close(self):
         selected_profile = self._profile_var.get().strip() or "default"
@@ -393,11 +401,24 @@ class SettingsModal(ctk.CTkToplevel):
         self._settings["notification_enabled"] = self._notify_enabled_var.get() == "on"
         self._settings["notification_webhook_url"] = self._webhook_var.get().strip()
         try:
-            self._settings["token_rotation_days"] = max(
-                1, int(self._token_rotation_var.get().strip())
-            )
+            rot_days = max(1, int(self._token_rotation_var.get().strip()))
+            self._settings["token_rotation_days"] = rot_days
         except (TypeError, ValueError):
-            self._settings["token_rotation_days"] = 90
+            rot_days = 90
+            self._settings["token_rotation_days"] = rot_days
+            messagebox.showwarning(
+                "Invalid Rotation Days",
+                "Token rotation days must be a number. Defaulted to 90 days.",
+            )
+        last_rot = self._settings.get("token_last_rotated", "")
+        if last_rot:
+            try:
+                last_dt = datetime.strptime(last_rot, "%Y-%m-%d")
+                self._settings["token_expiry_date"] = (
+                    last_dt + timedelta(days=rot_days)
+                ).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
         self._mgr.save(self._settings)
         self.destroy()
 
