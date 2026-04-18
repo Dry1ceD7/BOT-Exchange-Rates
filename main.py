@@ -238,7 +238,7 @@ def _run_headless(args: argparse.Namespace) -> None:
             total_files=len(files),
             success=success,
             failed=fail,
-            anomalies_detected=0,
+            anomalies_detected=engine.last_batch_anomaly_count,
         )
         audit_path = audit.finalize()
 
@@ -287,7 +287,9 @@ def global_exception_handler(
         pass
 
     # Layer 2: Write to local error.log
-    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "error.log")
+    log_dir = os.path.join(get_project_root(), "data", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, "error.log")
     try:
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"\n--- FATAL ERROR ---\n{error_msg}\n")
@@ -310,4 +312,3 @@ sys.excepthook = global_exception_handler
 
 if __name__ == "__main__":
     main()
-

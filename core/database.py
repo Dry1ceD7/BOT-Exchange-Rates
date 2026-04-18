@@ -26,7 +26,7 @@ class CacheDB:
     Persists to data/cache.db. Tables are auto-created on init.
     """
 
-    def __init__(self, db_path: str = None) -> None:
+    def __init__(self, db_path: Optional[str] = None) -> None:
         """Initialize the SQLite cache.
 
         Args:

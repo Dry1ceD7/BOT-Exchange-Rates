@@ -9,7 +9,6 @@ V2.6.1: Updated to 4-column rate schema (usd_buying, usd_selling,
 """
 
 import os
-import tempfile
 import threading
 from datetime import date
 from decimal import Decimal
@@ -20,9 +19,9 @@ from core.database import CacheDB
 
 
 @pytest.fixture
-def db():
+def db(tmp_path):
     """Creates a temporary CacheDB instance for each test."""
-    tmp = tempfile.mktemp(suffix=".db")
+    tmp = str(tmp_path / "cache.db")
     cache = CacheDB(db_path=tmp)
     yield cache
     cache.close()
