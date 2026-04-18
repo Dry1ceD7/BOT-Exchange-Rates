@@ -7,6 +7,7 @@ Uses mocked API client and temporary files.
 ---------------------------------------------------------------------------
 """
 
+import asyncio
 from datetime import date, datetime
 from unittest.mock import AsyncMock
 
@@ -197,3 +198,50 @@ class TestSkipSheetNames:
     def test_normal_month_not_skipped(self):
         assert "January" not in SKIP_SHEET_NAMES
         assert "Jan" not in SKIP_SHEET_NAMES
+
+
+class TestBatchAndHolidayLookup:
+    """Tests for batch-level error handling and holiday substitution parsing."""
+
+    def test_process_batch_skips_oversized_file(self, engine, oversized_file):
+        success, failed, errors = asyncio.run(engine.process_batch([oversized_file]))
+        assert success == 0
+        assert failed == 1
+        assert len(errors) == 1
+        assert "File too large" in errors[0]
+
+    def test_build_holiday_lookup_parses_substitution_holiday(self, engine, monkeypatch):
+        substitution_entry = (
+            "2025-04-16",
+            "Substitution for Songkran Day (15th April 2025)",
+        )
+        monkeypatch.setattr(
+            engine.cache,
+            "get_holidays",
+            lambda year: [substitution_entry] if year == 2025 else [],
+        )
+
+        class _Logic:
+            holidays = []
+
+        holidays_set, holidays_names = engine._build_holiday_lookup(
+            all_target_dates={date(2025, 4, 16)},
+            computed_start=date(2024, 12, 30),
+            logic_engine=_Logic(),
+        )
+
+        assert date(2025, 4, 16) in holidays_names
+        assert date(2025, 4, 15) in holidays_set
+        assert holidays_names[date(2025, 4, 15)] == "Songkran Day"
+
+    def test_process_batch_tracks_anomaly_totals(self, engine, monkeypatch):
+        async def _fake_process_ledger(*args, **kwargs):
+            engine._last_anomaly_count = 2
+            return "/tmp/fake.xlsx"
+
+        monkeypatch.setattr(engine, "process_ledger", _fake_process_ledger)
+        success, failed, errors = asyncio.run(
+            engine.process_batch(["a.xlsx", "b.xlsx"], dry_run=True)
+        )
+        assert (success, failed, errors) == (2, 0, [])
+        assert engine.last_batch_anomaly_count == 4

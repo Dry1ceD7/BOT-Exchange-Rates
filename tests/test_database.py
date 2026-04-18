@@ -22,7 +22,8 @@ from core.database import CacheDB
 @pytest.fixture
 def db():
     """Creates a temporary CacheDB instance for each test."""
-    tmp = tempfile.mktemp(suffix=".db")
+    fd, tmp = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
     cache = CacheDB(db_path=tmp)
     yield cache
     cache.close()

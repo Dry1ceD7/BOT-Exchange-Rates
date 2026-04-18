@@ -22,11 +22,10 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-import httpx
 import openpyxl
 
 from core.anomaly_guard import AnomalyGuard
-from core.api_client import CLIENT_TIMEOUT, BOTClient
+from core.api_client import BOTClient
 from core.backup_manager import BackupError, BackupManager
 from core.config_manager import SettingsManager
 from core.constants import (
@@ -131,11 +130,23 @@ class LedgerEngine:
             "anomaly_threshold_pct", DEFAULT_ANOMALY_THRESHOLD_PCT
         )
         self._anomaly_guard = AnomalyGuard(threshold_pct=threshold)
+        self._last_anomaly_count = 0
+        self._last_batch_anomaly_count = 0
 
     def _emit(self, msg: str, etype: str = "log") -> None:
         """Push event to EventBus if one is attached."""
         if self._bus is not None:
             self._bus.push({"type": etype, "msg": msg})
+
+    @property
+    def last_anomaly_count(self) -> int:
+        """Return anomaly count from the most recent file run."""
+        return self._last_anomaly_count
+
+    @property
+    def last_batch_anomaly_count(self) -> int:
+        """Return anomaly count from the most recent batch run."""
+        return self._last_batch_anomaly_count
 
     def _check_memory_guardrail(self, filepath: str):
         if not os.path.exists(filepath):
@@ -511,7 +522,7 @@ class LedgerEngine:
         Returns:
             Tuple of (master_holidays_set, holidays_names dict).
         """
-        sub_pattern = re.compile(r'^Substitution for (.*)\\((.*?)\\)$')
+        sub_pattern = re.compile(r"^Substitution for (.*)\((.*?)\)$")
         holidays_names: Dict[date, str] = {}
         master_holidays_set = set(logic_engine.holidays)
 
@@ -559,6 +570,7 @@ class LedgerEngine:
         """Process a single ledger file end-to-end."""
 
         filepath = os.path.abspath(filepath)
+        self._last_anomaly_count = 0
 
         self._check_memory_guardrail(filepath)
         self._emit("Size check passed")
@@ -571,6 +583,7 @@ class LedgerEngine:
         # ── Standalone ExRate detection + format validation ─────────────
         standalone_result = await self._detect_standalone_exrate(filepath)
         if standalone_result is not None:
+            self._last_anomaly_count = 0
             return standalone_result
 
         # ── Pre-scan dates for API data loading ──────────────────────
@@ -593,6 +606,7 @@ class LedgerEngine:
         anomaly_count = self._run_anomaly_check(
             usd_buying, usd_selling, eur_buying, eur_selling,
         )
+        self._last_anomaly_count = anomaly_count
         if anomaly_count:
             self._emit(
                 f"⚠ {anomaly_count} anomalous rate(s) detected — check audit log",
@@ -699,6 +713,7 @@ class LedgerEngine:
             self.backup.cleanup_old_backups(max_age_days=BACKUP_MAX_AGE_DAYS)
         total = len(filepaths)
         success = 0
+        anomaly_total = 0
         errors: List[str] = []
 
         for idx, fp in enumerate(filepaths):
@@ -708,11 +723,18 @@ class LedgerEngine:
                     fp, start_date=start_date, dry_run=dry_run,
                 )
                 success += 1
+                anomaly_total += self.last_anomaly_count
                 if progress_cb:
                     progress_cb(idx + 1, total, fname, None)
             except BackupError as e:
                 err_msg = f"{fname}: BACKUP FAILED — skipped ({e})"
                 errors.append(err_msg)
+                if progress_cb:
+                    progress_cb(idx + 1, total, fname, str(e))
+            except FileSizeLimitError as e:
+                err_msg = f"{fname}: {e!s}"
+                errors.append(err_msg)
+                logger.error("File SKIPPED: %s", err_msg)
                 if progress_cb:
                     progress_cb(idx + 1, total, fname, str(e))
             except (OSError, ValueError, KeyError,
@@ -726,6 +748,7 @@ class LedgerEngine:
                 if progress_cb:
                     progress_cb(idx + 1, total, fname, str(e))
 
+        self._last_batch_anomaly_count = anomaly_total
         return success, total - success, errors
 
     # ================================================================== #
@@ -831,39 +854,9 @@ class LedgerEngine:
                 target_year, logic_engine.holidays
             )
 
-            sub_pattern = re.compile(r'^Substitution for (.*)\\((.*?)\\)$')
-            holidays_names: Dict[date, str] = {}
-            master_holidays_set = set(logic_engine.holidays)
-
-            for year in {
-                d.year
-                for d in (all_target_dates | {computed_start, date.today()})
-            }:
-                cached_hols = self.cache.get_holidays(year)
-                for h_str, h_name in cached_hols:
-                    try:
-                        h_obj = datetime.strptime(h_str, "%Y-%m-%d").date()
-                        holidays_names[h_obj] = h_name
-                        m = sub_pattern.search(h_name)
-                        if m:
-                            real_name = m.group(1).strip()
-                            date_str = m.group(2).strip()
-                            date_str_clean = re.sub(
-                                r'(\d+)(st|nd|rd|th)', r'\1', date_str
-                            )
-                            date_str_clean = re.sub(
-                                r'^[A-Za-z]+\s+', '', date_str_clean
-                            )
-                            try:
-                                real_dt = datetime.strptime(
-                                    date_str_clean, '%d %B %Y'
-                                ).date()
-                                holidays_names[real_dt] = real_name
-                                master_holidays_set.add(real_dt)
-                            except (ValueError, TypeError):
-                                pass
-                    except (ValueError, TypeError):
-                        pass
+            master_holidays_set, holidays_names = self._build_holiday_lookup(
+                all_target_dates, computed_start, logic_engine
+            )
 
             _status("Writing exchange rate data...")
             update_master_exrate_sheet(
@@ -889,31 +882,26 @@ class LedgerEngine:
         # rate_data[currency][api_field][date] = value
         rate_data: Dict[str, Dict[str, Dict[date, float]]] = {}
 
-        async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT) as http:
-            from core.api_client import BOTClient
+        for ccy in currencies:
+            _status(f"Fetching {ccy} rates...")
+            raw_results = await self.api.get_exchange_rates(
+                start_dt, end_dt, ccy,
+            )
+            rate_data[ccy] = {}
+            for label, api_field in rate_types.items():
+                rate_data[ccy][api_field] = {}
 
-            client = BOTClient(http)
-
-            for ccy in currencies:
-                _status(f"Fetching {ccy} rates...")
-                raw_results = await client.get_exchange_rates(
-                    start_dt, end_dt, ccy,
-                )
-                rate_data[ccy] = {}
+            for rec in raw_results:
+                try:
+                    rec_date = datetime.strptime(
+                        rec.period, "%Y-%m-%d"
+                    ).date()
+                except (ValueError, TypeError):
+                    continue
                 for label, api_field in rate_types.items():
-                    rate_data[ccy][api_field] = {}
-
-                for rec in raw_results:
-                    try:
-                        rec_date = datetime.strptime(
-                            rec.period, "%Y-%m-%d"
-                        ).date()
-                    except (ValueError, TypeError):
-                        continue
-                    for label, api_field in rate_types.items():
-                        val = getattr(rec, api_field, None)
-                        if val is not None:
-                            rate_data[ccy][api_field][rec_date] = val
+                    val = getattr(rec, api_field, None)
+                    if val is not None:
+                        rate_data[ccy][api_field][rec_date] = val
 
         # Fetch holidays
         _status("Fetching holidays...")

@@ -13,6 +13,7 @@ v3.2.2: In-memory caching to avoid re-reading disk on every get() call.
 import json
 import logging
 import os
+import tempfile
 import threading
 from typing import Any, Dict, Optional
 
@@ -59,27 +60,27 @@ class SettingsManager:
 
     def _load_from_disk(self) -> Dict[str, Any]:
         """Read settings from disk and update cache."""
-        if not os.path.exists(self._filepath):
-            with self._lock:
+        with self._lock:
+            if self._cache is not None:
+                return dict(self._cache)
+            if not os.path.exists(self._filepath):
                 self._cache = dict(DEFAULT_SETTINGS)
-            return dict(DEFAULT_SETTINGS)
-        try:
-            with open(self._filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            # Merge with defaults to fill any missing keys
-            merged = dict(DEFAULT_SETTINGS)
-            merged.update(data)
-            with self._lock:
+                return dict(DEFAULT_SETTINGS)
+            try:
+                with open(self._filepath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                # Merge with defaults to fill any missing keys
+                merged = dict(DEFAULT_SETTINGS)
+                merged.update(data)
                 self._cache = merged
-            return dict(merged)
-        except (json.JSONDecodeError, OSError, TypeError) as e:
-            logger.warning(
-                "Settings file corrupt or unreadable (%s). Using defaults.",
-                e,
-            )
-            with self._lock:
+                return dict(merged)
+            except (json.JSONDecodeError, OSError, TypeError) as e:
+                logger.warning(
+                    "Settings file corrupt or unreadable (%s). Using defaults.",
+                    e,
+                )
                 self._cache = dict(DEFAULT_SETTINGS)
-            return dict(DEFAULT_SETTINGS)
+                return dict(DEFAULT_SETTINGS)
 
     def reload(self) -> Dict[str, Any]:
         """Force re-read from disk, bypassing cache."""
@@ -92,8 +93,17 @@ class SettingsManager:
         os.makedirs(self._config_dir, exist_ok=True)
         merged = dict(DEFAULT_SETTINGS)
         merged.update(settings)
-        with open(self._filepath, "w", encoding="utf-8") as f:
-            json.dump(merged, f, indent=2, ensure_ascii=False)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=self._config_dir,
+            prefix="settings.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            json.dump(merged, tmp, indent=2, ensure_ascii=False)
+            tmp_path = tmp.name
+        os.replace(tmp_path, self._filepath)
         with self._lock:
             self._cache = merged
 
