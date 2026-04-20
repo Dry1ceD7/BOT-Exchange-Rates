@@ -102,6 +102,10 @@ jobs:
             --hidden-import openpyxl \
             --hidden-import httpx \
             --hidden-import pydantic \
+            --exclude-module mcp \
+            --exclude-module mcp.server \
+            --exclude-module fastmcp \
+            --exclude-module pydantic_ai.mcp \
             main.py
 
       # ── Windows: Inno Setup Installer ─────────────────────────────────
