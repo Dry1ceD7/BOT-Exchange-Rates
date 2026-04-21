@@ -4,7 +4,7 @@
 
 **Enterprise Desktop Application for Bank of Thailand Exchange Rate Automation**
 
-Version 3.2.7  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
+Version 3.2.8  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
@@ -20,7 +20,7 @@ The **BOT Exchange Rate Processor** is a standalone desktop application that aut
 
 It replaces a fragmented, error-prone multi-script workflow with a single, production-grade GUI application — built for **zero-downtime corporate environments**, legacy office hardware (4GB RAM, low-resolution monitors), and strict Thai accounting compliance.
 
-### What's New in V3.2.7 (Enterprise UI Stabilization & Core Architecture)
+### What's New in V3.2.8 (Enterprise UI Stabilization & Core Architecture)
 - **MCP Build Warnings Resolved**: Fully suppressed PyInstaller warnings related to missing Model Context Protocol (MCP) telemetry modules (`mcp`, `fastmcp`, `mcp.server`, `pydantic_ai.mcp`) triggered by Sentry SDK integrations, ensuring a cleaner, production-ready build output.
 
 | Feature | Description |
