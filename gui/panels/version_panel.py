@@ -327,6 +327,10 @@ class VersionPanel(ctk.CTkFrame):
     # ── Download + Apply ─────────────────────────────────────────────
     def _download_in_app(self, version: str):
         """Download the update installer (does NOT run it yet)."""
+        if self._busy_download:
+            return
+        self._busy_download = True
+
         from core.auto_updater import download_update, get_installer_asset_url
 
         t = self._t
@@ -384,6 +388,7 @@ class VersionPanel(ctk.CTkFrame):
 
     def _dl_done(self, text: str, color: str, success: bool,
                  installer_path: str = None):
+        self._busy_download = False
         self._lbl_update.configure(text=text, text_color=color)
         if success:
             self._btn_update.configure(state="disabled", text="Updated ✓")

@@ -20,15 +20,20 @@ The **BOT Exchange Rate Processor** is a standalone desktop application that aut
 
 It replaces a fragmented, error-prone multi-script workflow with a single, production-grade GUI application — built for **zero-downtime corporate environments**, legacy office hardware (4GB RAM, low-resolution monitors), and strict Thai accounting compliance.
 
-### What's New in V3.2.7 (Enterprise UI Stabilization)
+### What's New in V3.2.7 (Enterprise UI Stabilization & Core Architecture)
 - **MCP Build Warnings Resolved**: Fully suppressed PyInstaller warnings related to missing Model Context Protocol (MCP) telemetry modules (`mcp`, `fastmcp`, `mcp.server`, `pydantic_ai.mcp`) triggered by Sentry SDK integrations, ensuring a cleaner, production-ready build output.
 
 | Feature | Description |
 |---------|-------------|
+| **Rate Type Persistence** | Fixed formula injection to dynamically map XLOOKUP columns based on the user's Buying/Selling/Mid rate preference. |
+| **Multi-Currency Architecture** | Upgraded formula generation with dynamic `IFS` branching to safely support `GBP`, `JPY`, and `CNY` currencies. |
+| **Batch Start Date Accuracy** | Fixed prescan pipeline bug; `process_ledger` now correctly honors user-provided start dates instead of falling back to year-end defaults. |
+| **Download Concurrency Guard** | Hardened the auto-updater version panel with a strict `_busy_download` mutex to prevent installer corruption on rapid double-clicks. |
+| **Anomaly UI Consistency** | Added explicit `warning` styling in `LiveConsolePanel`, preventing anomaly alerts from rendering as plain `[---]`. |
 | **macOS Tkinter Engine Upgrade** | Included `run.sh` to seamlessly launch via Python 3.12 (Tk 8.6+). This entirely eliminates custom UI blank-screen failures on macOS. |
 | **Theme Hardening** | Removed ALL hardcoded hexadecimal colors; now completely powered by dynamic theme tokens via `theme.py` ensuring flawless Dark/Light OS transitions. |
 | **Thread & Concurrency Safety** | Total coverage with `_safe_after()` guards securing UI modifications on background tasks (e.g. rate ticking, banners) from teardown sequence crashes. |
-| **Python 3.9+ Universal Syntax** | Removed PEP 604 (`X | None`) to fully support Python 3.9 production environments without compromising type definitions by adapting standard `Optional[X]`. |
+| **Python 3.9+ Universal Syntax** | Removed PEP 604 (`X \| None`) to fully support Python 3.9 production environments without compromising type definitions by adapting standard `Optional[X]`. |
 | **Robust Application Stability** | Defensive programming against malformed API returns (`decimal.InvalidOperation`) added; PIL/Pillow dynamically loaded handling icon processing safely. |
 
 ### What's New in V3.1.0 (Enterprise Feature Expansion)

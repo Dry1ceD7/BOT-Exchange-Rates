@@ -15,8 +15,8 @@ from unittest.mock import AsyncMock
 import openpyxl
 import pytest
 
+from core.constants import SKIP_SHEET_NAMES
 from core.engine import (
-    SKIP_SHEET_NAMES,
     FileSizeLimitError,
     LedgerEngine,
 )

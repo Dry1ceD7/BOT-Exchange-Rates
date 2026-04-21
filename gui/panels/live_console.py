@@ -87,6 +87,7 @@ class LiveConsolePanel(ctk.CTkFrame):
         tb.tag_configure("success", foreground=t["console_success"])
         tb.tag_configure("accent",  foreground=t["console_accent"])
         tb.tag_configure("log",     foreground=t["console_text"])
+        tb.tag_configure("warning", foreground=t.get("warning", "#F59E0B"))
 
     @property
     def event_bus(self) -> EventBus:
@@ -145,6 +146,7 @@ class LiveConsolePanel(ctk.CTkFrame):
                     "progress": ("[...]", "accent"),
                     "error":    ("[ERR]", "error"),
                     "success":  ("[OK ]", "success"),
+                    "warning":  ("[WRN]", "warning"),
                 }
                 prefix, tag = prefix_map.get(etype, ("[---]", "log"))
                 tb.insert("end", f"{prefix}  {msg}\n", tag)

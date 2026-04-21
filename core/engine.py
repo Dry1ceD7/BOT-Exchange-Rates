@@ -33,6 +33,7 @@ from core.constants import (
     DEFAULT_ANOMALY_THRESHOLD_PCT,
     MAX_FILE_SIZE_MB,
     MIN_DISK_SPACE_MB,
+    SKIP_SHEET_NAMES,
 )
 from core.database import CacheDB
 from core.excel_io import (
@@ -84,11 +85,6 @@ def _get_cache() -> CacheDB:
                 atexit.register(_cache_singleton.close)
     return _cache_singleton
 
-
-# Sheets that are reference/master and should NOT be processed as ledgers.
-# "Exrate USD" / "Exrate EUR" are pre-existing rate tabs in older workbooks;
-# they lack the standard Date/Cur/EX Rate header and must be skipped.
-SKIP_SHEET_NAMES = {"ExRate", "Exrate USD", "Exrate EUR"}
 
 
 # -------------------------------------------------------------------------
@@ -595,7 +591,8 @@ class LedgerEngine:
             min(all_target_dates).year if all_target_dates
             else date.today().year
         )
-        start_date = f"{target_year - 1}-12-20"
+        if start_date is None:
+            start_date = f"{target_year - 1}-12-20"
 
         self._emit("Loading exchange rates and holidays")
         (
@@ -652,11 +649,19 @@ class LedgerEngine:
                 ws_ex = wb["ExRate"]
                 exrate_last_row = max(ws_ex.max_row or 2, 2)
 
+            # Load user's rate type preference from settings
+            from core.config_manager import SettingsManager
+            _settings = SettingsManager()
+            rate_type_setting = _settings.load().get(
+                "rate_type", "buying_transfer"
+            )
+
             inject_xlookup_formulas(
                 wb, sheet_maps, exrate_last_row,
                 parse_date_fn=self._parse_date,
                 emit_fn=self._emit,
                 dry_run=dry_run,
+                rate_type=rate_type_setting,
             )
 
             # ── Save & Cleanup ───────────────────────────────────────────

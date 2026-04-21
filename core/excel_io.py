@@ -23,14 +23,9 @@ from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from core.constants import PREFORMAT_BUFFER_ROWS
+from core.constants import PREFORMAT_BUFFER_ROWS, SKIP_SHEET_NAMES
 
 logger = logging.getLogger(__name__)
-
-# Sheets to skip during processing (ExRate is handled separately).
-# "Exrate USD" / "Exrate EUR" are pre-existing rate tabs in older workbooks;
-# they lack the standard Date/Cur/EX Rate header and must be skipped.
-SKIP_SHEET_NAMES = {"ExRate", "Exrate USD", "Exrate EUR"}
 
 
 def zero_touch_write(ws, row: int, col: int, value) -> None:
@@ -150,6 +145,8 @@ def inject_xlookup_formulas(
     emit_fn: Optional[Callable[[str], None]] = None,
     dry_run: bool = False,
     buffer_rows: int = PREFORMAT_BUFFER_ROWS,
+    rate_type: str = "buying_transfer",
+    exrate_col_map: Optional[Dict[str, str]] = None,
 ) -> None:
     """
     Inject XLOOKUP formulas into monthly tabs.
@@ -160,7 +157,9 @@ def inject_xlookup_formulas(
     This means:
       - Formula can be dragged down without breaking
       - Currency is checked inside the formula via IFS()
-      - THB → 1, USD → ExRate col B, EUR → ExRate col D
+      - THB → 1, USD → ExRate col (varies by rate_type),
+        EUR → ExRate col (varies by rate_type)
+      - Additional currencies (GBP/JPY/CNY) via exrate_col_map
 
     CRITICAL: Date Normalization
     Monthly tab dates may be stored as TEXT STRINGS (e.g.,
@@ -176,8 +175,24 @@ def inject_xlookup_formulas(
         emit_fn: Optional status callback.
         dry_run: If True, don't write; just report what would change.
         buffer_rows: Number of rows below data to pre-format.
+        rate_type: API field name for the selected rate type
+            ("buying_transfer", "selling", "buying_sight", "mid_rate").
+            Determines which ExRate columns are referenced.
+        exrate_col_map: Optional dict mapping currency code → ExRate
+            column letter for additional currencies beyond USD/EUR.
     """
     N = exrate_last_row
+
+    # ── Map rate_type → ExRate column letters for USD and EUR ─────
+    # ExRate layout: A=Date, B=USD Buying, C=USD Selling,
+    #                D=EUR Buying, E=EUR Selling, F=Holidays
+    if rate_type == "selling":
+        usd_col = "C"
+        eur_col = "E"
+    else:
+        # "buying_transfer", "buying_sight", "mid_rate" → buying columns
+        usd_col = "B"
+        eur_col = "D"
 
     for sheet_name, mapping in sheet_maps.items():
         ws = wb[sheet_name]
@@ -225,18 +240,36 @@ def inject_xlookup_formulas(
             date_ref = f"{date_letter}{row_idx}"
             cur_ref = f"{cur_letter}{row_idx}"
 
-            formula = (
-                f"=IF(OR({cur_ref}=\"\",{date_ref}=\"\"),\"\","
-                f"_xlfn.IFS("
+            # Core IFS branches: THB, USD, EUR
+            ifs_branches = (
                 f"{cur_ref}=\"THB\",1,"
                 f"{cur_ref}=\"USD\","
                 f"IFERROR(_xlfn.XLOOKUP({date_ref},"
                 f"ExRate!$A$2:$A${N},"
-                f"ExRate!$B$2:$B${N},\"\",0),\"\"),"
+                f"ExRate!${usd_col}$2:${usd_col}${N},\"\",0),\"\"),"
                 f"{cur_ref}=\"EUR\","
                 f"IFERROR(_xlfn.XLOOKUP({date_ref},"
                 f"ExRate!$A$2:$A${N},"
-                f"ExRate!$D$2:$D${N},\"\",0),\"\"),"
+                f"ExRate!${eur_col}$2:${eur_col}${N},\"\",0),\"\")"
+            )
+
+            # Additional currency branches from exrate_col_map
+            if exrate_col_map:
+                for ccy, col_letter in exrate_col_map.items():
+                    if ccy in ("USD", "EUR", "THB"):
+                        continue  # already handled above
+                    ifs_branches += (
+                        f",{cur_ref}=\"{ccy}\","
+                        f"IFERROR(_xlfn.XLOOKUP({date_ref},"
+                        f"ExRate!$A$2:$A${N},"
+                        f"ExRate!${col_letter}$2:${col_letter}${N},"
+                        f"\"\",0),\"\")"
+                    )
+
+            formula = (
+                f"=IF(OR({cur_ref}=\"\",{date_ref}=\"\"),\"\","
+                f"_xlfn.IFS("
+                f"{ifs_branches},"
                 f"TRUE,\"\"))"
             )
 

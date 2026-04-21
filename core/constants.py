@@ -22,6 +22,11 @@ SUPPORTED_EXCEL_EXTENSIONS: tuple = (".xlsx", ".xlsm")
 PREFORMAT_BUFFER_ROWS: int = 50
 """Number of rows below data to pre-format with DD/MM/YYYY."""
 
+SKIP_SHEET_NAMES: frozenset = frozenset({"ExRate", "Exrate USD", "Exrate EUR"})
+"""Sheets that are reference/master and should NOT be processed as ledgers.
+"Exrate USD" / "Exrate EUR" are pre-existing rate tabs in older workbooks;
+they lack the standard Date/Cur/EX Rate header and must be skipped."""
+
 BACKUP_MAX_AGE_DAYS: int = int(os.environ.get("BOT_BACKUP_AGE_DAYS", "7"))
 """Auto-cleanup backups older than this many days."""
 
