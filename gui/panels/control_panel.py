@@ -15,7 +15,7 @@ SFFB: Strict < 200 lines.
 
 import logging
 import os
-from typing import Callable, List, Optional
+from collections.abc import Callable
 
 import customtkinter as ctk
 
@@ -41,9 +41,9 @@ class ControlPanel(ctk.CTkFrame):
     def __init__(
         self,
         master,
-        on_process: Optional[Callable] = None,
-        on_revert: Optional[Callable] = None,
-        on_files_selected: Optional[Callable] = None,
+        on_process: Callable | None = None,
+        on_revert: Callable | None = None,
+        on_files_selected: Callable | None = None,
         **kwargs,
     ):
         super().__init__(master, fg_color="transparent", **kwargs)
@@ -51,7 +51,7 @@ class ControlPanel(ctk.CTkFrame):
         self._on_process = on_process
         self._on_revert = on_revert
         self._on_files_selected = on_files_selected
-        self.file_queue: List[str] = []
+        self.file_queue: list[str] = []
 
         self._build_drop_zone()
         self._build_buttons()
@@ -118,7 +118,7 @@ class ControlPanel(ctk.CTkFrame):
         )
         self.btn_revert.pack(side="left")
 
-    def set_queue(self, files: List[str]) -> None:
+    def set_queue(self, files: list[str]) -> None:
         """Update the file queue and UI labels."""
         t = get_theme()
         self.file_queue = files

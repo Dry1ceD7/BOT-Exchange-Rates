@@ -15,7 +15,8 @@ from decimal import Decimal
 
 import pytest
 
-from core.database import CacheDB
+import core.database as database
+from core.database import CacheDB, get_cache
 
 
 @pytest.fixture
@@ -363,3 +364,63 @@ class TestSchemaMigration:
         cache2 = CacheDB(db_path=tmp)
         assert cache2.get_rate(date(2025, 1, 2))["usd_buying"] == Decimal("33.5")
         cache2.close()
+
+
+# =========================================================================
+#  PUBLIC SINGLETON ACCESSOR: get_cache()
+# =========================================================================
+
+class TestGetCache:
+    """core.database.get_cache() is the public process-singleton accessor."""
+
+    @pytest.fixture
+    def reset_singleton(self, tmp_path, monkeypatch):
+        """Point the singleton at a temp DB and reset it before/after."""
+        tmp_db = str(tmp_path / "singleton_cache.db")
+
+        def _factory():
+            return CacheDB(db_path=tmp_db)
+
+        monkeypatch.setattr(database, "CacheDB", _factory)
+        # Ensure a clean slate so each test builds its own instance.
+        monkeypatch.setattr(database, "_cache_singleton", None)
+        yield
+        existing = getattr(database, "_cache_singleton", None)
+        if existing is not None:
+            existing.close()
+            database._cache_singleton = None
+
+    def test_returns_cachedb_instance(self, reset_singleton):
+        cache = get_cache()
+        assert isinstance(cache, CacheDB)
+
+    def test_returns_same_singleton(self, reset_singleton):
+        first = get_cache()
+        second = get_cache()
+        assert first is second
+
+    def test_singleton_is_usable(self, reset_singleton):
+        cache = get_cache()
+        cache.insert_rate(
+            date(2025, 7, 1), usd_buying=33.0, usd_selling=33.1
+        )
+        row = get_cache().get_rate(date(2025, 7, 1))
+        assert row["usd_buying"] == Decimal("33.0")
+
+    def test_thread_safe_singleton(self, reset_singleton):
+        """Concurrent first-callers all get the same instance."""
+        instances = []
+        barrier = threading.Barrier(5)
+
+        def grab():
+            barrier.wait()
+            instances.append(get_cache())
+
+        threads = [threading.Thread(target=grab) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(instances) == 5
+        assert all(inst is instances[0] for inst in instances)

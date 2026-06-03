@@ -11,14 +11,13 @@ SFFB: < 60 lines.
 """
 
 import os
-from typing import List, Optional
 
 import customtkinter as ctk
 
 from gui.theme import get_theme
 
 
-def choose_path_to_remove(parent, paths: List[str]) -> Optional[int]:
+def choose_path_to_remove(parent, paths: list[str]) -> int | None:
     """
     Show a modal with radio buttons for each path.
     Returns the index of the selected path, or None if cancelled.

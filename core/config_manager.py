@@ -15,11 +15,11 @@ import logging
 import os
 import tempfile
 import threading
-from typing import Any, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SETTINGS: Dict[str, Any] = {
+DEFAULT_SETTINGS: dict[str, Any] = {
     "appearance": "system",
     "auto_update": True,
     "output_directory": "",
@@ -41,24 +41,24 @@ SETTINGS_FILENAME = "settings.json"
 class SettingsManager:
     """Load, save, and manage persistent user settings with in-memory cache."""
 
-    def __init__(self, config_dir: Optional[str] = None):
+    def __init__(self, config_dir: str | None = None):
         if config_dir is None:
             from core.paths import get_project_root
             project_root = get_project_root()
             config_dir = os.path.join(project_root, "data")
         self._config_dir = config_dir
         self._filepath = os.path.join(config_dir, SETTINGS_FILENAME)
-        self._cache: Optional[Dict[str, Any]] = None
+        self._cache: dict[str, Any] | None = None
         self._lock = threading.Lock()
 
-    def load(self) -> Dict[str, Any]:
+    def load(self) -> dict[str, Any]:
         """Load settings from disk (cached after first read). Returns defaults on any error."""
         with self._lock:
             if self._cache is not None:
                 return dict(self._cache)
         return self._load_from_disk()
 
-    def _load_from_disk(self, force: bool = False) -> Dict[str, Any]:
+    def _load_from_disk(self, force: bool = False) -> dict[str, Any]:
         """Read settings from disk and update cache.
 
         Args:
@@ -71,7 +71,7 @@ class SettingsManager:
                 self._cache = dict(DEFAULT_SETTINGS)
                 return dict(DEFAULT_SETTINGS)
             try:
-                with open(self._filepath, "r", encoding="utf-8") as f:
+                with open(self._filepath, encoding="utf-8") as f:
                     data = json.load(f)
                 # Merge with defaults to fill any missing keys
                 merged = dict(DEFAULT_SETTINGS)
@@ -86,23 +86,23 @@ class SettingsManager:
                 self._cache = dict(DEFAULT_SETTINGS)
                 return dict(DEFAULT_SETTINGS)
 
-    def reload(self) -> Dict[str, Any]:
+    def reload(self) -> dict[str, Any]:
         """Force re-read from disk, bypassing cache."""
         with self._lock:
             self._cache = None
         return self._load_from_disk(force=True)
 
-    def save(self, settings: Dict[str, Any]) -> None:
+    def save(self, settings: dict[str, Any]) -> None:
         """Persist settings to disk and update cache."""
         with self._lock:
             self._save_locked(settings)
 
-    def _save_locked(self, settings: Dict[str, Any]) -> None:
+    def _save_locked(self, settings: dict[str, Any]) -> None:
         """Persist settings to disk and update cache. Caller holds the lock."""
         os.makedirs(self._config_dir, exist_ok=True)
         merged = dict(DEFAULT_SETTINGS)
         merged.update(settings)
-        tmp_path: Optional[str] = None
+        tmp_path: str | None = None
         try:
             with tempfile.NamedTemporaryFile(
                 mode="w",

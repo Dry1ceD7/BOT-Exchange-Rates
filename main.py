@@ -16,11 +16,11 @@ import os
 import sys
 import traceback
 import types
-from typing import Optional
 
 # Explicitly insert current directory to Python Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import contextlib
 import tkinter as tk
 from tkinter import messagebox
 
@@ -184,9 +184,8 @@ def main():
         _run_headless(args)
         return
 
-    if not _tokens_present():
-        if not _prompt_for_tokens():
-            sys.exit(0)
+    if not _tokens_present() and not _prompt_for_tokens():
+        sys.exit(0)
 
     from core.ipc import SingleInstanceServer
     from gui.app import BOTExrateApp
@@ -266,7 +265,7 @@ def _run_headless(args: argparse.Namespace) -> None:
             api = BOTClient(client)
             engine = LedgerEngine(api)
 
-            def progress_cb(idx: int, total: int, fname: str, error: Optional[str]) -> None:
+            def progress_cb(idx: int, total: int, fname: str, error: str | None) -> None:
                 if error:
                     print(f"  [{idx}/{total}] {fname} — SKIPPED: {error}")
                 else:
@@ -299,7 +298,7 @@ def _run_headless(args: argparse.Namespace) -> None:
 def global_exception_handler(
     exc_type: type,
     exc_value: BaseException,
-    exc_traceback: Optional[types.TracebackType],
+    exc_traceback: types.TracebackType | None,
 ) -> None:
     """
     Fallback handler to catch fatal errors when running without a console.
@@ -315,10 +314,8 @@ def global_exception_handler(
     error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
 
     # Layer 0: Always emit to stderr — this is the only guaranteed output
-    try:
+    with contextlib.suppress(Exception):
         print(f"\n[FATAL] {error_msg}", file=sys.stderr, flush=True)
-    except Exception:
-        pass
 
     # Layer 1: Forward to Sentry if initialized
     try:

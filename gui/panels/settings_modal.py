@@ -12,7 +12,6 @@ SFFB: Strict < 200 lines.  (Previously 731 → now ~130)
 
 import logging
 import os
-from typing import Optional
 
 import customtkinter as ctk
 
@@ -32,7 +31,7 @@ class SettingsModal(ctk.CTkToplevel):
         modal.grab_set()  # block interaction with parent
     """
 
-    def __init__(self, master, config_dir: Optional[str] = None, **kwargs):
+    def __init__(self, master, config_dir: str | None = None, **kwargs):
         super().__init__(master, **kwargs)
 
         t = get_theme()

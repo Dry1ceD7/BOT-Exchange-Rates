@@ -9,10 +9,10 @@ Pre-scans queued .xlsx files to detect the oldest date in the
 source column. Uses openpyxl for all modern Excel formats.
 """
 
+import contextlib
 import logging
 import os
 from datetime import date
-from typing import List, Optional, Tuple
 
 import openpyxl
 
@@ -26,9 +26,9 @@ DATE_FORMATS = list(DATE_FORMATS)
 
 
 def prescan_oldest_date(
-    filepaths: List[str],
+    filepaths: list[str],
     target_col_name: str = "Date",
-) -> Tuple[date, bool]:
+) -> tuple[date, bool]:
     """
     Pre-scans queued .xlsx files to find the absolute
     oldest date in the source column.
@@ -36,7 +36,7 @@ def prescan_oldest_date(
     Returns:
         Tuple of (oldest_date, was_detected).
     """
-    oldest: Optional[date] = None
+    oldest: date | None = None
 
     for fp in filepaths:
         if not os.path.exists(fp):
@@ -44,9 +44,8 @@ def prescan_oldest_date(
 
         found = _scan_xlsx(fp, target_col_name)
 
-        if found is not None:
-            if oldest is None or found < oldest:
-                oldest = found
+        if found is not None and (oldest is None or found < oldest):
+            oldest = found
 
     if oldest is not None:
         return oldest, True
@@ -60,9 +59,9 @@ def prescan_oldest_date(
 # ── Modern .xlsx scanning (openpyxl) ────────────────────────────────────
 
 
-def _scan_xlsx(filepath: str, target_col_name: str) -> Optional[date]:
+def _scan_xlsx(filepath: str, target_col_name: str) -> date | None:
     """Scan a .xlsx file using openpyxl to find the oldest date."""
-    oldest: Optional[date] = None
+    oldest: date | None = None
     wb = None
     try:
         with open(filepath, "rb") as f:
@@ -90,9 +89,8 @@ def _scan_xlsx(filepath: str, target_col_name: str) -> Optional[date]:
                     values_only=True,
                 ):
                     parsed = _parse_scan_date(row[0], DATE_FORMATS)
-                    if parsed is not None:
-                        if oldest is None or parsed < oldest:
-                            oldest = parsed
+                    if parsed is not None and (oldest is None or parsed < oldest):
+                        oldest = parsed
     except (
         ValueError, TypeError, KeyError,
         openpyxl.utils.exceptions.InvalidFileException,
@@ -100,10 +98,8 @@ def _scan_xlsx(filepath: str, target_col_name: str) -> Optional[date]:
         pass
     finally:
         if wb is not None:
-            try:
+            with contextlib.suppress(OSError):
                 wb.close()
-            except OSError:
-                pass
 
     return oldest
 
@@ -111,7 +107,7 @@ def _scan_xlsx(filepath: str, target_col_name: str) -> Optional[date]:
 # ── Shared date parsing ─────────────────────────────────────────────────
 
 
-def _parse_scan_date(cell_val, formats: List[str]) -> Optional[date]:
+def _parse_scan_date(cell_val, formats: list[str]) -> date | None:
     """Parse a date from a cell value (shared parser).
 
     The ``formats`` arg is retained for backward-compatible call sites; the

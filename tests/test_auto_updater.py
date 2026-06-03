@@ -7,11 +7,12 @@ Comprehensive test suite for core/auto_updater.py.
 Covers:
   - check_for_update (version comparison, network errors, prerelease)
   - get_installer_asset_url (asset parsing, SHA-256 URL extraction)
-  - _fetch_expected_checksum (checksum file parsing)
+  - fetch_expected_checksum (checksum file parsing)
   - _verify_file_sha256 (hash verification)
   - download_update (download flow, integrity check, cleanup)
   - apply_update (bat script generation, path sanitization)
-  - _get_install_dir (registry, frozen, dev mode)
+  - get_install_dir (registry, frozen, dev mode)
+  - back-compat aliases (_get_install_dir, _fetch_expected_checksum)
 """
 
 import hashlib
@@ -21,10 +22,11 @@ from unittest.mock import MagicMock, patch
 import httpx
 
 from core.auto_updater import (
-    _fetch_expected_checksum,
     _verify_file_sha256,
     check_for_update,
     download_update,
+    fetch_expected_checksum,
+    get_install_dir,
     get_installer_asset_url,
 )
 
@@ -248,12 +250,12 @@ class TestGetInstallerAssetUrl:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  _fetch_expected_checksum
+#  fetch_expected_checksum
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestFetchExpectedChecksum:
-    """Tests for _fetch_expected_checksum."""
+    """Tests for fetch_expected_checksum (public name)."""
 
     def test_parses_plain_hash(self):
         """Parses a standalone SHA-256 hex string."""
@@ -264,7 +266,7 @@ class TestFetchExpectedChecksum:
         mock_resp.raise_for_status = MagicMock()
 
         with patch("core.auto_updater.httpx.get", return_value=mock_resp):
-            result = _fetch_expected_checksum("https://github.com/hash.sha256")
+            result = fetch_expected_checksum("https://github.com/hash.sha256")
 
         assert result == expected
 
@@ -277,7 +279,7 @@ class TestFetchExpectedChecksum:
         mock_resp.raise_for_status = MagicMock()
 
         with patch("core.auto_updater.httpx.get", return_value=mock_resp):
-            result = _fetch_expected_checksum("https://github.com/hash.sha256")
+            result = fetch_expected_checksum("https://github.com/hash.sha256")
 
         assert result == expected
 
@@ -289,7 +291,7 @@ class TestFetchExpectedChecksum:
         mock_resp.raise_for_status = MagicMock()
 
         with patch("core.auto_updater.httpx.get", return_value=mock_resp):
-            result = _fetch_expected_checksum("https://github.com/hash.sha256")
+            result = fetch_expected_checksum("https://github.com/hash.sha256")
 
         assert result is None
 
@@ -299,7 +301,7 @@ class TestFetchExpectedChecksum:
             "core.auto_updater.httpx.get",
             side_effect=httpx.ConnectError("nope"),
         ):
-            result = _fetch_expected_checksum("https://github.com/hash.sha256")
+            result = fetch_expected_checksum("https://github.com/hash.sha256")
 
         assert result is None
 
@@ -593,11 +595,13 @@ class TestApplyUpdateSanitization:
         installer.write_bytes(b"setup")
         good_hash = hashlib.sha256(b"setup").hexdigest()
 
-        with patch("core.auto_updater._get_install_dir", return_value=unsafe_path):
-            with patch("sys.frozen", True, create=True):
-                result = apply_update(
-                    str(installer), expected_sha256=good_hash
-                )
+        with (
+            patch("core.auto_updater.get_install_dir", return_value=unsafe_path),
+            patch("sys.frozen", True, create=True),
+        ):
+            result = apply_update(
+                str(installer), expected_sha256=good_hash
+            )
 
         # Should fail because the install dir has '&'
         assert result["success"] is False
@@ -605,15 +609,61 @@ class TestApplyUpdateSanitization:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  _get_install_dir
+#  get_install_dir
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestGetInstallDir:
-    """Tests for _get_install_dir."""
+    """Tests for get_install_dir (public name)."""
 
     def test_dev_mode_returns_project_root(self):
         """In development mode, returns project root."""
+        with patch("sys.frozen", False, create=True):
+            result = get_install_dir()
+
+        assert result is not None
+        assert os.path.isdir(result)
+
+    def test_frozen_mode_uses_exe_parent(self, tmp_path):
+        """When frozen, uses sys.executable parent dir."""
+        fake_exe = str(tmp_path / "BOT-ExRate.exe")
+        with open(fake_exe, "w") as f:
+            f.write("fake")
+
+        with (
+            patch("sys.frozen", True, create=True),
+            patch("sys.executable", fake_exe),
+            patch("platform.system", return_value="Darwin"),
+        ):
+            result = get_install_dir()
+
+        assert result == str(tmp_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  BACK-COMPAT ALIASES (old private names)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackCompatAliases:
+    """The old underscore names must remain importable and point at the
+    new public functions, so GUI panels using the old names keep working."""
+
+    def test_get_install_dir_alias_is_public(self):
+        from core.auto_updater import _get_install_dir, get_install_dir
+
+        assert _get_install_dir is get_install_dir
+
+    def test_fetch_expected_checksum_alias_is_public(self):
+        from core.auto_updater import (
+            _fetch_expected_checksum,
+            fetch_expected_checksum,
+        )
+
+        assert _fetch_expected_checksum is fetch_expected_checksum
+
+    def test_old_install_dir_alias_still_callable(self):
+        """Calling via the legacy name returns a valid dir in dev mode."""
         from core.auto_updater import _get_install_dir
 
         with patch("sys.frozen", False, create=True):
@@ -622,20 +672,22 @@ class TestGetInstallDir:
         assert result is not None
         assert os.path.isdir(result)
 
-    def test_frozen_mode_uses_exe_parent(self, tmp_path):
-        """When frozen, uses sys.executable parent dir."""
-        from core.auto_updater import _get_install_dir
+    def test_old_checksum_alias_still_callable(self):
+        """Calling via the legacy name parses a checksum."""
+        from core.auto_updater import _fetch_expected_checksum
 
-        fake_exe = str(tmp_path / "BOT-ExRate.exe")
-        with open(fake_exe, "w") as f:
-            f.write("fake")
+        expected = "c" * 64
+        mock_resp = MagicMock()
+        mock_resp.is_redirect = False
+        mock_resp.text = f"{expected}\n"
+        mock_resp.raise_for_status = MagicMock()
 
-        with patch("sys.frozen", True, create=True):
-            with patch("sys.executable", fake_exe):
-                with patch("platform.system", return_value="Darwin"):
-                    result = _get_install_dir()
+        with patch("core.auto_updater.httpx.get", return_value=mock_resp):
+            result = _fetch_expected_checksum(
+                "https://github.com/hash.sha256"
+            )
 
-        assert result == str(tmp_path)
+        assert result == expected
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -679,13 +731,11 @@ class TestApplyUpdateReverify:
         # ...but an attacker swapped the file before exec.
         installer.write_bytes(b"MALICIOUS PAYLOAD")
 
-        with patch("sys.frozen", True, create=True):
-            with patch("core.auto_updater._get_install_dir",
-                       return_value=str(tmp_path)):
-                with patch("subprocess.Popen") as mock_popen:
-                    result = apply_update(
-                        str(installer), expected_sha256=good_hash
-                    )
+        with patch("sys.frozen", True, create=True), patch("core.auto_updater.get_install_dir",
+                   return_value=str(tmp_path)), patch("subprocess.Popen") as mock_popen:
+            result = apply_update(
+                str(installer), expected_sha256=good_hash
+            )
 
         assert result["success"] is False
         assert "mismatch" in result["error"].lower()
@@ -700,13 +750,11 @@ class TestApplyUpdateReverify:
         installer.write_bytes(b"good setup")
         good_hash = hashlib.sha256(b"good setup").hexdigest()
 
-        with patch("sys.frozen", True, create=True):
-            with patch("core.auto_updater._get_install_dir",
-                       return_value=str(tmp_path)):
-                with patch("subprocess.Popen") as mock_popen:
-                    result = apply_update(
-                        str(installer), expected_sha256=good_hash
-                    )
+        with patch("sys.frozen", True, create=True), patch("core.auto_updater.get_install_dir",
+                   return_value=str(tmp_path)), patch("subprocess.Popen") as mock_popen:
+            result = apply_update(
+                str(installer), expected_sha256=good_hash
+            )
 
         assert result["success"] is True
         mock_popen.assert_called_once()

@@ -12,16 +12,16 @@ SFFB: Strict < 100 lines.
 
 import logging
 import threading
-import tkinter
 
 import customtkinter as ctk
 
+from gui.panels._base_panel import SafePanel
 from gui.theme import get_theme
 
 logger = logging.getLogger(__name__)
 
 
-class CSVPanel(ctk.CTkFrame):
+class CSVPanel(SafePanel, ctk.CTkFrame):
     """Embeddable CSV Import/Export panel for the settings modal."""
 
     def __init__(self, master, **kwargs):
@@ -29,22 +29,7 @@ class CSVPanel(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent", **kwargs)
 
         self._t = t
-        self._destroyed = False
         self._build_ui()
-
-    def destroy(self):
-        self._destroyed = True
-        super().destroy()
-
-    def _safe_after(self, ms, func, *args):
-        """Thread-safe self.after() — ignores RuntimeError post-destroy."""
-        if self._destroyed:
-            return
-        try:
-            self.after(ms, func, *args)
-        except (RuntimeError, tkinter.TclError):
-            # TclError "application has been destroyed" is not a RuntimeError.
-            self._destroyed = True
 
     def _build_ui(self):
         t = self._t
@@ -97,9 +82,9 @@ class CSVPanel(ctk.CTkFrame):
         def _worker():
             try:
                 from core.csv_import import import_bot_csv
-                from core.engine import _get_cache
+                from core.database import get_cache
 
-                cache = _get_cache()
+                cache = get_cache()
                 count = import_bot_csv(csv_path, cache)
                 self._safe_after(0, self._lbl_csv.configure,
                            {"text": f"✓ Imported {count} rate entries",
@@ -133,9 +118,9 @@ class CSVPanel(ctk.CTkFrame):
         def _worker():
             try:
                 from core.csv_export import export_rates_csv
-                from core.engine import _get_cache
+                from core.database import get_cache
 
-                cache = _get_cache()
+                cache = get_cache()
                 count = export_rates_csv(csv_path, cache)
                 self._safe_after(0, self._lbl_csv_export.configure,
                            {"text": f"✓ Exported {count} rate rows",

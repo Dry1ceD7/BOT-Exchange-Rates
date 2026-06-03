@@ -13,7 +13,6 @@ import logging
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Dict, List, Optional
 
 from core.constants import ANOMALY_MAX_DAY_GAP
 
@@ -28,7 +27,7 @@ class AnomalyResult:
     rate_type: str
     check_date: date
     new_value: Decimal
-    prev_value: Optional[Decimal]
+    prev_value: Decimal | None
     pct_change: float
     message: str
 
@@ -59,7 +58,7 @@ class AnomalyGuard:
         rate_type: str,
         check_date: date,
         new_value: Decimal,
-        prev_value: Optional[Decimal],
+        prev_value: Decimal | None,
     ) -> AnomalyResult:
         """
         Check a single rate against its previous value.
@@ -125,8 +124,8 @@ class AnomalyGuard:
 
     def check_rates_bulk(
         self,
-        rates: Dict[str, Dict[date, Decimal]],
-    ) -> List[AnomalyResult]:
+        rates: dict[str, dict[date, Decimal]],
+    ) -> list[AnomalyResult]:
         """
         Check all rates in a bulk dictionary for anomalies.
 
@@ -147,7 +146,7 @@ class AnomalyGuard:
         Returns:
             List of AnomalyResult for every anomaly detected.
         """
-        anomalies: List[AnomalyResult] = []
+        anomalies: list[AnomalyResult] = []
 
         for key, date_rates in rates.items():
             parts = key.split("_", 1)
@@ -156,8 +155,8 @@ class AnomalyGuard:
             currency, rate_type = parts[0], parts[1]
 
             sorted_dates = sorted(date_rates.keys())
-            prev_val: Optional[Decimal] = None
-            prev_date: Optional[date] = None
+            prev_val: Decimal | None = None
+            prev_date: date | None = None
 
             for d in sorted_dates:
                 val = date_rates[d]

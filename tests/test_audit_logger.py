@@ -22,7 +22,7 @@ class TestAuditLogger:
         audit = AuditLogger(log_dir=str(tmp_path))
         path = audit.finalize()
 
-        with open(path, "r", encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             reader = csv.reader(f)
             headers = next(reader)
         assert headers == AuditLogger.HEADERS
@@ -57,7 +57,7 @@ class TestAuditLogger:
 
         assert audit.row_count == 2
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             reader = csv.reader(f)
             next(reader)  # skip headers
             rows = list(reader)
@@ -77,7 +77,7 @@ class TestAuditLogger:
         )
         path = audit.finalize()
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             content = f.read()
         assert "BATCH SUMMARY" in content
         assert "Files: 5" in content

@@ -16,8 +16,8 @@ Persists all configuration via core/config_manager.SettingsManager.
 
 import logging
 import os
+from collections.abc import Callable
 from tkinter import filedialog
-from typing import Callable, Optional
 
 import customtkinter as ctk
 
@@ -38,8 +38,8 @@ class SchedulerPanel(ctk.CTkFrame):
     def __init__(
         self,
         master,
-        on_start_scheduler: Optional[Callable] = None,
-        on_stop_scheduler: Optional[Callable] = None,
+        on_start_scheduler: Callable | None = None,
+        on_stop_scheduler: Callable | None = None,
         **kwargs,
     ):
         t = get_theme()

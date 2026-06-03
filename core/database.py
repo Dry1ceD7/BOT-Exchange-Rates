@@ -15,13 +15,13 @@ for both USD and EUR (4 rate columns total).
 """
 
 import atexit
+import contextlib
 import os
 import sqlite3
 import threading
 import weakref
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple
 
 
 class CacheDB:
@@ -30,7 +30,7 @@ class CacheDB:
     Persists to data/cache.db. Tables are auto-created on init.
     """
 
-    def __init__(self, db_path: Optional[str] = None) -> None:
+    def __init__(self, db_path: str | None = None) -> None:
         """Initialize the SQLite cache.
 
         Args:
@@ -166,7 +166,7 @@ class CacheDB:
     # ================================================================== #
     #  RATES
     # ================================================================== #
-    def get_rate(self, target_date: date) -> Optional[Dict]:
+    def get_rate(self, target_date: date) -> dict | None:
         """
         Cache lookup for a single date's rates.
 
@@ -228,7 +228,7 @@ class CacheDB:
         )
         conn.commit()
 
-    def insert_rates_bulk(self, entries: List[Tuple]):
+    def insert_rates_bulk(self, entries: list[tuple]):
         """
         Bulk insert/update rates.
         Each entry is (date_str, usd_buying, usd_selling, eur_buying, eur_selling).
@@ -247,7 +247,7 @@ class CacheDB:
     # ================================================================== #
     #  HOLIDAYS
     # ================================================================== #
-    def get_holidays(self, year: int = None) -> List[Tuple[str, str]]:
+    def get_holidays(self, year: int = None) -> list[tuple[str, str]]:
         """
         Returns cached holidays as [(date_str, name), ...].
         If year is specified, filters to that year.
@@ -274,7 +274,7 @@ class CacheDB:
         ).fetchone()
         return row[0] > 0
 
-    def insert_holidays(self, holidays: List[Tuple[str, str]]):
+    def insert_holidays(self, holidays: list[tuple[str, str]]):
         """
         Bulk insert holidays. Each entry is (date_str, holiday_name).
         """
@@ -293,7 +293,7 @@ class CacheDB:
 
     def get_multi_rate(
         self, target_date: date, currency: str, rate_type: str,
-    ) -> Optional[Decimal]:
+    ) -> Decimal | None:
         """Get a single rate from the multi-currency table."""
         date_str = target_date.strftime("%Y-%m-%d")
         row = self._conn().execute(
@@ -307,7 +307,7 @@ class CacheDB:
 
 
     def insert_multi_rates_bulk(
-        self, entries: List[Tuple],
+        self, entries: list[tuple],
     ) -> None:
         """
         Bulk insert into the multi-currency rates table.
@@ -351,7 +351,7 @@ class CacheDB:
             "FROM rates ORDER BY date ASC"
         ).fetchall()
 
-    def get_all_multi_rates(self) -> List[Tuple[str, str, str, Optional[Decimal]]]:
+    def get_all_multi_rates(self) -> list[tuple[str, str, str, Decimal | None]]:
         """
         Returns every multi-currency rate as a list of tuples:
         [(date_str, currency, rate_type, value), ...]
@@ -385,14 +385,10 @@ class CacheDB:
             self._all_conns.clear()
 
         for conn in conns:
-            try:
+            with contextlib.suppress(sqlite3.Error):
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except sqlite3.Error:
-                pass
-            try:
+            with contextlib.suppress(sqlite3.Error):
                 conn.close()
-            except sqlite3.Error:
-                pass
 
         # Drop this thread's cached handle so a later call re-opens cleanly.
         if getattr(self._local, "conn", None) is not None:
@@ -428,7 +424,34 @@ def _atexit_close(db_ref) -> None:
     """Module-level atexit handler: checkpoint + close the singleton cache."""
     db = db_ref()
     if db is not None:
-        try:
+        with contextlib.suppress(Exception):
             db.close()
-        except Exception:
-            pass
+
+
+# ===================================================================== #
+#  PUBLIC PROCESS-SINGLETON ACCESSOR
+# ===================================================================== #
+_cache_singleton: CacheDB | None = None
+_cache_singleton_lock = threading.Lock()
+
+
+def get_cache() -> CacheDB:
+    """Return the process-wide singleton :class:`CacheDB`.
+
+    Lazily constructs a single ``CacheDB`` at the default db path
+    (``data/cache.db``) on first call and returns that same instance on
+    every subsequent call. Thread-safe via a double-checked lock.
+
+    This is the public, package-boundary-stable accessor. GUI panels and
+    other callers should import it from ``core.database`` rather than
+    reaching into ``core.engine``'s private ``_get_cache``. ``core.engine``
+    intentionally keeps its own private singleton; this one is independent
+    and owns its own lifecycle (an ``atexit`` close is already registered by
+    ``CacheDB.__init__``).
+    """
+    global _cache_singleton
+    if _cache_singleton is None:
+        with _cache_singleton_lock:
+            if _cache_singleton is None:  # double-check after lock
+                _cache_singleton = CacheDB()
+    return _cache_singleton

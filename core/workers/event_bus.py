@@ -11,7 +11,7 @@ import logging
 import threading
 import time
 from collections import deque
-from typing import Any, Dict, List
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ class EventBus:
         self._dropped_since_warn = 0
         self._last_warn_ts = 0.0
 
-    def push(self, event: Dict[str, Any]) -> None:
+    def push(self, event: dict[str, Any]) -> None:
         """Push an event from any thread.
 
         On overflow, the oldest NON-priority event is evicted so audit-critical
@@ -117,7 +117,7 @@ class EventBus:
                 "_dropped": 1,
             })
 
-    def drain(self) -> List[Dict[str, Any]]:
+    def drain(self) -> list[dict[str, Any]]:
         """Drain all pending events. Returns a list (may be empty)."""
         with self._lock:
             events = list(self._queue)

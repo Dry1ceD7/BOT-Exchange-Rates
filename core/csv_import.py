@@ -18,9 +18,9 @@ import csv
 import logging
 import os
 import re
-from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
-from typing import Optional
+from decimal import Decimal
+
+from core.constants import parse_date, parse_decimal_safe, to_float
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
             cache_db.insert_multi_rates_bulk(multi_entries)
             multi_entries.clear()
 
-    with open(csv_path, "r", encoding="utf-8-sig") as f:
+    with open(csv_path, encoding="utf-8-sig") as f:
         sample = f.read(4096)
         f.seek(0)
 
@@ -144,7 +144,7 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
                 logger.debug("Skipped invalid currency code: %r", currency)
                 continue
 
-            parsed_date = _parse_csv_date(raw_date)
+            parsed_date = parse_date(raw_date)
             if parsed_date is None:
                 logger.debug("Skipped unparseable date: %s", raw_date)
                 continue
@@ -156,7 +156,7 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
 
             if is_long_format:
                 rate_type = (row.get(rate_type_key) or "").strip()
-                dec = _parse_decimal(row.get(value_key))
+                dec = parse_decimal_safe(row.get(value_key))
                 if rate_type and dec is not None:
                     rates[rate_type] = dec
             else:
@@ -167,7 +167,7 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
                     (mid_rate_key, "mid_rate"),
                 ]:
                     if key:
-                        dec = _parse_decimal(row.get(key))
+                        dec = parse_decimal_safe(row.get(key))
                         if dec is not None:
                             rates[rate_type] = dec
 
@@ -182,8 +182,8 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
             # That table's columns are REAL; sqlite3 cannot bind Decimal, so
             # coerce to float here. The lossless source of truth stays in
             # rates_multi (stored as exact Decimal text above).
-            buy_tt = _to_float(rates.get("buying_transfer"))
-            sell = _to_float(rates.get("selling"))
+            buy_tt = to_float(rates.get("buying_transfer"))
+            sell = to_float(rates.get("selling"))
             if currency == "USD":
                 cache_db.insert_rate(
                     parsed_date, usd_buying=buy_tt, usd_selling=sell,
@@ -216,7 +216,7 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
 
 def _find_column(
     field_map: dict[str, str], candidates: list[str],
-) -> Optional[str]:
+) -> str | None:
     """
     Find a column name from a list of candidates
     (case-insensitive match against normalized field map).
@@ -225,40 +225,4 @@ def _find_column(
         norm = candidate.lower().strip()
         if norm in field_map:
             return field_map[norm]
-    return None
-
-
-def _parse_decimal(raw) -> Optional[Decimal]:
-    """
-    Parse a rate cell into an exact Decimal, preserving the literal digits.
-
-    Returns None (and debug-logs) for empty/unparseable values instead of
-    silently swallowing them, so mis-formatted data is observable in logs.
-    """
-    s = "" if raw is None else str(raw).strip()
-    if not s:
-        return None
-    try:
-        return Decimal(s)
-    except InvalidOperation:
-        logger.debug("Skipped non-numeric rate value: %r", s)
-        return None
-
-
-def _to_float(value: Optional[Decimal]) -> Optional[float]:
-    """Coerce an optional Decimal to float for the legacy REAL-column table."""
-    return None if value is None else float(value)
-
-
-def _parse_csv_date(raw: str) -> Optional[date]:
-    """Parse a date string from BOT CSV format."""
-    formats = [
-        "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y",
-        "%Y%m%d", "%d %b %Y", "%d %B %Y",
-    ]
-    for fmt in formats:
-        try:
-            return datetime.strptime(raw.strip(), fmt).date()
-        except ValueError:
-            continue
     return None

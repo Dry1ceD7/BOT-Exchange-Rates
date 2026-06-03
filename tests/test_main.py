@@ -33,7 +33,7 @@ def test_global_exception_handler_writes_error_log_to_data_logs(tmp_path, monkey
 
     expected_log = os.path.join(str(tmp_path), "data", "logs", "error.log")
     assert os.path.exists(expected_log)
-    with open(expected_log, "r", encoding="utf-8") as f:
+    with open(expected_log, encoding="utf-8") as f:
         content = f.read()
     assert "--- FATAL ERROR ---" in content
     assert "RuntimeError: boom" in content

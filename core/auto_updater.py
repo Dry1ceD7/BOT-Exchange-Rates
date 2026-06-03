@@ -17,12 +17,12 @@ v3.1.2 — Fixed install path resolution:
 Security: Read-only GET request. No tokens required for public repos.
 """
 
+import contextlib
 import hashlib
 import logging
 import os
 import platform
 import tempfile
-from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -64,7 +64,7 @@ GITHUB_ALL_RELEASES_URL = (
 INNO_APP_ID = "{B0T-EXRATE-2026-AAE}_is1"
 
 
-def _get_install_dir() -> Optional[str]:
+def get_install_dir() -> str | None:
     """
     Resolve the actual installation directory.
 
@@ -123,7 +123,7 @@ def _get_install_dir() -> Optional[str]:
 
 
 def check_for_update(
-    current_version: Optional[str] = None,
+    current_version: str | None = None,
     include_prerelease: bool = False,
 ) -> dict:
     """
@@ -254,7 +254,7 @@ def get_installer_asset_url(tag: str) -> dict:
     return result
 
 
-def _fetch_expected_checksum(sha256_url: str) -> Optional[str]:
+def fetch_expected_checksum(sha256_url: str) -> str | None:
     """Download and parse a .sha256 checksum file.
 
     The file is expected to contain a single SHA-256 hex digest
@@ -302,10 +302,10 @@ def _verify_file_sha256(filepath: str, expected_hash: str) -> bool:
 
 def download_update(
     url: str,
-    dest_dir: Optional[str] = None,
-    filename: Optional[str] = None,
+    dest_dir: str | None = None,
+    filename: str | None = None,
     progress_cb=None,
-    expected_sha256: Optional[str] = None,
+    expected_sha256: str | None = None,
 ) -> dict:
     """
     Download the update installer to a temp directory.
@@ -363,10 +363,8 @@ def download_update(
     # pre-create / race / read the downloaded installer before it runs.
     if dest_dir is None:
         dest_dir = tempfile.mkdtemp(prefix="bot_exrate_dl_")
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(dest_dir, 0o700)
-        except OSError:
-            pass
 
     if filename is None:
         filename = url.rsplit("/", 1)[-1] if "/" in url else "update.exe"
@@ -435,17 +433,15 @@ def download_update(
         result["error"] = str(e)
         # Cleanup partial download
         if os.path.exists(tmp_path):
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(tmp_path)
-            except OSError:
-                pass
     return result
 
 
 def apply_update(
     new_exe_path: str,
-    install_dir: Optional[str] = None,
-    expected_sha256: Optional[str] = None,
+    install_dir: str | None = None,
+    expected_sha256: str | None = None,
 ) -> dict:
     """
     Install the downloaded update silently.
@@ -514,7 +510,7 @@ def apply_update(
 
     # v3.1.2: Resolve install directory from registry first
     if install_dir is None:
-        install_dir = _get_install_dir()
+        install_dir = get_install_dir()
 
     if install_dir is None:
         result["error"] = "Could not determine install directory"
@@ -540,10 +536,8 @@ def apply_update(
             # local user from pre-creating / racing the .bat file. Verify the
             # directory is owned by us before using it.
             work_dir = tempfile.mkdtemp(prefix="bot_exrate_upd_")
-            try:
+            with contextlib.suppress(OSError):
                 os.chmod(work_dir, 0o700)
-            except OSError:
-                pass
             try:
                 st = os.stat(work_dir)
                 if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
@@ -582,10 +576,8 @@ def apply_update(
                 f.write('del "%~f0"\n')
 
             # SECURITY: restrict the helper script to the owner only.
-            try:
+            with contextlib.suppress(OSError):
                 os.chmod(bat_path, 0o600)
-            except OSError:
-                pass
 
             if sys.platform == "win32":
                 flags = 0x00000008  # DETACHED_PROCESS
@@ -646,3 +638,14 @@ def restart_app() -> None:
         subprocess.Popen([sys.executable] + sys.argv)
 
     sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# BACK-COMPAT ALIASES
+# ---------------------------------------------------------------------------
+# These helpers were promoted from private (_name) to public (name) so other
+# modules (e.g. GUI panels) can import them across package boundaries. The old
+# underscore names are kept as thin module-level aliases so existing importers
+# keep working until they migrate to the public names. Remove after migration.
+_get_install_dir = get_install_dir
+_fetch_expected_checksum = fetch_expected_checksum

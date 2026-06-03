@@ -15,7 +15,6 @@ SFFB: Strict < 100 lines.
 import logging
 import threading
 import time
-from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +31,14 @@ class ThreadRegistry:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._threads: Dict[str, threading.Thread] = {}
-        self._stop_events: Dict[str, threading.Event] = {}
+        self._threads: dict[str, threading.Thread] = {}
+        self._stop_events: dict[str, threading.Event] = {}
 
     def register(
         self,
         thread: threading.Thread,
-        name: Optional[str] = None,
-        stop_event: Optional[threading.Event] = None,
+        name: str | None = None,
+        stop_event: threading.Event | None = None,
     ) -> str:
         """Register a thread for lifecycle management.
 
@@ -59,7 +58,7 @@ class ThreadRegistry:
             self._threads.pop(name, None)
             self._stop_events.pop(name, None)
 
-    def shutdown_all(self, timeout: float = 5.0) -> List[str]:
+    def shutdown_all(self, timeout: float = 5.0) -> list[str]:
         """Signal all stop events, then join all threads.
 
         Returns list of thread names that did not exit within timeout.
@@ -94,7 +93,7 @@ class ThreadRegistry:
 
         return hung
 
-    def status(self) -> Dict[str, bool]:
+    def status(self) -> dict[str, bool]:
         """Return {name: is_alive} for all registered threads."""
         with self._lock:
             return {name: t.is_alive() for name, t in self._threads.items()}

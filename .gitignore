@@ -13,6 +13,7 @@ data/backups/
 data/.ipc_nonce
 data/app.log*
 data/settings.json
+data/input/UAT_Test_Ledger.xlsx
 
 # ---- Python ----
 __pycache__/

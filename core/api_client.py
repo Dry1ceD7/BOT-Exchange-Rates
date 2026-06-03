@@ -12,7 +12,6 @@ import asyncio
 import logging
 import random
 from datetime import date, timedelta
-from typing import List, Optional
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
@@ -89,13 +88,13 @@ class BOTRateDetail(BaseModel):
     """Schema for a single day's exchange rate data point."""
     period: str
     currency: str = Field(alias="currency_id")
-    buying_transfer: Optional[float] = None
-    buying_sight: Optional[float] = None
-    selling: Optional[float] = None
-    mid_rate: Optional[float] = None
+    buying_transfer: float | None = None
+    buying_sight: float | None = None
+    selling: float | None = None
+    mid_rate: float | None = None
 
 class BOTRateData(BaseModel):
-    data_detail: List[BOTRateDetail]
+    data_detail: list[BOTRateDetail]
 
 class BOTRateResult(BaseModel):
     data: BOTRateData
@@ -110,7 +109,7 @@ class BOTHolidayDetail(BaseModel):
     description: str = Field(alias="HolidayDescription")
 
 class BOTHolidayResult(BaseModel):
-    data: List[BOTHolidayDetail]
+    data: list[BOTHolidayDetail]
 
 class BOTHolidayResponse(BaseModel):
     """Master schema for the BOT Holiday API payload."""
@@ -199,7 +198,7 @@ class BOTClient:
 
     async def get_exchange_rates(
         self, start_date: date, end_date: date, currency: str,
-    ) -> List[BOTRateDetail]:
+    ) -> list[BOTRateDetail]:
         all_results = []
         current_start = start_date
 
@@ -242,7 +241,7 @@ class BOTClient:
             await asyncio.sleep(random.uniform(0.3, 0.8))
         return all_results
 
-    async def get_holidays(self, year: int) -> List[BOTHolidayDetail]:
+    async def get_holidays(self, year: int) -> list[BOTHolidayDetail]:
         url = f"{self.gateway}{self.hol_path}?year={year}"
         raw_json = await self._fetch_json(url, self.token_hol)
         if not raw_json or "result" not in raw_json:
@@ -251,4 +250,4 @@ class BOTClient:
             validated_response = BOTHolidayResponse.model_validate(raw_json)
             return validated_response.result.data
         except ValidationError as e:
-            raise BOTAPIError(f"Schema mismatch! {e}")
+            raise BOTAPIError(f"Schema mismatch! {e}") from e

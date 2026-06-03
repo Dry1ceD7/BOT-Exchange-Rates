@@ -10,9 +10,12 @@ with their purpose and safe default values.
 Override via environment variables where noted.
 """
 
+import logging
 import os
 from datetime import date, datetime
-from typing import Optional
+from decimal import Decimal, InvalidOperation
+
+logger = logging.getLogger(__name__)
 
 # ── File Processing ──────────────────────────────────────────────────────
 MAX_FILE_SIZE_MB: int = int(os.environ.get("BOT_MAX_FILE_MB", "15"))
@@ -78,7 +81,7 @@ modules historically parsed."""
 _NON_DATE_TOKENS = frozenset({"", "nan", "null"})
 
 
-def parse_date(cell_val) -> Optional[date]:
+def parse_date(cell_val) -> date | None:
     """Parse a date from a cell value using the shared DATE_FORMATS.
 
     Accepts datetime, date, or string inputs. Returns None for empty,
@@ -98,3 +101,54 @@ def parse_date(cell_val) -> Optional[date]:
             except ValueError:
                 continue
     return None
+
+
+# ── CSV / Decimal Helpers ────────────────────────────────────────────────
+
+
+def csv_safe(value) -> str:
+    """
+    Neutralize CSV/formula injection for a non-numeric cell.
+
+    Strips embedded CR/LF/TAB (which could split or shift fields) and prefixes
+    a single quote to any value beginning with a spreadsheet formula trigger
+    (=, +, -, @) so Excel/LibreOffice treat it as inert text.
+    """
+    s = "" if value is None else str(value)
+    s = s.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    return ("'" + s) if s and s[0] in ("=", "+", "-", "@") else s
+
+
+def format_rate_value(value) -> str:
+    """Format a rate value for CSV output (4dp, numeric — never injected).
+
+    Decimal inputs are quantized exactly (no float round-trip) so the
+    written digits match the cached "Mathematical Truth" value.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, Decimal):
+        return f"{value:.4f}"
+    return f"{float(value):.4f}"
+
+
+def parse_decimal_safe(raw) -> Decimal | None:
+    """
+    Parse a rate cell into an exact Decimal, preserving the literal digits.
+
+    Returns None (and debug-logs) for empty/unparseable values instead of
+    silently swallowing them, so mis-formatted data is observable in logs.
+    """
+    s = "" if raw is None else str(raw).strip()
+    if not s:
+        return None
+    try:
+        return Decimal(s)
+    except InvalidOperation:
+        logger.debug("Skipped non-numeric rate value: %r", s)
+        return None
+
+
+def to_float(value: Decimal | None) -> float | None:
+    """Coerce an optional Decimal to float for the legacy REAL-column table."""
+    return None if value is None else float(value)

@@ -13,7 +13,6 @@ import asyncio
 import logging
 import os
 import threading
-from typing import List, Optional
 
 import httpx
 
@@ -31,7 +30,7 @@ class BatchHandler:
     Pushes structured events to the EventBus for the LiveConsole.
     """
 
-    def __init__(self, app, event_bus: Optional[EventBus] = None, registry=None):
+    def __init__(self, app, event_bus: EventBus | None = None, registry=None):
         self.app = app
         self.bus = event_bus or EventBus()
         self.registry = registry
@@ -41,7 +40,7 @@ class BatchHandler:
 
     def start_batch(
         self,
-        file_queue: List[str],
+        file_queue: list[str],
         start_date: str,
         dry_run: bool = False,
     ):
@@ -82,7 +81,7 @@ class BatchHandler:
 
     def _batch_thread(
         self,
-        file_queue: List[str],
+        file_queue: list[str],
         start_date: str,
         dry_run: bool = False,
     ):
@@ -114,7 +113,7 @@ class BatchHandler:
 
     async def _run_batch(
         self,
-        file_queue: List[str],
+        file_queue: list[str],
         start_date: str,
         dry_run: bool = False,
     ):

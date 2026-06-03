@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for core/scheduler.py — Auto-Scheduler."""
 
+import contextlib
 import os
 import time
 from unittest.mock import MagicMock
@@ -92,10 +93,9 @@ class TestAutoScheduler:
         scheduler._target_time = _time.strftime("%H:%M")
 
         # Call the check directly (without scheduling next)
-        try:
+        # Timer scheduling may fail in test context
+        with contextlib.suppress(Exception):
             scheduler._check_and_fire()
-        except Exception:
-            pass  # Timer scheduling may fail in test context
 
         # Callback should have been called with the discovered file
         callback.assert_called_once()

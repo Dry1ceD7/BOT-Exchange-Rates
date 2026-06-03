@@ -241,13 +241,15 @@ class TestUpdateExrateStandaloneFailSafe:
         from unittest.mock import MagicMock
 
         from core.backup_manager import BackupError
-        before = open(exrate_xlsx, "rb").read()
+        with open(exrate_xlsx, "rb") as f:
+            before = f.read()
         engine.backup = MagicMock()
         engine.backup.create_backup.side_effect = BackupError("disk full")
         with pytest.raises(BackupError):
             asyncio.run(engine.update_exrate_standalone(exrate_xlsx))
         # File must remain untouched when backup fails.
-        assert open(exrate_xlsx, "rb").read() == before
+        with open(exrate_xlsx, "rb") as f:
+            assert f.read() == before
 
     def test_backup_created_before_load(self, engine, exrate_xlsx,
                                         monkeypatch):
@@ -408,11 +410,13 @@ class TestProcessLedgerEndToEnd:
         self, ledger_xlsx, tmp_cache, tmp_path,
     ):
         path = ledger_xlsx({"Jan": [(date(2025, 1, 7), "USD")]})
-        before = open(path, "rb").read()
+        with open(path, "rb") as f:
+            before = f.read()
         engine = self._build_engine(tmp_cache, tmp_path)
 
         result = asyncio.run(engine.process_ledger(path, dry_run=True))
         assert result == path
-        assert open(path, "rb").read() == before
+        with open(path, "rb") as f:
+            assert f.read() == before
         # Backup must be skipped on dry runs.
         engine.backup.create_backup.assert_not_called()

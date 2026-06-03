@@ -24,25 +24,13 @@ wide BOT format).
 import csv
 import logging
 import os
-from decimal import Decimal
+
+from core.constants import csv_safe, format_rate_value
 
 logger = logging.getLogger(__name__)
 
 # Lossless long-format header. csv_import auto-detects this on the way back in.
 MULTI_HEADERS = ["Period", "Currency_ID", "Rate_Type", "Value"]
-
-
-def _csv_safe(value) -> str:
-    """
-    Neutralize CSV/formula injection for a non-numeric cell.
-
-    Strips embedded CR/LF/TAB (which could split or shift fields) and prefixes
-    a single quote to any value beginning with a spreadsheet formula trigger
-    (=, +, -, @) so Excel/LibreOffice treat it as inert text.
-    """
-    s = "" if value is None else str(value)
-    s = s.replace("\r", " ").replace("\n", " ").replace("\t", " ")
-    return ("'" + s) if s and s[0] in ("=", "+", "-", "@") else s
 
 
 def export_rates_csv(csv_path: str, cache_db) -> int:
@@ -73,10 +61,10 @@ def export_rates_csv(csv_path: str, cache_db) -> int:
             if value is None:
                 continue
             writer.writerow([
-                _csv_safe(date_str),
-                _csv_safe(currency),
-                _csv_safe(rate_type),
-                _fmt(value),
+                csv_safe(date_str),
+                csv_safe(currency),
+                csv_safe(rate_type),
+                format_rate_value(value),
             ])
             exported += 1
 
@@ -84,16 +72,3 @@ def export_rates_csv(csv_path: str, cache_db) -> int:
         "CSV export complete: %d rows written to %s", exported, csv_path,
     )
     return exported
-
-
-def _fmt(value) -> str:
-    """Format a rate value for CSV output (4dp, numeric — never injected).
-
-    Decimal inputs are quantized exactly (no float round-trip) so the
-    written digits match the cached "Mathematical Truth" value.
-    """
-    if value is None:
-        return ""
-    if isinstance(value, Decimal):
-        return f"{value:.4f}"
-    return f"{float(value):.4f}"

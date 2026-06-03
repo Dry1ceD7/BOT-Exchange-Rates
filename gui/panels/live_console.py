@@ -13,7 +13,6 @@ SFFB: Strict < 200 lines.
 """
 
 import logging
-from typing import Optional
 
 import customtkinter as ctk
 
@@ -39,7 +38,7 @@ class LiveConsolePanel(ctk.CTkFrame):
     def __init__(
         self,
         master,
-        event_bus: Optional[EventBus] = None,
+        event_bus: EventBus | None = None,
         height: int = 160,
         **kwargs,
     ):
@@ -93,7 +92,7 @@ class LiveConsolePanel(ctk.CTkFrame):
     def event_bus(self) -> EventBus:
         return self._bus
 
-    def append_line(self, text: str, tag: Optional[str] = None) -> None:
+    def append_line(self, text: str, tag: str | None = None) -> None:
         """Append a single line to the console with optional color tag."""
         self._textbox.configure(state="normal")
         if tag:

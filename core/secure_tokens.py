@@ -10,9 +10,9 @@ Manager, Linux SecretService) with automatic migration from plaintext .env.
 v3.2.2: Replaces plaintext .env token storage with OS-native secure storage.
 """
 
+import contextlib
 import logging
 import os
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ _ENV_TOKEN_KEYS = {
 }
 
 
-def _purge_env_file_token(env_key: str, env_path: Optional[str] = None) -> None:
+def _purge_env_file_token(env_key: str, env_path: str | None = None) -> None:
     """Strip a BOT_TOKEN_* line from the on-disk .env file.
 
     Called after a token has been migrated into the OS keychain so the
@@ -42,7 +42,7 @@ def _purge_env_file_token(env_key: str, env_path: Optional[str] = None) -> None:
     if not os.path.exists(env_path):
         return
     try:
-        with open(env_path, "r", encoding="utf-8") as f:
+        with open(env_path, encoding="utf-8") as f:
             lines = f.readlines()
         kept = [
             ln for ln in lines
@@ -53,10 +53,8 @@ def _purge_env_file_token(env_key: str, env_path: Optional[str] = None) -> None:
                 f.writelines(kept)
             logger.debug("Purged '%s' from .env after keychain migration.", env_key)
         # Lock down the .env in case any other secrets remain
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(env_path, 0o600)
-        except OSError:
-            pass
     except OSError as e:
         logger.debug("Could not purge '%s' from .env: %s", env_key, e)
 
@@ -68,14 +66,12 @@ def _keyring_available() -> bool:
         # Test that a real backend is available (not the fail backend)
         backend = keyring.get_keyring()
         backend_name = type(backend).__name__
-        if "Fail" in backend_name or "Null" in backend_name:
-            return False
-        return True
+        return not ("Fail" in backend_name or "Null" in backend_name)
     except Exception:
         return False
 
 
-def get_token(env_key: str) -> Optional[str]:
+def get_token(env_key: str) -> str | None:
     """
     Retrieve an API token, preferring keychain over .env.
 
@@ -170,7 +166,7 @@ def delete_token(env_key: str) -> bool:
         return False
 
 
-def migrate_env_to_keychain(env_path: Optional[str] = None) -> int:
+def migrate_env_to_keychain(env_path: str | None = None) -> int:
     """
     One-time migration: read all tokens from .env and store in keychain.
 

@@ -27,7 +27,6 @@ import threading
 import tkinter
 from datetime import date, datetime
 from tkinter import filedialog, messagebox
-from typing import List, Optional
 
 import customtkinter as ctk
 
@@ -58,7 +57,7 @@ except ImportError as e:
     logger.debug("tkinterdnd2 not available: %s", e)
 
 
-def parse_drop_data(raw: str, tk_root=None) -> List[str]:
+def parse_drop_data(raw: str, tk_root=None) -> list[str]:
     """Parse drag-and-drop payload. Uses native Tcl/Tk splitlist for
     cross-platform correctness ({} bracket stripping on macOS/Linux)."""
     if tk_root is not None:
@@ -85,7 +84,7 @@ EXCEL_EXTENSIONS = (".xlsx", ".xlsm")
 OPENPYXL_NATIVE = (".xlsx", ".xlsm")
 
 
-def resolve_excel_files(paths: List[str], collect_rejected: bool = False):
+def resolve_excel_files(paths: list[str], collect_rejected: bool = False):
     """Resolve individual files and directories into a flat list of Excel files.
 
     When ``collect_rejected`` is True, returns ``(accepted, rejected)`` where
@@ -136,8 +135,8 @@ class BOTExrateApp(ctk.CTk):
         # ── Set window icon ──────────────────────────────────────────────
         self._set_app_icon()
 
-        self.file_queue: List[str] = []
-        self.last_processed_path: Optional[str] = None
+        self.file_queue: list[str] = []
+        self.last_processed_path: str | None = None
         self.backup_mgr = BackupManager()
         self.event_bus = EventBus()
         # Single registry that tracks worker threads (batch, revert, ...) so
@@ -576,7 +575,7 @@ class BOTExrateApp(ctk.CTk):
         for combo in self._combo_widgets:
             combo.configure(state="disabled" if locked else "normal")
 
-    def _assemble_start_date(self) -> Optional[str]:
+    def _assemble_start_date(self) -> str | None:
         if self.use_today_var.get() == "on":
             return datetime.today().strftime("%Y-%m-%d")
         date_str = f"{self.combo_year.get()}-{self.combo_month.get()}-{self.combo_day.get()}"
@@ -624,7 +623,7 @@ class BOTExrateApp(ctk.CTk):
         if paths:
             self._set_queue(list(paths))
 
-    def _set_queue(self, files: List[str]):
+    def _set_queue(self, files: list[str]):
         self.file_queue = files
         self.last_processed_path = None
         count = len(files)
@@ -729,7 +728,7 @@ class BOTExrateApp(ctk.CTk):
                 text_color=_get_colors()["process_text"]
             )
 
-    def _show_batch_complete(self, success: int, fail: int, errors: List[str]):
+    def _show_batch_complete(self, success: int, fail: int, errors: list[str]):
         self.progressbar.set(1)
         self.btn_process.configure(state="normal")
         self.btn_revert.configure(state="normal")

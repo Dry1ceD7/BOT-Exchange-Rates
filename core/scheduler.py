@@ -13,8 +13,8 @@ as long as the application is running.
 import logging
 import os
 import threading
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable, List, Optional
 
 from core.constants import (
     POLL_INTERVAL_SECONDS as _DEFAULT_POLL_INTERVAL,
@@ -50,12 +50,12 @@ class AutoScheduler:
     POLL_INTERVAL_SECONDS = _DEFAULT_POLL_INTERVAL
 
     def __init__(self):
-        self._timer: Optional[threading.Timer] = None
+        self._timer: threading.Timer | None = None
         self._running = False
         self._target_time: str = "23:00"
-        self._watch_paths: List[str] = []
-        self._callback: Optional[Callable] = None
-        self._last_run_date: Optional[str] = None
+        self._watch_paths: list[str] = []
+        self._callback: Callable | None = None
+        self._last_run_date: str | None = None
         self._lock = threading.Lock()
 
     @property
@@ -69,7 +69,7 @@ class AutoScheduler:
         return self._target_time
 
     @property
-    def watch_paths(self) -> List[str]:
+    def watch_paths(self) -> list[str]:
         """Return the list of watched directories."""
         return list(self._watch_paths)
 
@@ -87,8 +87,8 @@ class AutoScheduler:
     def start(
         self,
         time_str: str,
-        watch_paths: List[str],
-        callback: Callable[[List[str]], None],
+        watch_paths: list[str],
+        callback: Callable[[list[str]], None],
     ) -> None:
         """
         Start the scheduler.
@@ -123,8 +123,8 @@ class AutoScheduler:
 
     def update_config(
         self,
-        time_str: Optional[str] = None,
-        watch_paths: Optional[List[str]] = None,
+        time_str: str | None = None,
+        watch_paths: list[str] | None = None,
     ) -> None:
         """Update scheduler configuration without restart."""
         with self._lock:
@@ -188,7 +188,7 @@ class AutoScheduler:
 
         self._schedule_next()
 
-    def _scan_watch_paths(self) -> List[str]:
+    def _scan_watch_paths(self) -> list[str]:
         """
         Scan all configured watch paths for Excel files.
         Only looks in the specified directories (NOT recursive).

@@ -15,9 +15,8 @@ import csv
 import logging
 import os
 from datetime import datetime
-from typing import Optional
 
-from core.csv_export import _csv_safe
+from core.constants import csv_safe
 from core.paths import get_project_root
 
 logger = logging.getLogger(__name__)
@@ -51,7 +50,7 @@ class AuditLogger:
         "Anomaly_Flag",
     ]
 
-    def __init__(self, log_dir: Optional[str] = None):
+    def __init__(self, log_dir: str | None = None):
         if log_dir is None:
             log_dir = os.path.join(get_project_root(), "data", "logs")
         os.makedirs(log_dir, exist_ok=True)
@@ -60,7 +59,10 @@ class AuditLogger:
         self._filepath = os.path.join(
             log_dir, f"Audit_Log_{timestamp}.csv"
         )
-        self._file = open(
+        # Long-lived handle held for the object's lifetime; released via
+        # __exit__/close()/atexit. A context manager here would close it
+        # prematurely, so SIM115 does not apply.
+        self._file = open(  # noqa: SIM115
             self._filepath, "w", newline="", encoding="utf-8-sig"
         )
         self._writer = csv.writer(self._file)
@@ -132,14 +134,14 @@ class AuditLogger:
             raise ValueError("Cannot log to a finalized audit log.")
         self._writer.writerow([
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            _csv_safe(filename),
-            _csv_safe(sheet),
+            csv_safe(filename),
+            csv_safe(sheet),
             row,
-            _csv_safe(cell_date),
-            _csv_safe(currency),
-            _csv_safe(original_value),
-            _csv_safe(new_value),
-            _csv_safe(rate_source),
+            csv_safe(cell_date),
+            csv_safe(currency),
+            csv_safe(original_value),
+            csv_safe(new_value),
+            csv_safe(rate_source),
             "Yes" if holiday_rollback else "No",
             "ANOMALY" if anomaly_flag else "",
         ])
@@ -160,12 +162,12 @@ class AuditLogger:
         self._writer.writerow([])
         self._writer.writerow([
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            _csv_safe("=== BATCH SUMMARY ==="),
-            _csv_safe(f"Files: {total_files}"),
-            _csv_safe(f"Success: {success}"),
-            _csv_safe(f"Failed: {failed}"),
-            _csv_safe(f"Anomalies: {anomalies_detected}"),
-            _csv_safe(f"Total Rows Modified: {self._row_count}"),
+            csv_safe("=== BATCH SUMMARY ==="),
+            csv_safe(f"Files: {total_files}"),
+            csv_safe(f"Success: {success}"),
+            csv_safe(f"Failed: {failed}"),
+            csv_safe(f"Anomalies: {anomalies_detected}"),
+            csv_safe(f"Total Rows Modified: {self._row_count}"),
             "", "", "", "",
         ])
 

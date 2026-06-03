@@ -6,55 +6,56 @@ import os
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-from core.csv_export import _csv_safe, _fmt, export_rates_csv
+from core.constants import csv_safe, format_rate_value
+from core.csv_export import export_rates_csv
 
-# ── Unit tests for _fmt ─────────────────────────────────────────────────
+# ── Unit tests for format_rate_value ─────────────────────────────────────
 
 class TestFmt:
-    """Tests for the _fmt formatting helper."""
+    """Tests for the format_rate_value formatting helper."""
 
     def test_none_returns_empty(self):
-        assert _fmt(None) == ""
+        assert format_rate_value(None) == ""
 
     def test_float_formats_four_decimals(self):
-        assert _fmt(34.5) == "34.5000"
+        assert format_rate_value(34.5) == "34.5000"
 
     def test_small_value(self):
-        assert _fmt(0.1234) == "0.1234"
+        assert format_rate_value(0.1234) == "0.1234"
 
     def test_integer_formats_as_float(self):
-        assert _fmt(1) == "1.0000"
+        assert format_rate_value(1) == "1.0000"
 
     def test_string_number(self):
-        assert _fmt("42.123") == "42.1230"
+        assert format_rate_value("42.123") == "42.1230"
 
     def test_decimal_exact_no_float_roundtrip(self):
         # Decimal path must not detour through float.
-        assert _fmt(Decimal("35.1150")) == "35.1150"
-        assert _fmt(Decimal("35.115")) == "35.1150"
+        assert format_rate_value(Decimal("35.1150")) == "35.1150"
+        assert format_rate_value(Decimal("35.115")) == "35.1150"
 
 
-# ── Unit tests for _csv_safe ─────────────────────────────────────────────
+# ── Unit tests for csv_safe ──────────────────────────────────────────────
 
 class TestCsvSafe:
     """Tests for the formula-injection sanitizer."""
 
     def test_none_is_empty(self):
-        assert _csv_safe(None) == ""
+        assert csv_safe(None) == ""
 
     def test_plain_text_unchanged(self):
-        assert _csv_safe("USD") == "USD"
+        assert csv_safe("USD") == "USD"
 
     def test_leading_equals_neutralized(self):
-        assert _csv_safe("=SUM(A1:A9)") == "'=SUM(A1:A9)"
+        assert csv_safe("=SUM(A1:A9)") == "'=SUM(A1:A9)"
 
     def test_leading_plus_minus_at_neutralized(self):
-        assert _csv_safe("+1") == "'+1"
-        assert _csv_safe("-cmd") == "'-cmd"
-        assert _csv_safe("@x") == "'@x"
+        assert csv_safe("+1") == "'+1"
+        assert csv_safe("-cmd") == "'-cmd"
+        assert csv_safe("@x") == "'@x"
 
     def test_strips_newlines_and_tabs(self):
-        assert _csv_safe("a\r\nb\tc") == "a  b c"
+        assert csv_safe("a\r\nb\tc") == "a  b c"
 
 
 # ── Integration tests for export_rates_csv ───────────────────────────────

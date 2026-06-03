@@ -13,7 +13,6 @@ import glob
 import os
 import shutil
 from datetime import datetime, timedelta
-from typing import Optional
 
 
 class BackupError(Exception):
@@ -51,7 +50,7 @@ class BackupManager:
         timestamp = datetime.now().strftime(self._TS_FORMAT)
         return f"{basename}__bak__{timestamp}.xlsx"
 
-    def _parse_backup_timestamp(self, fpath: str) -> Optional[datetime]:
+    def _parse_backup_timestamp(self, fpath: str) -> datetime | None:
         """Extract the embedded timestamp from a backup filename.
 
         Returns None if the filename does not match the backup pattern
@@ -93,8 +92,8 @@ class BackupManager:
 
         try:
             shutil.copy2(filepath, backup_path)
-        except (OSError, IOError) as e:
-            raise BackupError(f"Backup failed for {os.path.basename(filepath)}: {e}")
+        except OSError as e:
+            raise BackupError(f"Backup failed for {os.path.basename(filepath)}: {e}") from e
 
         return backup_path
 
@@ -131,20 +130,20 @@ class BackupManager:
                     f"Backup is empty, refusing to restore: {latest_backup}"
                 )
         except OSError as e:
-            raise BackupError(f"Backup not readable: {e}")
+            raise BackupError(f"Backup not readable: {e}") from e
 
         # Snapshot the current live file before overwriting so a bad revert
         # is recoverable.
         if os.path.exists(filepath):
             try:
                 shutil.copy2(filepath, filepath + ".pre-revert")
-            except (OSError, IOError) as e:
-                raise BackupError(f"Pre-revert snapshot failed: {e}")
+            except OSError as e:
+                raise BackupError(f"Pre-revert snapshot failed: {e}") from e
 
         try:
             shutil.copy2(latest_backup, filepath)
-        except (OSError, IOError) as e:
-            raise BackupError(f"Restore failed: {e}")
+        except OSError as e:
+            raise BackupError(f"Restore failed: {e}") from e
 
         return latest_backup
 

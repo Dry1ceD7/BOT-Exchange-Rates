@@ -11,6 +11,7 @@ Security: Uses a random nonce stored in a lockfile to authenticate IPC
 commands, preventing arbitrary local processes from triggering RESTORE.
 """
 
+import contextlib
 import getpass
 import hmac
 import logging
@@ -19,8 +20,8 @@ import secrets
 import sys
 import tempfile
 import threading
+from collections.abc import Callable
 from multiprocessing.connection import Client, Listener
-from typing import Callable, Optional
 
 from core.constants import IPC_NONCE_LENGTH
 
@@ -77,11 +78,11 @@ def _generate_nonce() -> str:
     return nonce
 
 
-def _read_nonce() -> Optional[str]:
+def _read_nonce() -> str | None:
     """Read the nonce from the lockfile, or None if missing."""
     path = _lockfile_path()
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return f.read().strip()
     except (FileNotFoundError, OSError):
         return None
@@ -89,10 +90,8 @@ def _read_nonce() -> Optional[str]:
 
 def _cleanup_nonce():
     """Remove the nonce lockfile on shutdown."""
-    try:
+    with contextlib.suppress(FileNotFoundError, OSError):
         os.remove(_lockfile_path())
-    except (FileNotFoundError, OSError):
-        pass
 
 
 def ping_running_instance() -> bool:
@@ -112,7 +111,7 @@ def ping_running_instance() -> bool:
             # send()/recv() because multiprocessing.connection pickles
             # objects, and recv() would UNPICKLE attacker-controlled bytes
             # before any authentication — a local pickle RCE vector.
-            conn.send_bytes(f"RESTORE:{nonce}".encode("utf-8"))
+            conn.send_bytes(f"RESTORE:{nonce}".encode())
             return True
     except (ConnectionRefusedError, FileNotFoundError, OSError):
         return False
@@ -124,10 +123,10 @@ class SingleInstanceServer:
     """
     def __init__(self, on_restore: Callable[[], None]):
         self.on_restore = on_restore
-        self._listener: Optional[Listener] = None
+        self._listener: Listener | None = None
         self._running = False
-        self._thread: Optional[threading.Thread] = None
-        self._nonce: Optional[str] = None
+        self._thread: threading.Thread | None = None
+        self._nonce: str | None = None
 
     def start(self) -> bool:
         """
@@ -161,10 +160,8 @@ class SingleInstanceServer:
             # SECURITY: restrict the unix socket to the owner only (0o600)
             # so other local users cannot connect and attempt RESTORE.
             if sys.platform != "win32":
-                try:
+                with contextlib.suppress(OSError):
                     os.chmod(address, 0o600)
-                except OSError:
-                    pass
 
             # Generate authentication nonce for this session
             self._nonce = _generate_nonce()
@@ -215,7 +212,7 @@ class SingleInstanceServer:
                     # with hmac.compare_digest (constant-time) and NEVER
                     # interpret the payload as a pickled object.
                     raw = conn.recv_bytes(256)
-                    expected = f"RESTORE:{self._nonce}".encode("utf-8")
+                    expected = f"RESTORE:{self._nonce}".encode()
                     if hmac.compare_digest(raw, expected):
                         logger.info("Authenticated RESTORE signal received.")
                         self.on_restore()
@@ -236,10 +233,8 @@ class SingleInstanceServer:
         self._running = False
         _cleanup_nonce()
         if self._listener:
-            try:
+            with contextlib.suppress(OSError):
                 self._listener.close()
-            except OSError:
-                pass
             self._listener = None
         if self._thread and self._thread.is_alive():
             self._thread = None

@@ -11,16 +11,16 @@ Slim orchestrator. Heavy logic extracted to:
 """
 
 import asyncio
+import contextlib
 import gc
 import logging
 import os
-import re
 import shutil
 import threading
 import traceback
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import openpyxl
 
@@ -44,10 +44,25 @@ from core.excel_io import (
     write_custom_exrate_data,
 )
 from core.exrate_sheet import update_master_exrate_sheet
-from core.logic import BOTLogicEngine, safe_to_decimal
+from core.logic import (
+    BOTLogicEngine,
+    build_holiday_lookup,
+    compute_year_start_date,
+    safe_to_decimal,
+)
 from core.prescan import prescan_oldest_date
 
 logger = logging.getLogger(__name__)
+
+# Backward-compat re-export: pure functions now live in core.logic but are
+# still importable from core.engine (e.g. `from core.engine import
+# compute_year_start_date`).
+__all__ = [
+    "FileSizeLimitError",
+    "LedgerEngine",
+    "build_holiday_lookup",
+    "compute_year_start_date",
+]
 
 # -------------------------------------------------------------------------
 # EXCEPTIONS
@@ -100,8 +115,8 @@ class LedgerEngine:
         self,
         api_client: BOTClient,
         event_bus=None,
-        backup: Optional[BackupManager] = None,
-        cache: Optional[CacheDB] = None,
+        backup: BackupManager | None = None,
+        cache: CacheDB | None = None,
     ) -> None:
         """Initialize the processing engine.
 
@@ -153,52 +168,34 @@ class LedgerEngine:
                 f"File too large (> {self.MAX_FILE_SIZE_MB}MB)."
             )
 
-    def _parse_date(self, cell_value) -> Optional[date]:
+    def _parse_date(self, cell_value) -> date | None:
         """Parse a date from a cell value (shared parser, full superset)."""
         return parse_date(cell_value)
 
     # ── Static delegates (kept for backward compat) ──────────────────
     @staticmethod
     def prescan_oldest_date(
-        filepaths: List[str],
+        filepaths: list[str],
         target_col_name: str = "Date",
-    ) -> Tuple[date, bool]:
+    ) -> tuple[date, bool]:
         """Delegate to core.prescan module."""
         return prescan_oldest_date(filepaths, target_col_name)
 
     @staticmethod
     def compute_year_start_date(
         target_year: int,
-        holidays: List[date],
+        holidays: list[date],
     ) -> date:
-        """
-        Computes the last valid trading day of the PREVIOUS calendar year.
-        Dec 31 is always office day-off. Start from Dec 30 and roll back.
-        """
-        holidays_set = set(holidays)
-        prev_year = target_year - 1
-        check_date = date(prev_year, 12, 30)
-        # Roll back through December until a trading day is found. Do NOT
-        # return a fixed fallback (Dec 20 may itself be a weekend/holiday).
-        # Bound to December: a year-start outside Dec is meaningless, so
-        # raise rather than silently returning a November date.
-        while check_date.year == prev_year and check_date.month == 12:
-            if check_date.weekday() < 5 and check_date not in holidays_set:
-                return check_date
-            check_date -= timedelta(days=1)
-        raise ValueError(
-            f"No trading day found in December {prev_year} "
-            "(all weekends/holidays)."
-        )
-
+        """Backward-compat delegate to core.logic.compute_year_start_date."""
+        return compute_year_start_date(target_year, holidays)
 
 
     # ================================================================== #
     #  CACHE-FIRST DATA LOADING (v2.6.1)
     # ================================================================== #
     async def _preload_api_data(
-        self, dates: Set[date], start_date: str
-    ) -> Tuple:
+        self, dates: set[date], start_date: str
+    ) -> tuple:
         """
         Cache-First Architecture: SQLite → API fallback → cache store.
         Returns (logic_engine, usd_selling, eur_selling,
@@ -220,7 +217,7 @@ class LedgerEngine:
         for year in years:
             if self.cache.has_holidays_for_year(year):
                 cached_hols = self.cache.get_holidays(year)
-                for h_date, h_name in cached_hols:
+                for h_date, _h_name in cached_hols:
                     try:
                         holidays_list.append(
                             datetime.strptime(h_date, "%Y-%m-%d").date()
@@ -248,10 +245,10 @@ class LedgerEngine:
 
         # ── RATES: Cache-first (4 columns) ───────────────────────────
         cached_rates = self.cache.get_rates_bulk(min_date, max_date)
-        usd_buying: Dict[date, Decimal] = {}
-        usd_selling: Dict[date, Decimal] = {}
-        eur_buying: Dict[date, Decimal] = {}
-        eur_selling: Dict[date, Decimal] = {}
+        usd_buying: dict[date, Decimal] = {}
+        usd_selling: dict[date, Decimal] = {}
+        eur_buying: dict[date, Decimal] = {}
+        eur_selling: dict[date, Decimal] = {}
 
         for d, rate_dict in cached_rates.items():
             if rate_dict["usd_buying"] is not None:
@@ -277,11 +274,9 @@ class LedgerEngine:
             fetch_start = min(missing_dates)
             fetch_end = max(missing_dates)
             self._emit(
-                "Cache miss: %d dates (%s to %s). Calling API" % (
-                    len(missing_dates),
-                    fetch_start.strftime("%Y-%m-%d"),
-                    fetch_end.strftime("%Y-%m-%d"),
-                ),
+                f"Cache miss: {len(missing_dates)} dates "
+                f"({fetch_start.strftime('%Y-%m-%d')} to "
+                f"{fetch_end.strftime('%Y-%m-%d')}). Calling API",
             )
             logger.info(
                 "Cache miss: %d dates missing (%s → %s). Fetching from API...",
@@ -322,9 +317,8 @@ class LedgerEngine:
             ]
             self.cache.insert_rates_bulk(bulk)
             self._emit(
-                "API fetch done: %d USD + %d EUR records cached" % (
-                    len(usd_data), len(eur_data),
-                ),
+                f"API fetch done: {len(usd_data)} USD + "
+                f"{len(eur_data)} EUR records cached",
                 etype="success",
             )
             logger.info(
@@ -342,10 +336,10 @@ class LedgerEngine:
 
     def _run_anomaly_check(
         self,
-        usd_buying: Dict[date, Decimal],
-        usd_selling: Dict[date, Decimal],
-        eur_buying: Dict[date, Decimal],
-        eur_selling: Dict[date, Decimal],
+        usd_buying: dict[date, Decimal],
+        usd_selling: dict[date, Decimal],
+        eur_buying: dict[date, Decimal],
+        eur_selling: dict[date, Decimal],
     ) -> int:
         """
         v3.1.0: Run anomaly detection across all loaded rates.
@@ -379,7 +373,7 @@ class LedgerEngine:
 
     async def _detect_standalone_exrate(
         self, filepath: str,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Detect if the file is a standalone ExRate workbook (no month tabs).
 
         Returns the result of update_exrate_standalone() if standalone,
@@ -429,7 +423,7 @@ class LedgerEngine:
 
         return None  # Not standalone — proceed with normal processing
 
-    def _prescan_target_dates(self, filepath: str) -> Set[date]:
+    def _prescan_target_dates(self, filepath: str) -> set[date]:
         """Scan the workbook in read-only mode to extract all target dates.
 
         Opens the workbook in read-only mode, scans all non-skipped sheets
@@ -437,7 +431,7 @@ class LedgerEngine:
         The workbook is properly closed and garbage-collected after scanning.
         """
         self._emit("Scanning dates from workbook")
-        all_target_dates: Set[date] = set()
+        all_target_dates: set[date] = set()
 
         wb_scan = None
         try:
@@ -449,7 +443,7 @@ class LedgerEngine:
                     continue
                 ws = wb_scan[sheet_name]
                 header_row_idx = None
-                col_indices: Dict[str, int] = {}
+                col_indices: dict[str, int] = {}
                 for row_idx, row in enumerate(
                     ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
                 ):
@@ -478,10 +472,8 @@ class LedgerEngine:
             raise
         finally:
             if wb_scan is not None:
-                try:
+                with contextlib.suppress(OSError):
                     wb_scan.close()
-                except OSError:
-                    pass
                 del wb_scan
                 wb_scan = None
             gc.collect()
@@ -490,55 +482,18 @@ class LedgerEngine:
 
     def _build_holiday_lookup(
         self,
-        all_target_dates: Set[date],
+        all_target_dates: set[date],
         computed_start: date,
         logic_engine,
-    ) -> Tuple[Set[date], Dict[date, str]]:
-        """Build holiday sets and name mappings from cached holiday data.
+    ) -> tuple[set[date], dict[date, str]]:
+        """Backward-compat delegate to core.logic.build_holiday_lookup.
 
-        Parses substitution holiday names (e.g., "Substitution for
-        Songkran Day (15th April 2025)") to map the original holiday
-        date as well.
-
-        Returns:
-            Tuple of (master_holidays_set, holidays_names dict).
+        Injects this engine's cache so existing instance callers keep
+        working unchanged.
         """
-        # Expected BOT format: "Substitution for Songkran Day (15th April 2025)"
-        sub_pattern = re.compile(r"^Substitution for ([^(]+)\s*\((.*?)\)$")
-        holidays_names: Dict[date, str] = {}
-        master_holidays_set = set(logic_engine.holidays)
-
-        for year in {
-            d.year
-            for d in (all_target_dates | {computed_start, date.today()})
-        }:
-            cached_hols = self.cache.get_holidays(year)
-            for h_str, h_name in cached_hols:
-                try:
-                    h_obj = datetime.strptime(h_str, "%Y-%m-%d").date()
-                    holidays_names[h_obj] = h_name
-                    m = sub_pattern.search(h_name)
-                    if m:
-                        real_name = m.group(1).strip()
-                        date_str = m.group(2).strip()
-                        date_str_clean = re.sub(
-                            r'(\d+)(st|nd|rd|th)', r'\1', date_str
-                        )
-                        date_str_clean = re.sub(
-                            r'^[A-Za-z]+\s+', '', date_str_clean
-                        )
-                        try:
-                            real_dt = datetime.strptime(
-                                date_str_clean, '%d %B %Y'
-                            ).date()
-                            holidays_names[real_dt] = real_name
-                            master_holidays_set.add(real_dt)
-                        except (ValueError, TypeError):
-                            pass
-                except (ValueError, TypeError):
-                    pass
-
-        return master_holidays_set, holidays_names
+        return build_holiday_lookup(
+            self.cache, all_target_dates, computed_start, logic_engine,
+        )
 
     # ================================================================== #
     #  PROCESS SINGLE LEDGER
@@ -546,7 +501,7 @@ class LedgerEngine:
     async def process_ledger(
         self,
         filepath: str,
-        start_date: Optional[str] = None,
+        start_date: str | None = None,
         dry_run: bool = False,
     ) -> str:
         """Process a single ledger file end-to-end."""
@@ -596,13 +551,13 @@ class LedgerEngine:
                 etype="warning",
             )
 
-        computed_start = self.compute_year_start_date(
+        computed_start = compute_year_start_date(
             target_year, logic_engine.holidays
         )
 
         # ── Build holiday names lookup ───────────────────────────────
-        master_holidays_set, holidays_names = self._build_holiday_lookup(
-            all_target_dates, computed_start, logic_engine
+        master_holidays_set, holidays_names = build_holiday_lookup(
+            self.cache, all_target_dates, computed_start, logic_engine
         )
         # ══════════════════════════════════════════════════════════════
         #  openpyxl ENGINE
@@ -692,20 +647,18 @@ class LedgerEngine:
     # ================================================================== #
     async def process_batch(
         self,
-        filepaths: List[str],
-        start_date: Optional[str] = None,
-        progress_cb: Optional[
-            Callable[[int, int, str, Optional[str]], None]
-        ] = None,
+        filepaths: list[str],
+        start_date: str | None = None,
+        progress_cb: Callable[[int, int, str, str | None], None] | None = None,
         dry_run: bool = False,
-    ) -> Tuple[int, int, List[str]]:
+    ) -> tuple[int, int, list[str]]:
         """Batch processing with pre-edit backup, cache, and auto-cleanup."""
         if not dry_run:
             self.backup.cleanup_old_backups(max_age_days=BACKUP_MAX_AGE_DAYS)
         total = len(filepaths)
         success = 0
         anomaly_total = 0
-        errors: List[str] = []
+        errors: list[str] = []
 
         for idx, fp in enumerate(filepaths):
             fname = os.path.basename(fp)
@@ -757,10 +710,10 @@ class LedgerEngine:
     async def update_exrate_standalone(
         self,
         filepath: str,
-        progress_cb: Optional[Callable[[str], None]] = None,
-        currencies: Optional[List[str]] = None,
-        rate_types: Optional[Dict[str, str]] = None,
-        date_range: Optional[Tuple[date, date]] = None,
+        progress_cb: Callable[[str], None] | None = None,
+        currencies: list[str] | None = None,
+        rate_types: dict[str, str] | None = None,
+        date_range: tuple[date, date] | None = None,
     ) -> str:
         """
         Update a standalone ExRate .xlsx file with fresh exchange rates.
@@ -838,10 +791,7 @@ class LedgerEngine:
                     if parsed:
                         existing_dates.add(parsed)
 
-                if existing_dates:
-                    target_year = min(existing_dates).year
-                else:
-                    target_year = date.today().year
+                target_year = min(existing_dates).year if existing_dates else date.today().year
 
                 # Override with manual date_range if provided
                 if date_range:
@@ -861,14 +811,12 @@ class LedgerEngine:
                     all_target_dates, start_date_str
                 )
 
-                computed_start = self.compute_year_start_date(
+                computed_start = compute_year_start_date(
                     target_year, logic_engine.holidays
                 )
 
-                master_holidays_set, holidays_names = (
-                    self._build_holiday_lookup(
-                        all_target_dates, computed_start, logic_engine
-                    )
+                master_holidays_set, holidays_names = build_holiday_lookup(
+                    self.cache, all_target_dates, computed_start, logic_engine,
                 )
 
                 _status("Writing exchange rate data...")
@@ -910,7 +858,7 @@ class LedgerEngine:
                 end_dt = date.today()
 
             # rate_data[currency][api_field][date] = value
-            rate_data: Dict[str, Dict[str, Dict[date, float]]] = {}
+            rate_data: dict[str, dict[str, dict[date, float]]] = {}
 
             for ccy in currencies:
                 _status(f"Fetching {ccy} rates...")
@@ -918,7 +866,7 @@ class LedgerEngine:
                     start_dt, end_dt, ccy,
                 )
                 rate_data[ccy] = {}
-                for label, api_field in rate_types.items():
+                for _label, api_field in rate_types.items():
                     rate_data[ccy][api_field] = {}
 
                 for rec in raw_results:
@@ -928,7 +876,7 @@ class LedgerEngine:
                         ).date()
                     except (ValueError, TypeError):
                         continue
-                    for label, api_field in rate_types.items():
+                    for _label, api_field in rate_types.items():
                         val = getattr(rec, api_field, None)
                         if val is not None:
                             rate_data[ccy][api_field][rec_date] = val
@@ -941,15 +889,13 @@ class LedgerEngine:
             ) = await self._preload_api_data(all_target_dates, str(start_dt))
 
             holidays_set = set(logic_engine.holidays)
-            holidays_names_map: Dict[date, str] = {}
+            holidays_names_map: dict[date, str] = {}
             for year in {start_dt.year, end_dt.year}:
                 for h_str, h_name in self.cache.get_holidays(year):
-                    try:
+                    with contextlib.suppress(ValueError, TypeError):
                         holidays_names_map[
                             datetime.strptime(h_str, "%Y-%m-%d").date()
                         ] = h_name
-                    except (ValueError, TypeError):
-                        pass
 
             # Build column headers: Date + (CCY RateType)... + Holidays
             headers = ["Date"]

@@ -18,12 +18,12 @@ Platform notes:
   - macOS/Linux: graceful fallback — close simply quits as before
 """
 
+import contextlib
 import logging
 import os
 import platform
 import sys
 import threading
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +73,8 @@ class TrayManager:
 
     def __init__(self, app):
         self._app = app
-        self._icon: "pystray.Icon | None" = None
-        self._tray_thread: Optional[threading.Thread] = None
+        self._icon: pystray.Icon | None = None
+        self._tray_thread: threading.Thread | None = None
         self._is_hidden = False
 
     @property
@@ -137,10 +137,8 @@ class TrayManager:
     def _on_show(self, icon=None, item=None) -> None:
         """Restore the window from the tray."""
         # Schedule on the Tk main thread
-        try:
+        with contextlib.suppress(RuntimeError):  # app already destroyed
             self._app.after(0, self._restore_window)
-        except RuntimeError:
-            pass  # app already destroyed
 
     def _restore_window(self) -> None:
         """Bring the window back and focus it."""
@@ -158,10 +156,8 @@ class TrayManager:
         # Schedule the app-level close handler on the Tk main thread so workers
         # are torn down cleanly before destroy (falls back to destroy).
         close_handler = getattr(self._app, "_on_app_close", self._app.destroy)
-        try:
+        with contextlib.suppress(RuntimeError):  # app already destroyed
             self._app.after(0, close_handler)
-        except RuntimeError:
-            pass  # app already destroyed
 
     def restore_if_hidden(self) -> None:
         """
@@ -174,7 +170,5 @@ class TrayManager:
     def cleanup(self) -> None:
         """Stop the tray icon (called during app shutdown)."""
         if self._icon:
-            try:
+            with contextlib.suppress(RuntimeError, OSError):
                 self._icon.stop()
-            except (RuntimeError, OSError):
-                pass
