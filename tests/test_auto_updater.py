@@ -7,11 +7,12 @@ Comprehensive test suite for core/auto_updater.py.
 Covers:
   - check_for_update (version comparison, network errors, prerelease)
   - get_installer_asset_url (asset parsing, SHA-256 URL extraction)
-  - _fetch_expected_checksum (checksum file parsing)
+  - fetch_expected_checksum (checksum file parsing)
   - _verify_file_sha256 (hash verification)
   - download_update (download flow, integrity check, cleanup)
   - apply_update (bat script generation, path sanitization)
-  - _get_install_dir (registry, frozen, dev mode)
+  - get_install_dir (registry, frozen, dev mode)
+  - back-compat aliases (_get_install_dir, _fetch_expected_checksum)
 """
 
 import hashlib
@@ -21,10 +22,11 @@ from unittest.mock import MagicMock, patch
 import httpx
 
 from core.auto_updater import (
-    _fetch_expected_checksum,
     _verify_file_sha256,
     check_for_update,
     download_update,
+    fetch_expected_checksum,
+    get_install_dir,
     get_installer_asset_url,
 )
 
@@ -248,22 +250,23 @@ class TestGetInstallerAssetUrl:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  _fetch_expected_checksum
+#  fetch_expected_checksum
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestFetchExpectedChecksum:
-    """Tests for _fetch_expected_checksum."""
+    """Tests for fetch_expected_checksum (public name)."""
 
     def test_parses_plain_hash(self):
         """Parses a standalone SHA-256 hex string."""
         expected = "a" * 64
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.text = f"  {expected}  \n"
         mock_resp.raise_for_status = MagicMock()
 
         with patch("core.auto_updater.httpx.get", return_value=mock_resp):
-            result = _fetch_expected_checksum("https://example.com/hash.sha256")
+            result = fetch_expected_checksum("https://github.com/hash.sha256")
 
         assert result == expected
 
@@ -271,22 +274,24 @@ class TestFetchExpectedChecksum:
         """Parses sha256sum-style format: '<hash>  <filename>'."""
         expected = "b" * 64
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.text = f"{expected}  BOT-ExRate-Setup.exe\n"
         mock_resp.raise_for_status = MagicMock()
 
         with patch("core.auto_updater.httpx.get", return_value=mock_resp):
-            result = _fetch_expected_checksum("https://example.com/hash.sha256")
+            result = fetch_expected_checksum("https://github.com/hash.sha256")
 
         assert result == expected
 
     def test_returns_none_for_invalid_hash(self):
         """Returns None when hash isn't 64 hex chars."""
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.text = "short_hash"
         mock_resp.raise_for_status = MagicMock()
 
         with patch("core.auto_updater.httpx.get", return_value=mock_resp):
-            result = _fetch_expected_checksum("https://example.com/hash.sha256")
+            result = fetch_expected_checksum("https://github.com/hash.sha256")
 
         assert result is None
 
@@ -296,7 +301,7 @@ class TestFetchExpectedChecksum:
             "core.auto_updater.httpx.get",
             side_effect=httpx.ConnectError("nope"),
         ):
-            result = _fetch_expected_checksum("https://example.com/hash.sha256")
+            result = fetch_expected_checksum("https://github.com/hash.sha256")
 
         assert result is None
 
@@ -352,9 +357,11 @@ class TestDownloadUpdate:
     def test_successful_download(self, tmp_path):
         """Downloads file successfully to specified directory."""
         content = b"fake installer content"
+        expected_hash = hashlib.sha256(content).hexdigest()
         dest = str(tmp_path)
 
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.headers = {"content-length": str(len(content))}
         mock_resp.iter_bytes.return_value = [content]
         mock_resp.raise_for_status = MagicMock()
@@ -363,9 +370,10 @@ class TestDownloadUpdate:
 
         with patch("core.auto_updater.httpx.stream", return_value=mock_resp):
             result = download_update(
-                url="https://dl/setup.exe",
+                url="https://github.com/dl/setup.exe",
                 dest_dir=dest,
                 filename="setup.exe",
+                expected_sha256=expected_hash,
             )
 
         assert result["error"] is None
@@ -379,6 +387,7 @@ class TestDownloadUpdate:
         dest = str(tmp_path)
 
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.headers = {"content-length": str(len(content))}
         mock_resp.iter_bytes.return_value = [content]
         mock_resp.raise_for_status = MagicMock()
@@ -387,7 +396,7 @@ class TestDownloadUpdate:
 
         with patch("core.auto_updater.httpx.stream", return_value=mock_resp):
             result = download_update(
-                url="https://dl/setup.exe",
+                url="https://github.com/dl/setup.exe",
                 dest_dir=dest,
                 filename="verified.exe",
                 expected_sha256=expected_hash,
@@ -403,6 +412,7 @@ class TestDownloadUpdate:
         dest = str(tmp_path)
 
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.headers = {"content-length": str(len(content))}
         mock_resp.iter_bytes.return_value = [content]
         mock_resp.raise_for_status = MagicMock()
@@ -411,7 +421,7 @@ class TestDownloadUpdate:
 
         with patch("core.auto_updater.httpx.stream", return_value=mock_resp):
             result = download_update(
-                url="https://dl/setup.exe",
+                url="https://github.com/dl/setup.exe",
                 dest_dir=dest,
                 filename="bad.exe",
                 expected_sha256=wrong_hash,
@@ -428,6 +438,7 @@ class TestDownloadUpdate:
         dest = str(tmp_path)
 
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.headers = {"content-length": "1000000"}
         mock_resp.iter_bytes.side_effect = httpx.ReadError("connection reset")
         mock_resp.raise_for_status = MagicMock()
@@ -436,9 +447,10 @@ class TestDownloadUpdate:
 
         with patch("core.auto_updater.httpx.stream", return_value=mock_resp):
             result = download_update(
-                url="https://dl/setup.exe",
+                url="https://github.com/dl/setup.exe",
                 dest_dir=dest,
                 filename="partial.exe",
+                expected_sha256="a" * 64,
             )
 
         assert result["error"] is not None
@@ -447,10 +459,12 @@ class TestDownloadUpdate:
     def test_progress_callback(self, tmp_path):
         """Invokes progress_cb with download progress."""
         content = b"x" * 1024
+        expected_hash = hashlib.sha256(content).hexdigest()
         dest = str(tmp_path)
         cb_calls = []
 
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.headers = {"content-length": str(len(content))}
         mock_resp.iter_bytes.return_value = [content]
         mock_resp.raise_for_status = MagicMock()
@@ -459,14 +473,105 @@ class TestDownloadUpdate:
 
         with patch("core.auto_updater.httpx.stream", return_value=mock_resp):
             download_update(
-                url="https://dl/setup.exe",
+                url="https://github.com/dl/setup.exe",
                 dest_dir=dest,
                 filename="progress.exe",
+                expected_sha256=expected_hash,
                 progress_cb=lambda d, t: cb_calls.append((d, t)),
             )
 
         assert len(cb_calls) > 0
         assert cb_calls[-1][0] == len(content)
+
+    def test_refuses_missing_sha256(self, tmp_path):
+        """SECURITY: refuse to download without a mandatory sha256."""
+        result = download_update(
+            url="https://github.com/dl/setup.exe",
+            dest_dir=str(tmp_path),
+            filename="nohash.exe",
+            expected_sha256=None,
+        )
+        assert result["path"] is None
+        assert result["error"] is not None
+        assert "checksum" in result["error"].lower()
+
+    def test_refuses_non_allowlisted_host(self, tmp_path):
+        """SECURITY: refuse non-allowlisted download hosts (SSRF)."""
+        result = download_update(
+            url="https://evil.example.com/setup.exe",
+            dest_dir=str(tmp_path),
+            filename="evil.exe",
+            expected_sha256="a" * 64,
+        )
+        assert result["path"] is None
+        assert result["error"] is not None
+        assert "host" in result["error"].lower()
+
+    def test_refuses_http_scheme(self, tmp_path):
+        """SECURITY: refuse non-https schemes even for allowlisted host."""
+        result = download_update(
+            url="http://github.com/dl/setup.exe",
+            dest_dir=str(tmp_path),
+            filename="insecure.exe",
+            expected_sha256="a" * 64,
+        )
+        assert result["path"] is None
+        assert result["error"] is not None
+
+    def test_refuses_redirect_to_non_allowlisted_host(self, tmp_path):
+        """SECURITY: a redirect off the allowlist is blocked (SSRF)."""
+        mock_resp = MagicMock()
+        mock_resp.is_redirect = True
+        mock_resp.headers = {"location": "https://evil.example.com/x.exe"}
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("core.auto_updater.httpx.stream", return_value=mock_resp):
+            result = download_update(
+                url="https://github.com/dl/setup.exe",
+                dest_dir=str(tmp_path),
+                filename="redir.exe",
+                expected_sha256="a" * 64,
+            )
+
+        assert result["path"] is None
+        assert result["error"] is not None
+        assert "host" in result["error"].lower()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  _is_allowed_download_url (SSRF host allowlist)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestAllowedDownloadUrl:
+    """Tests for the SSRF host allowlist helper."""
+
+    def test_allows_known_github_hosts(self):
+        from core.auto_updater import _is_allowed_download_url
+
+        assert _is_allowed_download_url("https://github.com/a/b.exe")
+        assert _is_allowed_download_url(
+            "https://objects.githubusercontent.com/x"
+        )
+        assert _is_allowed_download_url(
+            "https://release-assets.githubusercontent.com/y"
+        )
+
+    def test_blocks_unknown_host(self):
+        from core.auto_updater import _is_allowed_download_url
+
+        assert not _is_allowed_download_url("https://evil.example.com/x")
+
+    def test_blocks_non_https(self):
+        from core.auto_updater import _is_allowed_download_url
+
+        assert not _is_allowed_download_url("http://github.com/x")
+
+    def test_blocks_garbage(self):
+        from core.auto_updater import _is_allowed_download_url
+
+        assert not _is_allowed_download_url("not a url")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -484,24 +589,81 @@ class TestApplyUpdateSanitization:
         unsafe_path = str(tmp_path / "bad&path")
         os.makedirs(unsafe_path, exist_ok=True)
 
-        with patch("core.auto_updater._get_install_dir", return_value=unsafe_path):
-            with patch("sys.frozen", True, create=True):
-                result = apply_update(str(tmp_path / "BOT-ExRate-Setup.exe"))
+        # A real installer file with a matching hash so we get PAST the
+        # mandatory re-verify step and actually reach the path check.
+        installer = tmp_path / "BOT-ExRate-Setup.exe"
+        installer.write_bytes(b"setup")
+        good_hash = hashlib.sha256(b"setup").hexdigest()
+
+        with (
+            patch("core.auto_updater.get_install_dir", return_value=unsafe_path),
+            patch("sys.frozen", True, create=True),
+        ):
+            result = apply_update(
+                str(installer), expected_sha256=good_hash
+            )
 
         # Should fail because the install dir has '&'
         assert result["success"] is False
+        assert "Unsafe characters" in result["error"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  _get_install_dir
+#  get_install_dir
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestGetInstallDir:
-    """Tests for _get_install_dir."""
+    """Tests for get_install_dir (public name)."""
 
     def test_dev_mode_returns_project_root(self):
         """In development mode, returns project root."""
+        with patch("sys.frozen", False, create=True):
+            result = get_install_dir()
+
+        assert result is not None
+        assert os.path.isdir(result)
+
+    def test_frozen_mode_uses_exe_parent(self, tmp_path):
+        """When frozen, uses sys.executable parent dir."""
+        fake_exe = str(tmp_path / "BOT-ExRate.exe")
+        with open(fake_exe, "w") as f:
+            f.write("fake")
+
+        with (
+            patch("sys.frozen", True, create=True),
+            patch("sys.executable", fake_exe),
+            patch("platform.system", return_value="Darwin"),
+        ):
+            result = get_install_dir()
+
+        assert result == str(tmp_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  BACK-COMPAT ALIASES (old private names)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackCompatAliases:
+    """The old underscore names must remain importable and point at the
+    new public functions, so GUI panels using the old names keep working."""
+
+    def test_get_install_dir_alias_is_public(self):
+        from core.auto_updater import _get_install_dir, get_install_dir
+
+        assert _get_install_dir is get_install_dir
+
+    def test_fetch_expected_checksum_alias_is_public(self):
+        from core.auto_updater import (
+            _fetch_expected_checksum,
+            fetch_expected_checksum,
+        )
+
+        assert _fetch_expected_checksum is fetch_expected_checksum
+
+    def test_old_install_dir_alias_still_callable(self):
+        """Calling via the legacy name returns a valid dir in dev mode."""
         from core.auto_updater import _get_install_dir
 
         with patch("sys.frozen", False, create=True):
@@ -510,17 +672,133 @@ class TestGetInstallDir:
         assert result is not None
         assert os.path.isdir(result)
 
-    def test_frozen_mode_uses_exe_parent(self, tmp_path):
-        """When frozen, uses sys.executable parent dir."""
-        from core.auto_updater import _get_install_dir
+    def test_old_checksum_alias_still_callable(self):
+        """Calling via the legacy name parses a checksum."""
+        from core.auto_updater import _fetch_expected_checksum
 
-        fake_exe = str(tmp_path / "BOT-ExRate.exe")
-        with open(fake_exe, "w") as f:
-            f.write("fake")
+        expected = "c" * 64
+        mock_resp = MagicMock()
+        mock_resp.is_redirect = False
+        mock_resp.text = f"{expected}\n"
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch("core.auto_updater.httpx.get", return_value=mock_resp):
+            result = _fetch_expected_checksum(
+                "https://github.com/hash.sha256"
+            )
+
+        assert result == expected
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  apply_update — mandatory re-hash before execution (TOCTOU)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestApplyUpdateReverify:
+    """The installer hash MUST be re-verified immediately before execution."""
+
+    def test_refuses_when_no_hash_supplied(self, tmp_path):
+        from core.auto_updater import apply_update
+
+        installer = tmp_path / "BOT-ExRate-Setup.exe"
+        installer.write_bytes(b"setup")
 
         with patch("sys.frozen", True, create=True):
-            with patch("sys.executable", fake_exe):
-                with patch("platform.system", return_value="Darwin"):
-                    result = _get_install_dir()
+            result = apply_update(str(installer), expected_sha256=None)
 
-        assert result == str(tmp_path)
+        assert result["success"] is False
+        assert "SHA-256" in result["error"]
+
+    def test_refuses_when_file_missing(self, tmp_path):
+        from core.auto_updater import apply_update
+
+        missing = str(tmp_path / "gone.exe")
+        with patch("sys.frozen", True, create=True):
+            result = apply_update(missing, expected_sha256="a" * 64)
+
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+    def test_refuses_tampered_file(self, tmp_path):
+        """File swapped after download (hash mismatch) must NOT be executed."""
+        from core.auto_updater import apply_update
+
+        installer = tmp_path / "BOT-ExRate-Setup.exe"
+        installer.write_bytes(b"original")
+        # Expected hash is for the ORIGINAL content...
+        good_hash = hashlib.sha256(b"original").hexdigest()
+        # ...but an attacker swapped the file before exec.
+        installer.write_bytes(b"MALICIOUS PAYLOAD")
+
+        with patch("sys.frozen", True, create=True), patch("core.auto_updater.get_install_dir",
+                   return_value=str(tmp_path)), patch("subprocess.Popen") as mock_popen:
+            result = apply_update(
+                str(installer), expected_sha256=good_hash
+            )
+
+        assert result["success"] is False
+        assert "mismatch" in result["error"].lower()
+        # CRITICAL: the installer must never have been launched.
+        mock_popen.assert_not_called()
+
+    def test_runs_when_hash_matches(self, tmp_path):
+        """A valid, matching installer proceeds to launch."""
+        from core.auto_updater import apply_update
+
+        installer = tmp_path / "BOT-ExRate-Setup.exe"
+        installer.write_bytes(b"good setup")
+        good_hash = hashlib.sha256(b"good setup").hexdigest()
+
+        with patch("sys.frozen", True, create=True), patch("core.auto_updater.get_install_dir",
+                   return_value=str(tmp_path)), patch("subprocess.Popen") as mock_popen:
+            result = apply_update(
+                str(installer), expected_sha256=good_hash
+            )
+
+        assert result["success"] is True
+        mock_popen.assert_called_once()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  download_update — private per-run directory
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestDownloadPrivateDir:
+    """When no dest_dir is given, a private 0700 dir is created (not shared)."""
+
+    def test_uses_private_mkdtemp_dir(self):
+        import tempfile as _tempfile
+
+        content = b"installer"
+        expected_hash = hashlib.sha256(content).hexdigest()
+
+        mock_resp = MagicMock()
+        mock_resp.is_redirect = False
+        mock_resp.headers = {"content-length": str(len(content))}
+        mock_resp.iter_bytes.return_value = [content]
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("core.auto_updater.httpx.stream", return_value=mock_resp):
+            result = download_update(
+                url="https://github.com/dl/setup.exe",
+                filename="setup.exe",
+                expected_sha256=expected_hash,
+            )
+
+        assert result["error"] is None
+        path = result["path"]
+        assert path is not None
+        parent = os.path.dirname(path)
+        # Landed under a bot_exrate_dl_* private dir, NOT the shared temp root.
+        assert os.path.basename(parent).startswith("bot_exrate_dl_")
+        assert os.path.dirname(parent) == _tempfile.gettempdir()
+        # Owner-only perms where supported.
+        import stat as _stat
+        import sys as _sys
+        if _sys.platform != "win32":
+            mode = _stat.S_IMODE(os.stat(parent).st_mode)
+            assert mode == 0o700

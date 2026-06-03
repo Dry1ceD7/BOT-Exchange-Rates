@@ -8,7 +8,7 @@ Version 3.2.8  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Rele
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-230%20Passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-349%20Passed-brightgreen)](tests/)
 
 ---
 

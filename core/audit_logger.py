@@ -13,10 +13,10 @@ Output: data/logs/Audit_Log_YYYYMMDD_HHMMSS.csv
 import atexit
 import csv
 import logging
-import os
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
 
+from core.constants import csv_safe
 from core.paths import get_project_root
 
 logger = logging.getLogger(__name__)
@@ -50,16 +50,21 @@ class AuditLogger:
         "Anomaly_Flag",
     ]
 
-    def __init__(self, log_dir: Optional[str] = None):
+    def __init__(self, log_dir: str | None = None):
         if log_dir is None:
-            log_dir = os.path.join(get_project_root(), "data", "logs")
-        os.makedirs(log_dir, exist_ok=True)
+            log_dir = str(Path(get_project_root()) / "data" / "logs")
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._filepath = os.path.join(
-            log_dir, f"Audit_Log_{timestamp}.csv"
+        # Keep _filepath as str: returned via the .filepath property and
+        # finalize(); callers treat it as a string path.
+        self._filepath = str(Path(log_dir) / f"Audit_Log_{timestamp}.csv")
+        # Long-lived handle held for the object's lifetime; released via
+        # __exit__/close()/atexit. A context manager here would close it
+        # prematurely, so SIM115 does not apply.
+        self._file = Path(self._filepath).open(  # noqa: SIM115
+            "w", newline="", encoding="utf-8-sig"
         )
-        self._file = open(self._filepath, "w", newline="", encoding="utf-8")
         self._writer = csv.writer(self._file)
         self._writer.writerow(self.HEADERS)
         self._row_count = 0
@@ -125,16 +130,18 @@ class AuditLogger:
             holiday_rollback: True if a holiday rollback was used.
             anomaly_flag: True if this rate was flagged by the guardian.
         """
+        if self._closed:
+            raise ValueError("Cannot log to a finalized audit log.")
         self._writer.writerow([
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            filename,
-            sheet,
+            csv_safe(filename),
+            csv_safe(sheet),
             row,
-            cell_date,
-            currency,
-            original_value,
-            new_value,
-            rate_source,
+            csv_safe(cell_date),
+            csv_safe(currency),
+            csv_safe(original_value),
+            csv_safe(new_value),
+            csv_safe(rate_source),
             "Yes" if holiday_rollback else "No",
             "ANOMALY" if anomaly_flag else "",
         ])
@@ -150,15 +157,17 @@ class AuditLogger:
         """
         Write a summary row at the end of the batch.
         """
+        if self._closed:
+            raise ValueError("Cannot log to a finalized audit log.")
         self._writer.writerow([])
         self._writer.writerow([
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "=== BATCH SUMMARY ===",
-            f"Files: {total_files}",
-            f"Success: {success}",
-            f"Failed: {failed}",
-            f"Anomalies: {anomalies_detected}",
-            f"Total Rows Modified: {self._row_count}",
+            csv_safe("=== BATCH SUMMARY ==="),
+            csv_safe(f"Files: {total_files}"),
+            csv_safe(f"Success: {success}"),
+            csv_safe(f"Failed: {failed}"),
+            csv_safe(f"Anomalies: {anomalies_detected}"),
+            csv_safe(f"Total Rows Modified: {self._row_count}"),
             "", "", "", "",
         ])
 

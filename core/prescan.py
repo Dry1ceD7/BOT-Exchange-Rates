@@ -9,25 +9,26 @@ Pre-scans queued .xlsx files to detect the oldest date in the
 source column. Uses openpyxl for all modern Excel formats.
 """
 
+import contextlib
 import logging
-import os
-from datetime import date, datetime
-from typing import List, Optional, Tuple
+from datetime import date
+from pathlib import Path
 
 import openpyxl
 
+from core.constants import DATE_FORMATS
+from core.constants import parse_date as _shared_parse_date
+
 logger = logging.getLogger(__name__)
 
-DATE_FORMATS = [
-    "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y",
-    "%d %b %Y", "%d %B %Y", "%Y%m%d",
-]
+# Re-export for backward compatibility; canonical source is core.constants.
+DATE_FORMATS = list(DATE_FORMATS)
 
 
 def prescan_oldest_date(
-    filepaths: List[str],
+    filepaths: list[str],
     target_col_name: str = "Date",
-) -> Tuple[date, bool]:
+) -> tuple[date, bool]:
     """
     Pre-scans queued .xlsx files to find the absolute
     oldest date in the source column.
@@ -35,17 +36,16 @@ def prescan_oldest_date(
     Returns:
         Tuple of (oldest_date, was_detected).
     """
-    oldest: Optional[date] = None
+    oldest: date | None = None
 
     for fp in filepaths:
-        if not os.path.exists(fp):
+        if not Path(fp).exists():
             continue
 
         found = _scan_xlsx(fp, target_col_name)
 
-        if found is not None:
-            if oldest is None or found < oldest:
-                oldest = found
+        if found is not None and (oldest is None or found < oldest):
+            oldest = found
 
     if oldest is not None:
         return oldest, True
@@ -59,12 +59,12 @@ def prescan_oldest_date(
 # ── Modern .xlsx scanning (openpyxl) ────────────────────────────────────
 
 
-def _scan_xlsx(filepath: str, target_col_name: str) -> Optional[date]:
+def _scan_xlsx(filepath: str, target_col_name: str) -> date | None:
     """Scan a .xlsx file using openpyxl to find the oldest date."""
-    oldest: Optional[date] = None
+    oldest: date | None = None
     wb = None
     try:
-        with open(filepath, "rb") as f:
+        with Path(filepath).open("rb") as f:
             wb = openpyxl.load_workbook(f, read_only=True, data_only=True)
             for ws in wb.worksheets:
                 target_col_idx = None
@@ -89,9 +89,8 @@ def _scan_xlsx(filepath: str, target_col_name: str) -> Optional[date]:
                     values_only=True,
                 ):
                     parsed = _parse_scan_date(row[0], DATE_FORMATS)
-                    if parsed is not None:
-                        if oldest is None or parsed < oldest:
-                            oldest = parsed
+                    if parsed is not None and (oldest is None or parsed < oldest):
+                        oldest = parsed
     except (
         ValueError, TypeError, KeyError,
         openpyxl.utils.exceptions.InvalidFileException,
@@ -99,10 +98,8 @@ def _scan_xlsx(filepath: str, target_col_name: str) -> Optional[date]:
         pass
     finally:
         if wb is not None:
-            try:
+            with contextlib.suppress(OSError):
                 wb.close()
-            except OSError:
-                pass
 
     return oldest
 
@@ -110,18 +107,10 @@ def _scan_xlsx(filepath: str, target_col_name: str) -> Optional[date]:
 # ── Shared date parsing ─────────────────────────────────────────────────
 
 
-def _parse_scan_date(cell_val, formats: List[str]) -> Optional[date]:
-    """Parse a date from a cell value using multiple format strings."""
-    if isinstance(cell_val, datetime):
-        return cell_val.date()
-    if isinstance(cell_val, date):
-        return cell_val
-    if isinstance(cell_val, str):
-        val = cell_val.strip()
-        if val and val.lower() not in ("nan", "null"):
-            for fmt in formats:
-                try:
-                    return datetime.strptime(val, fmt).date()
-                except ValueError:
-                    continue
-    return None
+def _parse_scan_date(cell_val, formats: list[str]) -> date | None:
+    """Parse a date from a cell value (shared parser).
+
+    The ``formats`` arg is retained for backward-compatible call sites; the
+    canonical format list lives in core.constants.DATE_FORMATS.
+    """
+    return _shared_parse_date(cell_val)

@@ -6,12 +6,18 @@ Unit tests for core/logic.py — V2.5 Standard Date Resolution Engine.
 ---------------------------------------------------------------------------
 """
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 
-from core.logic import BOTLogicEngine, RateNotFoundError, safe_to_decimal
+from core.logic import (
+    BOTLogicEngine,
+    RateNotFoundError,
+    build_holiday_lookup,
+    compute_year_start_date,
+    safe_to_decimal,
+)
 
 # =========================================================================
 #  safe_to_decimal
@@ -279,7 +285,7 @@ class TestResolveRateForCurrency:
 
 
 # =========================================================================
-#  LedgerEngine.compute_year_start_date (V2.5)
+#  core.logic.compute_year_start_date (V2.5)
 # =========================================================================
 
 class TestComputeYearStartDate:
@@ -287,30 +293,114 @@ class TestComputeYearStartDate:
 
     def test_normal_dec_30_weekday(self):
         """Dec 30 is a normal weekday → returns Dec 30."""
-        from core.engine import LedgerEngine
         # 2024-12-30 is a Monday
-        result = LedgerEngine.compute_year_start_date(2025, holidays=[])
+        result = compute_year_start_date(2025, holidays=[])
         assert result == date(2024, 12, 30)
 
     def test_dec_30_is_weekend(self):
         """Dec 30 falls on a weekend → rolls back."""
-        from core.engine import LedgerEngine
         # 2023-12-30 is a Saturday → should roll back to Fri Dec 29
-        result = LedgerEngine.compute_year_start_date(2024, holidays=[])
+        result = compute_year_start_date(2024, holidays=[])
         assert result == date(2023, 12, 29)
 
     def test_dec_30_is_holiday(self):
         """Dec 30 is a BOT holiday → rolls back."""
-        from core.engine import LedgerEngine
         # 2024-12-30 is Monday. Mark it as holiday → rolls to Fri Dec 27
-        result = LedgerEngine.compute_year_start_date(
+        result = compute_year_start_date(
             2025, holidays=[date(2024, 12, 30)]
         )
         assert result == date(2024, 12, 27)
 
     def test_dec_31_always_skipped(self):
         """Dec 31 should never be returned (company office day-off)."""
-        from core.engine import LedgerEngine
         # Even with no holidays, Dec 31 shouldn't appear
-        result = LedgerEngine.compute_year_start_date(2025, holidays=[])
+        result = compute_year_start_date(2025, holidays=[])
         assert result.day != 31 or result.month != 12
+
+
+# =========================================================================
+#  BOUNDARY TESTS — production 10-day rollback limit & year boundary
+# =========================================================================
+
+class TestRollbackBoundary:
+    """Boundary behavior at the production max_rollback_days = 10."""
+
+    def _make_rates(self, entries: dict) -> dict:
+        return {d: Decimal(str(v)) for d, v in entries.items()}
+
+    def test_rate_exactly_at_10_day_limit_resolves(self):
+        """Data available exactly 10 days back resolves (inclusive limit)."""
+        # Production engine uses max_rollback_days=10.
+        engine = BOTLogicEngine(holidays=[], max_rollback_days=10)
+        target = date(2025, 1, 20)            # Monday
+        ten_back = target - timedelta(days=10)  # 2025-01-10, Friday
+        assert ten_back.weekday() < 5         # ensure it's a trading day
+        usd = self._make_rates({ten_back: 33.0})
+        eur = self._make_rates({ten_back: 36.0})
+        trade_date, usd_rate, eur_rate = engine.resolve_rate(
+            target, usd, eur,
+        )
+        assert trade_date == ten_back
+        assert usd_rate == Decimal("33.0")
+        assert eur_rate == Decimal("36.0")
+
+    def test_rate_11_days_back_raises(self):
+        """Data only 11 days back exceeds the limit → RateNotFoundError."""
+        engine = BOTLogicEngine(holidays=[], max_rollback_days=10)
+        target = date(2025, 1, 20)
+        eleven_back = target - timedelta(days=11)  # outside the window
+        usd = self._make_rates({eleven_back: 33.0})
+        eur = self._make_rates({eleven_back: 36.0})
+        with pytest.raises(RateNotFoundError):
+            engine.resolve_rate(target, usd, eur)
+
+
+class TestYearBoundaryNeverDec31:
+    """compute_year_start_date must never return Dec 31."""
+
+    def test_dec30_holiday_and_weekend_never_dec31(self):
+        # 2022-12-31 is a Saturday and 2022-12-30 a Friday. Mark Dec 30 a
+        # holiday so the only adjacent candidates are the weekend (31st) and
+        # earlier trading days. Result must roll BACK, never forward to 31.
+        result = compute_year_start_date(
+            2023, holidays=[date(2022, 12, 30)],
+        )
+        assert not (result.month == 12 and result.day == 31)
+        assert result == date(2022, 12, 29)  # Thursday before the holiday
+
+    def test_dec30_weekend_rolls_back_not_to_31(self):
+        # 2023-12-30 is a Saturday → must roll back to Fri 12/29, not 12/31.
+        result = compute_year_start_date(2024, holidays=[])
+        assert not (result.month == 12 and result.day == 31)
+        assert result == date(2023, 12, 29)
+
+
+# =========================================================================
+#  core.logic.build_holiday_lookup
+# =========================================================================
+
+class TestBuildHolidayLookup:
+    """Tests for the moved build_holiday_lookup pure function."""
+
+    def test_parses_substitution_holiday(self):
+        from types import SimpleNamespace
+
+        substitution_entry = (
+            "2025-04-16",
+            "Substitution for Songkran Day (15th April 2025)",
+        )
+
+        class _Cache:
+            def get_holidays(self, year):
+                return [substitution_entry] if year == 2025 else []
+
+        holidays_set, holidays_names = build_holiday_lookup(
+            _Cache(),
+            all_target_dates={date(2025, 4, 16)},
+            computed_start=date(2024, 12, 30),
+            logic_engine=SimpleNamespace(holidays=[]),
+        )
+
+        assert date(2025, 4, 16) in holidays_names
+        assert date(2025, 4, 15) in holidays_set
+        assert holidays_names[date(2025, 4, 15)] == "Songkran Day"

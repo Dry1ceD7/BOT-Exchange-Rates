@@ -10,6 +10,7 @@ import os
 import shutil
 import tempfile
 import time
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -188,13 +189,20 @@ class TestNoCollision:
 class TestCleanup:
     """Tests for the cleanup_old_backups method."""
 
-    def test_cleanup_removes_old_files(self, backup_env):
-        mgr, test_file, backup_dir, _ = backup_env
-        backup_path = mgr.create_backup(test_file)
+    def _write_backup_with_timestamp(self, backup_dir, base, dt):
+        """Create a backup-named file whose embedded timestamp is dt."""
+        ts = dt.strftime(BackupManager._TS_FORMAT)
+        name = f"{base}__bak__{ts}.xlsx"
+        path = os.path.join(backup_dir, name)
+        with open(path, "wb") as f:
+            f.write(b"BACKUP")
+        return path
 
-        # Set the backup's mtime to 8 days ago
-        old_time = time.time() - (8 * 86400)
-        os.utime(backup_path, (old_time, old_time))
+    def test_cleanup_removes_old_files(self, backup_env):
+        mgr, _, backup_dir, _ = backup_env
+        # Embedded timestamp 8 days ago -> should be deleted.
+        old_dt = datetime.now() - timedelta(days=8)
+        backup_path = self._write_backup_with_timestamp(backup_dir, "ledger", old_dt)
 
         deleted = mgr.cleanup_old_backups(max_age_days=7)
         assert deleted == 1
@@ -207,3 +215,84 @@ class TestCleanup:
         deleted = mgr.cleanup_old_backups(max_age_days=7)
         assert deleted == 0
         assert os.path.exists(backup_path)
+
+    def test_cleanup_ignores_stale_mtime_on_fresh_backup(self, backup_env):
+        """REGRESSION (fix #1): a fresh backup of an OLD-mtime source must
+        survive cleanup. copy2 preserves the source mtime, so an mtime-based
+        cleanup would wrongly delete a just-created pristine copy.
+        """
+        mgr, test_file, _, _ = backup_env
+
+        # Make the SOURCE file look months old.
+        old_time = time.time() - (90 * 86400)
+        os.utime(test_file, (old_time, old_time))
+
+        # Fresh backup inherits the source's old mtime via copy2.
+        backup_path = mgr.create_backup(test_file)
+        assert os.path.getmtime(backup_path) < time.time() - (60 * 86400)
+
+        deleted = mgr.cleanup_old_backups(max_age_days=7)
+        assert deleted == 0
+        assert os.path.exists(backup_path)
+
+    def test_cleanup_skips_non_backup_xlsx(self, backup_env):
+        """Files in the backup dir that don't match the __bak__ pattern are
+        left untouched (no accidental deletion via the broad *.xlsx glob).
+        """
+        mgr, _, backup_dir, _ = backup_env
+        stray = os.path.join(backup_dir, "not_a_backup.xlsx")
+        with open(stray, "wb") as f:
+            f.write(b"DATA")
+
+        deleted = mgr.cleanup_old_backups(max_age_days=7)
+        assert deleted == 0
+        assert os.path.exists(stray)
+
+
+# =========================================================================
+#  COLLISION / INTEGRITY (fixes #2 and #3)
+# =========================================================================
+
+class TestTimestampGranularity:
+    """Fix #2: backups within the same second must not collide."""
+
+    def test_rapid_backups_unique_names(self, backup_env):
+        mgr, test_file, _, _ = backup_env
+        names = {mgr.create_backup(test_file) for _ in range(5)}
+        assert len(names) == 5
+
+    def test_rapid_backups_preserve_distinct_content(self, backup_env):
+        mgr, test_file, _, _ = backup_env
+        mgr.create_backup(test_file)  # pristine
+        with open(test_file, "wb") as f:
+            f.write(b"SECOND_VERSION")
+        mgr.create_backup(test_file)
+        # Both backups should still exist (no overwrite within the second).
+        assert len(mgr.list_backups(test_file)) == 2
+
+
+class TestRestoreIntegrity:
+    """Fix #3: integrity check + pre-revert snapshot."""
+
+    def test_restore_creates_pre_revert_snapshot(self, backup_env):
+        mgr, test_file, _, _ = backup_env
+        mgr.create_backup(test_file)
+        with open(test_file, "wb") as f:
+            f.write(b"LIVE_BEFORE_REVERT")
+
+        mgr.restore_latest(test_file)
+
+        pre = test_file + ".pre-revert"
+        assert os.path.exists(pre)
+        with open(pre, "rb") as f:
+            assert f.read() == b"LIVE_BEFORE_REVERT"
+
+    def test_restore_rejects_empty_backup(self, backup_env):
+        mgr, test_file, backup_dir, _ = backup_env
+        # Create a zero-byte backup that matches the pattern.
+        ts = datetime.now().strftime(BackupManager._TS_FORMAT)
+        empty = os.path.join(backup_dir, f"ledger__bak__{ts}.xlsx")
+        open(empty, "wb").close()
+
+        with pytest.raises(BackupError, match="empty"):
+            mgr.restore_latest(test_file)

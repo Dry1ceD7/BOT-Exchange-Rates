@@ -8,22 +8,23 @@ Separated from engine.py for SFFB compliance (<200 lines).
 Builds and updates the unified "ExRate" master tab in Excel workbooks.
 """
 
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
-from typing import Dict, List, Optional
 
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
+from core.constants import parse_date as _shared_parse_date
+
 
 def update_master_exrate_sheet(
     wb: openpyxl.Workbook,
-    usd_buying_rates: Dict[date, Decimal],
-    usd_selling_rates: Dict[date, Decimal],
-    eur_buying_rates: Dict[date, Decimal],
-    eur_selling_rates: Dict[date, Decimal],
-    holidays_list: List[date],
-    holidays_names: Dict[date, str],
+    usd_buying_rates: dict[date, Decimal],
+    usd_selling_rates: dict[date, Decimal],
+    eur_buying_rates: dict[date, Decimal],
+    eur_selling_rates: dict[date, Decimal],
+    holidays_list: list[date],
+    holidays_names: dict[date, str],
     start_date: date,
 ) -> None:
     """
@@ -46,10 +47,7 @@ def update_master_exrate_sheet(
     ]
 
     # ── Get or create the sheet ──────────────────────────────────────
-    if SHEET_NAME in wb.sheetnames:
-        ws = wb[SHEET_NAME]
-    else:
-        ws = wb.create_sheet(SHEET_NAME)
+    ws = wb[SHEET_NAME] if SHEET_NAME in wb.sheetnames else wb.create_sheet(SHEET_NAME)
 
     # Always write/refresh headers with enterprise styling
     header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
@@ -104,9 +102,9 @@ def update_master_exrate_sheet(
     _write_merged_data(ws, merged, holidays_set, thin_border, DATA_START_ROW)
 
 
-def _read_existing_data(ws, data_start_row: int) -> Dict[date, dict]:
+def _read_existing_data(ws, data_start_row: int) -> dict[date, dict]:
     """Reads existing rate data from the ExRate sheet."""
-    existing: Dict[date, dict] = {}
+    existing: dict[date, dict] = {}
     if ws.max_row and ws.max_row >= data_start_row:
         for row_idx in range(data_start_row, ws.max_row + 1):
             cell_val = ws.cell(row=row_idx, column=1).value
@@ -122,23 +120,13 @@ def _read_existing_data(ws, data_start_row: int) -> Dict[date, dict]:
     return existing
 
 
-def _parse_cell_date(cell_val) -> Optional[date]:
-    """Parse a date from a cell value."""
-    if isinstance(cell_val, datetime):
-        return cell_val.date()
-    if isinstance(cell_val, date):
-        return cell_val
-    if isinstance(cell_val, str):
-        for fmt in ("%Y-%m-%d", "%d %b %Y"):
-            try:
-                return datetime.strptime(cell_val.strip(), fmt).date()
-            except ValueError:
-                continue
-    return None
+def _parse_cell_date(cell_val) -> date | None:
+    """Parse a date from a cell value (shared parser, full format superset)."""
+    return _shared_parse_date(cell_val)
 
 
 def _build_date_range(
-    start: date, end: date, existing: Dict[date, dict]
+    start: date, end: date, existing: dict[date, dict]
 ) -> set:
     """Build the full set of calendar dates to populate."""
     all_dates = set()
@@ -154,18 +142,21 @@ def _merge_rate_data(
     all_dates, existing_data, holidays_set, holidays_names,
     usd_buying_rates, usd_selling_rates,
     eur_buying_rates, eur_selling_rates,
-) -> Dict[date, dict]:
+) -> dict[date, dict]:
     """Merge API rates with existing sheet data (API priority)."""
-    merged: Dict[date, dict] = {}
+    merged: dict[date, dict] = {}
     for d in sorted(all_dates):
         existing = existing_data.get(d, {})
         is_weekend = d.weekday() >= 5
         is_holiday = d in holidays_set
 
-        ub = float(usd_buying_rates[d]) if d in usd_buying_rates and usd_buying_rates[d] is not None else None
-        us = float(usd_selling_rates[d]) if d in usd_selling_rates and usd_selling_rates[d] is not None else None
-        eb = float(eur_buying_rates[d]) if d in eur_buying_rates and eur_buying_rates[d] is not None else None
-        es = float(eur_selling_rates[d]) if d in eur_selling_rates and eur_selling_rates[d] is not None else None
+        # Keep rate values as Decimal end-to-end — NEVER cast to float.
+        # float() corrupts 4dp precision (34.5650 -> 34.564999...).
+        # openpyxl writes Decimal cells natively.
+        ub = usd_buying_rates.get(d)
+        us = usd_selling_rates.get(d)
+        eb = eur_buying_rates.get(d)
+        es = eur_selling_rates.get(d)
 
         holiday_label = ""
         if is_weekend and is_holiday:

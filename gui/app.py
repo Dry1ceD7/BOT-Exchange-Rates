@@ -24,9 +24,10 @@ import platform
 import re
 import subprocess
 import threading
+import tkinter
 from datetime import date, datetime
+from pathlib import Path
 from tkinter import filedialog, messagebox
-from typing import List, Optional
 
 import customtkinter as ctk
 
@@ -57,7 +58,7 @@ except ImportError as e:
     logger.debug("tkinterdnd2 not available: %s", e)
 
 
-def parse_drop_data(raw: str, tk_root=None) -> List[str]:
+def parse_drop_data(raw: str, tk_root=None) -> list[str]:
     """Parse drag-and-drop payload. Uses native Tcl/Tk splitlist for
     cross-platform correctness ({} bracket stripping on macOS/Linux)."""
     if tk_root is not None:
@@ -65,33 +66,54 @@ def parse_drop_data(raw: str, tk_root=None) -> List[str]:
             return list(tk_root.tk.splitlist(raw))
         except (RuntimeError, ValueError) as e:
             logger.debug("Tcl splitlist failed: %s", e)
-    # Fallback: regex parser
-    results = []
-    for match in re.finditer(r'\{([^}]+)\}|(\S+)', raw):
-        path = match.group(1) or match.group(2)
-        if path:
-            results.append(path.strip())
-    return results
+    # Fallback: only use the regex splitter when the payload is brace-delimited
+    # ({}-wrapped paths, which Tk uses for paths containing spaces). For a plain
+    # payload, treat the whole string as ONE path so paths with spaces survive.
+    if "{" in raw:
+        results = []
+        for match in re.finditer(r'\{([^}]+)\}|(\S+)', raw):
+            path = match.group(1) or match.group(2)
+            if path:
+                results.append(path.strip())
+        return results
+    raw = raw.strip()
+    return [raw] if raw else []
 
 
 # Supported Excel extensions (openpyxl handles .xlsx and .xlsm natively)
 EXCEL_EXTENSIONS = (".xlsx", ".xlsm")
-OPENPYXL_NATIVE = (".xlsx", ".xlsm")
 
 
-def resolve_excel_files(paths: List[str]) -> List[str]:
-    """Resolve individual files and directories into a flat list of Excel files."""
+def resolve_excel_files(paths: list[str], collect_rejected: bool = False):
+    """Resolve individual files and directories into a flat list of Excel files.
+
+    When ``collect_rejected`` is True, returns ``(accepted, rejected)`` where
+    ``rejected`` lists directly-dropped files with an unsupported spreadsheet
+    extension (e.g. .xlsb, .xls) so the caller can warn the user. Otherwise
+    returns just the accepted list (backward compatible).
+    """
+    # Spreadsheet-looking extensions we explicitly recognise as unsupported.
+    UNSUPPORTED_EXTENSIONS = (".xlsb", ".xls", ".ods", ".csv")
     queue = []
+    rejected = []
     for p in paths:
-        if os.path.isfile(p):
-            if p.lower().endswith(EXCEL_EXTENSIONS) and not os.path.basename(p).startswith("."):
+        if Path(p).is_file():
+            base = Path(p).name
+            if base.startswith("."):
+                continue
+            if p.lower().endswith(EXCEL_EXTENSIONS):
                 queue.append(p)
-        elif os.path.isdir(p):
-            for fname in sorted(os.listdir(p)):
+            elif p.lower().endswith(UNSUPPORTED_EXTENSIONS):
+                rejected.append(p)
+        elif Path(p).is_dir():
+            # Keep os.listdir + os.path.join: queued entries are full-path
+            # strings handed to the engine; sorting bare names then joining is
+            # the exact prior behavior the os.path.normpath dedup relies on.
+            for fname in sorted(os.listdir(p)):  # noqa: PTH208
                 if fname.startswith("."):
                     continue
                 if fname.lower().endswith(EXCEL_EXTENSIONS):
-                    queue.append(os.path.join(p, fname))
+                    queue.append(os.path.join(p, fname))  # noqa: PTH118
     seen = set()
     unique = []
     for f in queue:
@@ -99,6 +121,8 @@ def resolve_excel_files(paths: List[str]) -> List[str]:
         if norm not in seen:
             seen.add(norm)
             unique.append(f)
+    if collect_rejected:
+        return unique, rejected
     return unique
 
 
@@ -114,11 +138,17 @@ class BOTExrateApp(ctk.CTk):
         # ── Set window icon ──────────────────────────────────────────────
         self._set_app_icon()
 
-        self.file_queue: List[str] = []
-        self.last_processed_path: Optional[str] = None
+        self.file_queue: list[str] = []
+        self.last_processed_path: str | None = None
         self.backup_mgr = BackupManager()
         self.event_bus = EventBus()
-        self.batch_handler = BatchHandler(self, event_bus=self.event_bus)
+        # Single registry that tracks worker threads (batch, revert, ...) so
+        # an in-progress openpyxl save can finish/report before exit (#5).
+        from core.workers.thread_registry import ThreadRegistry
+        self.thread_registry = ThreadRegistry()
+        self.batch_handler = BatchHandler(
+            self, event_bus=self.event_bus, registry=self.thread_registry,
+        )
 
         # Center window
         self.update_idletasks()
@@ -149,6 +179,12 @@ class BOTExrateApp(ctk.CTk):
         self._build_live_console()
         self._updater.check_for_updates()
 
+        # Default close path: clean teardown of workers, then destroy. When the
+        # tray is active it overrides this to hide-to-tray and the real exit
+        # routes through the tray Exit item back into _on_app_close (#1).
+        self._closing = False
+        self.protocol("WM_DELETE_WINDOW", self._on_app_close)
+
         # v3.2.0: System Tray — minimize to tray on close
         from gui.panels.tray_manager import TrayManager
         self._tray = TrayManager(self)
@@ -163,23 +199,27 @@ class BOTExrateApp(ctk.CTk):
             # Resolve assets directory
             if getattr(sys, "frozen", False):
                 # Frozen (PyInstaller): assets bundled alongside exe
-                base_dir = os.path.dirname(sys.executable)
+                base_dir = Path(sys.executable).parent
             else:
-                # Source mode: project root
-                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                # Source mode: project root.
+                # noqa: PTH100,PTH120 — os.path.abspath avoids symlink
+                # resolution to keep the exact legacy base dir; wrap in Path
+                # for the joins below.
+                base_dir = Path(os.path.dirname(os.path.abspath(__file__))).parent  # noqa: PTH100, PTH120
 
-            ico_path = os.path.join(base_dir, "assets", "icon.ico")
-            png_path = os.path.join(base_dir, "assets", "icon.png")
+            ico_path = base_dir / "assets" / "icon.ico"
+            png_path = base_dir / "assets" / "icon.png"
 
             # Windows: use .ico for taskbar + title bar
-            if platform.system() == "Windows" and os.path.exists(ico_path):
-                self.iconbitmap(ico_path)
+            if platform.system() == "Windows" and ico_path.exists():
+                # Tk/Tcl expects a string path here.
+                self.iconbitmap(str(ico_path))
                 logger.info("Window icon set from: %s", ico_path)
             # All platforms: use .png via iconphoto for Tk title bar
-            elif os.path.exists(png_path):
+            elif png_path.exists():
                 try:
-                    icon_image = PhotoImage(file=png_path)
-                except Exception:
+                    icon_image = PhotoImage(file=str(png_path))
+                except tkinter.TclError:
                     # Fallback: use PIL to convert PNG → Tk-compatible format
                     try:
                         from PIL import Image, ImageTk
@@ -194,7 +234,7 @@ class BOTExrateApp(ctk.CTk):
                 logger.info("Window icon set from: %s", png_path)
             else:
                 logger.debug("No icon file found at %s or %s", ico_path, png_path)
-        except Exception as e:
+        except (tkinter.TclError, OSError, ValueError) as e:
             logger.debug("Icon loading failed (non-critical): %s", e)
 
     # ================================================================== #
@@ -247,6 +287,13 @@ class BOTExrateApp(ctk.CTk):
             # Center the ticker below the subtitle row
             self.rate_ticker.pack(pady=(2, 0))
             self.rate_ticker.start()
+            # Register the ticker worker so the close handler can stop it (#5).
+            if getattr(self.rate_ticker, "_worker", None) is not None:
+                self.thread_registry.register(
+                    self.rate_ticker._worker,
+                    name="RateTickerWorker",
+                    stop_event=getattr(self.rate_ticker, "_stop_event", None),
+                )
         except (RuntimeError, OSError) as e:
             logger.debug("Rate ticker init failed (non-critical): %s", e)
             self._cache_db = None
@@ -535,7 +582,7 @@ class BOTExrateApp(ctk.CTk):
         for combo in self._combo_widgets:
             combo.configure(state="disabled" if locked else "normal")
 
-    def _assemble_start_date(self) -> Optional[str]:
+    def _assemble_start_date(self) -> str | None:
         if self.use_today_var.get() == "on":
             return datetime.today().strftime("%Y-%m-%d")
         date_str = f"{self.combo_year.get()}-{self.combo_month.get()}-{self.combo_day.get()}"
@@ -555,24 +602,19 @@ class BOTExrateApp(ctk.CTk):
     # ================================================================== #
     def _on_drop(self, event):
         paths = parse_drop_data(event.data, tk_root=self)
-        excel_files = resolve_excel_files(paths)
+        excel_files, rejected = resolve_excel_files(paths, collect_rejected=True)
+        if rejected:
+            names = ", ".join(Path(f).name for f in rejected)
+            messagebox.showwarning(
+                "Format Warning",
+                f"These files use an unsupported format:\n{names}\n\n"
+                f"Please save them as .xlsx or .xlsm first."
+            )
         if excel_files:
-            # Warn about truly unsupported formats (.xlsb only)
-            unsupported = [f for f in excel_files if f.lower().endswith('.xlsb')]
-            if unsupported:
-                names = ", ".join(os.path.basename(f) for f in unsupported)
-                messagebox.showwarning(
-                    "Format Warning",
-                    f"These files use .xlsb format which is not supported:\n{names}\n\n"
-                    f"Please save as .xlsx first."
-                )
-                # Remove unsupported files from queue
-                excel_files = [f for f in excel_files if not f.lower().endswith('.xlsb')]
-            if excel_files:
-                self._set_queue(excel_files)
-            else:
-                messagebox.showwarning("No Valid Files",
-                                       "No supported Excel files found.")
+            self._set_queue(excel_files)
+        elif rejected:
+            messagebox.showwarning("No Valid Files",
+                                   "No supported Excel files found.")
         else:
             messagebox.showwarning("No Valid Files",
                                    "No Excel files found in the dropped items.")
@@ -588,12 +630,12 @@ class BOTExrateApp(ctk.CTk):
         if paths:
             self._set_queue(list(paths))
 
-    def _set_queue(self, files: List[str]):
+    def _set_queue(self, files: list[str]):
         self.file_queue = files
         self.last_processed_path = None
         count = len(files)
         if count == 1:
-            self.dz_text.configure(text=os.path.basename(files[0]), text_color=_get_colors()["trust_blue"])
+            self.dz_text.configure(text=Path(files[0]).name, text_color=_get_colors()["trust_blue"])
         else:
             self.dz_text.configure(text=f"{count} ledgers loaded", text_color=_get_colors()["trust_blue"])
         self.dz_sub.configure(text="Click to change selection")
@@ -610,10 +652,13 @@ class BOTExrateApp(ctk.CTk):
     def _on_process_click(self):
         if not self.file_queue:
             return
+        # Snapshot the selection at click time so a selection change during
+        # the background prescan can't desync what actually gets processed (#2).
+        queue_snapshot = list(self.file_queue)
         self.btn_process.configure(state="disabled")
         self.btn_revert.configure(state="disabled")
         self.btn_reveal.pack_forget()
-        total = len(self.file_queue)
+        total = len(queue_snapshot)
         self.progressbar.configure(mode="determinate")
         self.progressbar.set(0)
 
@@ -628,7 +673,7 @@ class BOTExrateApp(ctk.CTk):
             # Run prescan in background thread to prevent UI freeze
             def _prescan_and_batch():
                 from core.engine import LedgerEngine
-                oldest_date, was_detected = LedgerEngine.prescan_oldest_date(self.file_queue)
+                oldest_date, was_detected = LedgerEngine.prescan_oldest_date(queue_snapshot)
                 start_date_str = oldest_date.strftime("%Y-%m-%d")
 
                 def _update_ui_and_start():
@@ -655,7 +700,7 @@ class BOTExrateApp(ctk.CTk):
                         )
                     dry_run = self._dry_run_var.get() == "on"
                     self.batch_handler.start_batch(
-                        self.file_queue, start_date_str, dry_run=dry_run,
+                        queue_snapshot, start_date_str, dry_run=dry_run,
                     )
 
                 self.after(0, _update_ui_and_start)
@@ -674,7 +719,7 @@ class BOTExrateApp(ctk.CTk):
             )
             dry_run = self._dry_run_var.get() == "on"
             self.batch_handler.start_batch(
-                self.file_queue, start_date_str, dry_run=dry_run,
+                queue_snapshot, start_date_str, dry_run=dry_run,
             )
 
     def _update_progress(self, idx: int, total: int, fname: str, error):
@@ -690,7 +735,7 @@ class BOTExrateApp(ctk.CTk):
                 text_color=_get_colors()["process_text"]
             )
 
-    def _show_batch_complete(self, success: int, fail: int, errors: List[str]):
+    def _show_batch_complete(self, success: int, fail: int, errors: list[str]):
         self.progressbar.set(1)
         self.btn_process.configure(state="normal")
         self.btn_revert.configure(state="normal")
@@ -740,7 +785,7 @@ class BOTExrateApp(ctk.CTk):
         self.btn_revert.configure(state="disabled")
         self.btn_process.configure(state="disabled")
         self.lbl_status.configure(
-            text=f"Restoring:  {os.path.basename(path)}...",
+            text=f"Restoring:  {Path(path).name}...",
             text_color=_get_colors()["warning"]
         )
         self.progressbar.configure(mode="indeterminate")
@@ -775,11 +820,12 @@ class BOTExrateApp(ctk.CTk):
     # ================================================================== #
     def _reveal_file(self):
         fp = self.last_processed_path
-        if not fp or not os.path.exists(fp):
+        if not fp or not Path(fp).exists():
             return
-        # SEC-04: Validate path before passing to subprocess
+        # SEC-04: Validate path before passing to subprocess. os.path.realpath
+        # is kept deliberately (resolves symlinks for the security check).
         fp = os.path.realpath(fp)
-        if not os.path.isfile(fp):
+        if not Path(fp).is_file():
             logger.warning("Reveal target is not a file: %s", fp)
             return
         try:
@@ -787,10 +833,12 @@ class BOTExrateApp(ctk.CTk):
             if system == "Darwin":
                 subprocess.Popen(["open", "-R", fp])
             elif system == "Windows":
+                # os.path.normpath kept: shell needs the native path string.
                 subprocess.Popen(["explorer", "/select,", os.path.normpath(fp)])
             else:
-                parent = os.path.dirname(fp)
-                if os.path.isdir(parent):
+                # Keep parent as str: handed to the xdg-open subprocess.
+                parent = str(Path(fp).parent)
+                if Path(parent).is_dir():
                     subprocess.Popen(["xdg-open", parent])
         except OSError as e:
             logger.debug("File manager open failed: %s", e)
@@ -840,16 +888,19 @@ class BOTExrateApp(ctk.CTk):
             """Called by the scheduler when it's time to process."""
             if not files:
                 return
-            logger.info("Auto-scheduler firing with %d files", len(files))
+            # Snapshot the scheduled files into a SEPARATE list so a scheduled
+            # run never overwrites the user's interactive selection (#2). The
+            # concurrency guard in start_batch rejects overlap with a manual run.
+            scheduled = list(files)
+            logger.info("Auto-scheduler firing with %d files", len(scheduled))
             # Use prescan to detect the oldest date in the ledgers,
             # matching the manual processing path instead of hardcoding today.
             from core.engine import LedgerEngine
-            oldest, was_detected = LedgerEngine.prescan_oldest_date(files)
+            oldest, was_detected = LedgerEngine.prescan_oldest_date(scheduled)
             start_str = oldest.strftime("%Y-%m-%d")
             flag = "auto-detected" if was_detected else "fallback"
             logger.info("Scheduler start_date: %s (%s)", start_str, flag)
-            self.after(0, self._set_queue, files)
-            self.after(100, lambda: self.batch_handler.start_batch(files, start_str))
+            self.after(0, lambda: self.batch_handler.start_batch(scheduled, start_str))
 
         self._auto_scheduler.start(
             time_str=time_str,
@@ -888,6 +939,69 @@ class BOTExrateApp(ctk.CTk):
         )
         self.lbl_footer.pack(expand=True)
 
+
+    # ================================================================== #
+    #  V3.2.x: CLEAN SHUTDOWN
+    # ================================================================== #
+    def _on_app_close(self):
+        """App-level close handler: stop all workers BEFORE destroying the
+        Tk root so no self.after() fires on a torn-down widget (#1, #5)."""
+        if getattr(self, "_closing", False):
+            return
+        self._closing = True
+        logger.info("Application closing — tearing down workers")
+
+        # 1. Stop the rate ticker (joins its worker, sets _destroyed).
+        if getattr(self, "rate_ticker", None) is not None:
+            try:
+                self.rate_ticker.stop()
+            except (RuntimeError, OSError) as e:
+                logger.debug("rate_ticker.stop() failed: %s", e)
+
+        # 2. Stop the live console polling loop.
+        if getattr(self, "console", None) is not None:
+            try:
+                self.console.stop_polling()
+            except (RuntimeError, AttributeError) as e:
+                logger.debug("console.stop_polling() failed: %s", e)
+
+        # 3. Stop the background scheduler.
+        try:
+            self._on_scheduler_stop()
+        except (RuntimeError, AttributeError) as e:
+            logger.debug("scheduler stop failed: %s", e)
+
+        # 4. Mark the auto-updater destroyed (guarded).
+        updater = getattr(self, "_updater", None)
+        if updater is not None and hasattr(updater, "mark_destroyed"):
+            try:
+                updater.mark_destroyed()
+            except (RuntimeError, OSError) as e:
+                logger.debug("updater.mark_destroyed() failed: %s", e)
+
+        # 5. Tear down the tray icon (guarded).
+        tray = getattr(self, "_tray", None)
+        if tray is not None and hasattr(tray, "cleanup"):
+            try:
+                tray.cleanup()
+            except (RuntimeError, OSError) as e:
+                logger.debug("tray.cleanup() failed: %s", e)
+
+        # 6. Let any in-progress worker (e.g. openpyxl save) finish/report.
+        registry = getattr(self, "thread_registry", None)
+        if registry is not None:
+            try:
+                hung = registry.shutdown_all(timeout=5.0)
+                if hung:
+                    logger.warning("Workers did not exit cleanly: %s", hung)
+            except RuntimeError as e:
+                logger.debug("thread_registry.shutdown_all() failed: %s", e)
+
+        # 7. Destroy the Tk root.
+        try:
+            self.destroy()
+        except (RuntimeError, tkinter.TclError) as e:
+            logger.debug("destroy() failed: %s", e)
 
     def restore_from_tray(self):
         """Called via IPC socket or tray double-click to restore the window."""

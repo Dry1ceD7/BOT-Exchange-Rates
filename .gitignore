@@ -13,6 +13,7 @@ data/backups/
 data/.ipc_nonce
 data/app.log*
 data/settings.json
+data/input/UAT_Test_Ledger.xlsx
 
 # ---- Python ----
 __pycache__/
@@ -35,3 +36,10 @@ build/
 Thumbs.db
 bot_exrate.egg-info/
 .coverage
+
+# ---- Agent / tooling state (local only) ----
+.omc/
+.claude/
+.cursor/
+_bmad/
+.claudeignore

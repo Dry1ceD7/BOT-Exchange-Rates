@@ -10,15 +10,16 @@ Writes validated tokens to .env (legacy), OS keychain, and os.environ.
 SFFB: Strict < 200 lines.
 """
 
+import contextlib
 import logging
 import os
 import webbrowser
-from typing import Optional
+from pathlib import Path
 
 import customtkinter as ctk
 
 from core.paths import get_project_root
-from core.secure_tokens import set_token
+from core.secure_tokens import _keyring_available, set_token
 from gui.theme import MONO_FONT, get_theme
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
     def __init__(
         self,
         master,
-        env_path: Optional[str] = None,
+        env_path: str | None = None,
         prefill_exg: str = "",
         prefill_hol: str = "",
         **kwargs,
@@ -49,7 +50,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         super().__init__(master, **kwargs)
 
         self.activated = False
-        self._env_path = env_path or os.path.join(get_project_root(), ".env")
+        self._env_path = env_path or str(Path(get_project_root()) / ".env")
 
         t = get_theme()
         self.title("BOT Exchange Rate — API Registration")
@@ -196,34 +197,42 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
             )
             return
 
-        # Write to .env
-        try:
-            self._write_env(exg, hol)
-        except OSError as e:
-            self._lbl_status.configure(
-                text="Failed to save .env: %s" % e, text_color=t["error_text"],
-            )
-            logger.error("Failed to write .env: %s", e)
-            return
+        # SECURITY: prefer the OS keychain. Only write plaintext to .env when
+        # no secure keychain backend is available, and lock the file to 0o600.
+        stored_in_keychain = False
+        if _keyring_available():
+            exg_ok = set_token("BOT_TOKEN_EXG", exg)
+            hol_ok = set_token("BOT_TOKEN_HOL", hol)
+            stored_in_keychain = exg_ok and hol_ok
 
-        # Store in OS keychain (primary secure storage)
-        set_token("BOT_TOKEN_EXG", exg)
-        set_token("BOT_TOKEN_HOL", hol)
+        if not stored_in_keychain:
+            try:
+                self._write_env(exg, hol)
+            except OSError as e:
+                self._lbl_status.configure(
+                    text=f"Failed to save .env: {e}", text_color=t["error_text"],
+                )
+                logger.error("Failed to write .env: %s", e)
+                return
 
         # Also inject into current process for immediate availability
         os.environ["BOT_TOKEN_EXG"] = exg
         os.environ["BOT_TOKEN_HOL"] = hol
 
         self.activated = True
-        logger.info("API tokens activated and saved to keychain + .env")
+        if stored_in_keychain:
+            logger.info("API tokens activated and stored in OS keychain.")
+        else:
+            logger.info("API tokens activated and saved to .env (no keychain available).")
         self.grab_release()
         self.destroy()
 
     def _write_env(self, exg: str, hol: str):
         """Write or update the .env file with the provided tokens."""
         lines = []
-        if os.path.exists(self._env_path):
-            with open(self._env_path, "r", encoding="utf-8") as f:
+        env_file = Path(self._env_path)
+        if env_file.exists():
+            with env_file.open(encoding="utf-8") as f:
                 lines = f.readlines()
 
         # Update existing keys or prepare to append
@@ -232,21 +241,25 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         for line in lines:
             stripped = line.strip()
             if stripped.startswith("BOT_TOKEN_EXG="):
-                new_lines.append("BOT_TOKEN_EXG=%s\n" % exg)
+                new_lines.append(f"BOT_TOKEN_EXG={exg}\n")
                 keys_written["BOT_TOKEN_EXG"] = True
             elif stripped.startswith("BOT_TOKEN_HOL="):
-                new_lines.append("BOT_TOKEN_HOL=%s\n" % hol)
+                new_lines.append(f"BOT_TOKEN_HOL={hol}\n")
                 keys_written["BOT_TOKEN_HOL"] = True
             else:
                 new_lines.append(line)
 
         if not keys_written["BOT_TOKEN_EXG"]:
-            new_lines.append("BOT_TOKEN_EXG=%s\n" % exg)
+            new_lines.append(f"BOT_TOKEN_EXG={exg}\n")
         if not keys_written["BOT_TOKEN_HOL"]:
-            new_lines.append("BOT_TOKEN_HOL=%s\n" % hol)
+            new_lines.append(f"BOT_TOKEN_HOL={hol}\n")
 
-        with open(self._env_path, "w", encoding="utf-8") as f:
+        with env_file.open("w", encoding="utf-8") as f:
             f.writelines(new_lines)
+
+        # SECURITY: restrict the plaintext .env to the owner only.
+        with contextlib.suppress(OSError):
+            env_file.chmod(0o600)
 
     def _on_close(self):
         self.activated = False

@@ -13,14 +13,16 @@ Extracted from settings_modal.py. Handles:
 SFFB: Strict < 200 lines.
 """
 
+import contextlib
 import logging
-import os
 import threading
+from pathlib import Path
 
 import customtkinter as ctk
 import httpx
 
 from core.secure_tokens import get_token
+from gui.panels._base_panel import SafePanel
 from gui.theme import get_theme
 
 logger = logging.getLogger(__name__)
@@ -36,7 +38,7 @@ _BOT_API_PING = (
 )
 
 
-class VersionPanel(ctk.CTkFrame):
+class VersionPanel(SafePanel, ctk.CTkFrame):
     """Embeddable version/update panel for the settings modal."""
 
     def __init__(self, master, on_restart=None, on_error=None, **kwargs):
@@ -44,7 +46,7 @@ class VersionPanel(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent", **kwargs)
         self._t = t
         self._pending_installer = None
-        self._destroyed = False
+        self._pending_sha256 = None
         self._busy_ping = False
         self._busy_update = False
         self._busy_browse = False
@@ -52,21 +54,6 @@ class VersionPanel(ctk.CTkFrame):
         self._on_error = on_error
         self._busy_download = False
         self._build_ui()
-
-    def destroy(self):
-        """Mark as destroyed before actual teardown."""
-        self._destroyed = True
-        super().destroy()
-
-    def _safe_after(self, ms, func, *args):
-        """Thread-safe self.after() that silently ignores RuntimeError
-        from callbacks arriving after the widget has been destroyed."""
-        if self._destroyed:
-            return
-        try:
-            self.after(ms, func, *args)
-        except RuntimeError:
-            logger.debug("Ignoring post-destroy callback: %s", func.__name__)
 
     def _build_ui(self):
         t = self._t
@@ -343,7 +330,7 @@ class VersionPanel(ctk.CTkFrame):
 
         def _worker():
             try:
-                from core.auto_updater import _fetch_expected_checksum
+                from core.auto_updater import fetch_expected_checksum
 
                 asset = get_installer_asset_url(version)
                 if asset.get("error") or not asset.get("url"):
@@ -354,15 +341,15 @@ class VersionPanel(ctk.CTkFrame):
 
                 expected_sha256 = None
                 if asset.get("sha256_url"):
-                    expected_sha256 = _fetch_expected_checksum(
+                    expected_sha256 = fetch_expected_checksum(
                         asset["sha256_url"]
                     )
 
                 def _progress(downloaded, total):
                     pct = int(downloaded / total * 100)
-                    self._safe_after(0, self._lbl_update.configure,
-                               {"text": f"Downloading V{version}... {pct}%",
-                                "text_color": t["modal_muted"]})
+                    self._safe_after(0, lambda: self._lbl_update.configure(
+                        text=f"Downloading V{version}... {pct}%",
+                        text_color=t["modal_muted"]))
 
                 result = download_update(
                     url=asset["url"],
@@ -379,7 +366,8 @@ class VersionPanel(ctk.CTkFrame):
                 installer_path = result.get("path", "")
                 self._safe_after(0, self._dl_done,
                            "✅ Downloaded — restart to install",
-                           t["modal_success"], True, installer_path)
+                           t["modal_success"], True, installer_path,
+                           expected_sha256)
             except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
                 self._safe_after(0, self._dl_done,
                            f"Error: {e}", t["error_text"], False)
@@ -387,13 +375,14 @@ class VersionPanel(ctk.CTkFrame):
         threading.Thread(target=_worker, daemon=True, name="UpdateDL").start()
 
     def _dl_done(self, text: str, color: str, success: bool,
-                 installer_path: str = None):
+                 installer_path: str = None, expected_sha256: str = None):
         self._busy_download = False
         self._lbl_update.configure(text=text, text_color=color)
         if success:
             self._btn_update.configure(state="disabled", text="Updated ✓")
             self._btn_dl_version.configure(state="disabled")
             self._pending_installer = installer_path
+            self._pending_sha256 = expected_sha256
             self._show_restart_dialog()
         else:
             self._btn_update.configure(state="normal")
@@ -458,15 +447,17 @@ class VersionPanel(ctk.CTkFrame):
 
         # Close parent settings modal
         settings_modal = self.winfo_toplevel()
-        try:
+        with contextlib.suppress(RuntimeError):
             settings_modal.grab_release()
-        except RuntimeError:
-            pass
         settings_modal.destroy()
 
-        # Run the installer silently if we have a downloaded file
-        if installer and os.path.isfile(installer):
-            result = apply_update(installer)
+        # Run the installer silently if we have a downloaded file.
+        # SECURITY: pass the expected SHA-256 so apply_update re-verifies the
+        # file immediately before executing it (TOCTOU guard).
+        if installer and Path(installer).is_file():
+            result = apply_update(
+                installer, expected_sha256=self._pending_sha256
+            )
             if not result.get("success"):
                 logger.error("Installer failed: %s", result.get("error"))
                 if self._on_error:

@@ -16,8 +16,9 @@ Contains:
 """
 
 import logging
+import re
+from collections.abc import Callable
 from datetime import date, datetime
-from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -26,6 +27,12 @@ from openpyxl.utils import get_column_letter
 from core.constants import PREFORMAT_BUFFER_ROWS, SKIP_SHEET_NAMES
 
 logger = logging.getLogger(__name__)
+
+# Validation patterns for values interpolated into Excel formula strings.
+# A malformed currency code or column letter could otherwise corrupt the
+# entire IFS formula for a row, so we validate before interpolating.
+_CCY_RE = re.compile(r"^[A-Z]{2,4}$")
+_COL_RE = re.compile(r"^[A-Z]{1,3}$")
 
 
 def zero_touch_write(ws, row: int, col: int, value) -> None:
@@ -47,7 +54,7 @@ def zero_touch_write(ws, row: int, col: int, value) -> None:
     cell.value = value
 
 
-def build_exrate_index(wb) -> Dict[date, dict]:
+def build_exrate_index(wb) -> dict[date, dict]:
     """
     Build an in-memory ExRate lookup index from the ExRate sheet.
 
@@ -55,7 +62,7 @@ def build_exrate_index(wb) -> Dict[date, dict]:
     Returns a dict mapping date → {usd_buying, usd_selling,
     eur_buying, eur_selling}.
     """
-    exrate_index: Dict[date, dict] = {}
+    exrate_index: dict[date, dict] = {}
     if "ExRate" not in wb.sheetnames:
         return exrate_index
 
@@ -88,8 +95,8 @@ def build_exrate_index(wb) -> Dict[date, dict]:
 
 def scan_sheet_headers(
     wb,
-    target_cols: Dict[str, str],
-) -> Dict[str, dict]:
+    target_cols: dict[str, str],
+) -> dict[str, dict]:
     """
     Scan monthly tabs for header rows and column indices.
 
@@ -97,14 +104,14 @@ def scan_sheet_headers(
     Skips sheets in SKIP_SHEET_NAMES and sheets without the
     source date column.
     """
-    sheet_maps: Dict[str, dict] = {}
+    sheet_maps: dict[str, dict] = {}
 
     for sheet_name in wb.sheetnames:
         if sheet_name in SKIP_SHEET_NAMES:
             continue
         ws = wb[sheet_name]
         header_row_idx = None
-        col_indices_local: Dict[str, int] = {}
+        col_indices_local: dict[str, int] = {}
         for row_idx, row in enumerate(
             ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
         ):
@@ -139,14 +146,14 @@ def scan_sheet_headers(
 
 def inject_xlookup_formulas(
     wb,
-    sheet_maps: Dict[str, dict],
+    sheet_maps: dict[str, dict],
     exrate_last_row: int,
     parse_date_fn: Callable,
-    emit_fn: Optional[Callable[[str], None]] = None,
+    emit_fn: Callable[[str], None] | None = None,
     dry_run: bool = False,
     buffer_rows: int = PREFORMAT_BUFFER_ROWS,
     rate_type: str = "buying_transfer",
-    exrate_col_map: Optional[Dict[str, str]] = None,
+    exrate_col_map: dict[str, str] | None = None,
 ) -> None:
     """
     Inject XLOOKUP formulas into monthly tabs.
@@ -258,6 +265,15 @@ def inject_xlookup_formulas(
                 for ccy, col_letter in exrate_col_map.items():
                     if ccy in ("USD", "EUR", "THB"):
                         continue  # already handled above
+                    # Validate before interpolating into the formula string;
+                    # a bad code/column would otherwise corrupt the whole row.
+                    if not _CCY_RE.match(ccy) or not _COL_RE.match(col_letter):
+                        logger.warning(
+                            "Skipping invalid exrate_col_map entry: "
+                            "ccy=%r col_letter=%r",
+                            ccy, col_letter,
+                        )
+                        continue
                     ifs_branches += (
                         f",{cur_ref}=\"{ccy}\","
                         f"IFERROR(_xlfn.XLOOKUP({date_ref},"
@@ -283,9 +299,8 @@ def inject_xlookup_formulas(
                 continue
 
             # Track if we're replacing an old formula
-            if existing_val is not None:
-                if isinstance(existing_val, str) and existing_val.startswith("="):
-                    overwritten += 1
+            if existing_val is not None and isinstance(existing_val, str) and existing_val.startswith("="):
+                overwritten += 1
 
             zero_touch_write(ws, row_idx, out_col, formula)
             written += 1
@@ -319,12 +334,12 @@ def inject_xlookup_formulas(
 
 def write_custom_exrate_data(
     ws,
-    rate_data: Dict[str, Dict[str, Dict[date, float]]],
-    col_specs: List[Tuple[str, str]],
-    headers: List[str],
-    all_dates: List[date],
-    holidays_set: Set[date],
-    holidays_names: Dict[date, str],
+    rate_data: dict[str, dict[str, dict[date, float]]],
+    col_specs: list[tuple[str, str]],
+    headers: list[str],
+    all_dates: list[date],
+    holidays_set: set[date],
+    holidays_names: dict[date, str],
 ) -> None:
     """
     Write multi-currency ExRate data with styling to a worksheet.
@@ -361,9 +376,12 @@ def write_custom_exrate_data(
     )
 
     # ── Clear existing content ────────────────────────────────────
-    for row_idx in range(1, max(ws.max_row or 1, 1) + 1):
-        for col_idx in range(1, max(ws.max_column or 1, 1) + 1):
-            ws.cell(row=row_idx, column=col_idx).value = None
+    # delete_rows drops the whole used range in one shot instead of
+    # walking max_row × max_col cells (which blows up memory on an
+    # inflated used-range and violates the featherweight limit).
+    existing_rows = ws.max_row or 0
+    if existing_rows:
+        ws.delete_rows(1, existing_rows)
 
     # ── Write headers ─────────────────────────────────────────────
     for col_idx, h in enumerate(headers, 1):

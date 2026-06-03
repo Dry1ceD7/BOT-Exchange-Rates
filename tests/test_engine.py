@@ -20,6 +20,7 @@ from core.engine import (
     FileSizeLimitError,
     LedgerEngine,
 )
+from core.ledger_processing import prescan_target_dates, run_anomaly_check
 
 # =========================================================================
 #  FIXTURES
@@ -158,6 +159,18 @@ class TestComputeYearStartDate:
         result = LedgerEngine.compute_year_start_date(2024, [])
         assert result == date(2023, 12, 29)
 
+    def test_no_trading_day_raises(self):
+        """If every December weekday is a holiday, raise (no silent Dec 20)."""
+        from datetime import timedelta
+        prev_year = 2024
+        all_dec = []
+        d = date(prev_year, 12, 1)
+        while d.year == prev_year:
+            all_dec.append(d)
+            d += timedelta(days=1)
+        with pytest.raises(ValueError):
+            LedgerEngine.compute_year_start_date(prev_year + 1, all_dec)
+
 
 # =========================================================================
 #  PRESCAN DELEGATE
@@ -184,6 +197,77 @@ class TestPrescanDelegate:
 # =========================================================================
 #  SKIP SHEET NAMES
 # =========================================================================
+
+class TestFileSizeConstant:
+    """Fix #4: featherweight 15MB default per CLAUDE.md."""
+
+    def test_default_is_15mb(self, monkeypatch):
+        monkeypatch.delenv("BOT_MAX_FILE_MB", raising=False)
+        import importlib
+
+        import core.constants as const
+        importlib.reload(const)
+        assert const.MAX_FILE_SIZE_MB == 15
+        # restore default module state for the rest of the suite
+        importlib.reload(const)
+
+
+@pytest.fixture
+def exrate_xlsx(tmp_path):
+    """A minimal standalone ExRate workbook (pre-existing file to back up)."""
+    filepath = tmp_path / "exrate.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "ExRate"
+    ws.append(["Date", "USD Buying TT Rate", "USD Selling Rate",
+               "EUR Buying TT Rate", "EUR Selling Rate", "Holidays/Weekend"])
+    ws.append([date(2025, 3, 10), None, None, None, None, ""])
+    wb.save(str(filepath))
+    wb.close()
+    return str(filepath)
+
+
+class TestUpdateExrateStandaloneFailSafe:
+    """Fixes #2/#3: guardrail + backup-before-load + handle release."""
+
+    def test_oversized_file_raises_before_backup(self, engine,
+                                                 oversized_file):
+        from unittest.mock import MagicMock
+        engine.backup = MagicMock()
+        with pytest.raises(FileSizeLimitError):
+            asyncio.run(engine.update_exrate_standalone(oversized_file))
+        engine.backup.create_backup.assert_not_called()
+
+    def test_backup_failure_skips_overwrite(self, engine, exrate_xlsx):
+        from unittest.mock import MagicMock
+
+        from core.backup_manager import BackupError
+        with open(exrate_xlsx, "rb") as f:
+            before = f.read()
+        engine.backup = MagicMock()
+        engine.backup.create_backup.side_effect = BackupError("disk full")
+        with pytest.raises(BackupError):
+            asyncio.run(engine.update_exrate_standalone(exrate_xlsx))
+        # File must remain untouched when backup fails.
+        with open(exrate_xlsx, "rb") as f:
+            assert f.read() == before
+
+    def test_backup_created_before_load(self, engine, exrate_xlsx,
+                                        monkeypatch):
+        from unittest.mock import MagicMock
+        engine.backup = MagicMock()
+
+        # Force an error AFTER load to prove the handle is released via
+        # try/finally (no leaked workbook, gc runs).
+        async def boom(*a, **k):
+            raise ValueError("api down")
+        monkeypatch.setattr(engine, "_preload_api_data", boom)
+
+        with pytest.raises(ValueError):
+            asyncio.run(engine.update_exrate_standalone(exrate_xlsx))
+        engine.backup.create_backup.assert_called_once()
+        # Backup happened before the post-load failure (load succeeded).
+
 
 class TestSkipSheetNames:
     """Tests for the SKIP_SHEET_NAMES constant."""
@@ -243,3 +327,189 @@ class TestBatchAndHolidayLookup:
         )
         assert (success, failed, errors) == (2, 0, [])
         assert engine.last_batch_anomaly_count == 4
+
+
+# =========================================================================
+#  END-TO-END INTEGRATION (GAP2)
+# =========================================================================
+
+class TestProcessLedgerEndToEnd:
+    """Full process_ledger run on a real fixture with a mocked API."""
+
+    def _build_engine(self, tmp_cache, tmp_path):
+        """Engine wired to a mocked API + injected tmp backup/cache."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        def _rate(period, currency, buying_transfer, selling):
+            return SimpleNamespace(
+                period=period, currency=currency,
+                buying_transfer=buying_transfer, buying_sight=None,
+                selling=selling, mid_rate=None,
+            )
+
+        async def _rates(start, end, currency):
+            # Provide rates for the target dates (and surrounding range).
+            base_b = 33.0 if currency == "USD" else 36.0
+            base_s = 33.5 if currency == "USD" else 36.5
+            out = []
+            d = start
+            from datetime import timedelta as _td
+            while d <= end:
+                out.append(_rate(
+                    d.strftime("%Y-%m-%d"), currency, base_b, base_s,
+                ))
+                d += _td(days=1)
+            return out
+
+        async def _holidays(year):
+            return []
+
+        api = MagicMock()
+        api.get_exchange_rates = _rates
+        api.get_holidays = _holidays
+
+        backup = MagicMock()  # no-op backup, injected
+        return LedgerEngine(api, backup=backup, cache=tmp_cache)
+
+    def test_real_run_populates_exrate_and_formulas(
+        self, ledger_xlsx, tmp_cache, tmp_path,
+    ):
+        path = ledger_xlsx({"Jan": [
+            (date(2025, 1, 7), "USD"),    # Tuesday
+            ("10/03/2025", "EUR"),        # string date → normalized
+        ]})
+        engine = self._build_engine(tmp_cache, tmp_path)
+
+        result = asyncio.run(engine.process_ledger(path))
+        assert result == path
+
+        wb = openpyxl.load_workbook(path)
+        try:
+            # ExRate master sheet populated.
+            assert "ExRate" in wb.sheetnames
+            ws_ex = wb["ExRate"]
+            assert ws_ex.max_row >= 2
+
+            ws = wb["Jan"]
+            # EX Rate (col 3) holds the IFS formula.
+            usd_formula = ws.cell(row=2, column=3).value
+            assert isinstance(usd_formula, str)
+            assert usd_formula.startswith("=IF(OR(")
+            assert "_xlfn.IFS(" in usd_formula
+            assert "_xlfn.XLOOKUP(" in usd_formula
+
+            # Source date that was a string is now a real date.
+            normalized = ws.cell(row=3, column=1).value
+            as_date = normalized.date() if isinstance(normalized, datetime) \
+                else normalized
+            assert as_date == date(2025, 3, 10)
+        finally:
+            wb.close()
+
+    def test_dry_run_leaves_file_bytes_unchanged(
+        self, ledger_xlsx, tmp_cache, tmp_path,
+    ):
+        path = ledger_xlsx({"Jan": [(date(2025, 1, 7), "USD")]})
+        with open(path, "rb") as f:
+            before = f.read()
+        engine = self._build_engine(tmp_cache, tmp_path)
+
+        result = asyncio.run(engine.process_ledger(path, dry_run=True))
+        assert result == path
+        with open(path, "rb") as f:
+            assert f.read() == before
+        # Backup must be skipped on dry runs.
+        engine.backup.create_backup.assert_not_called()
+
+
+# =========================================================================
+#  LEDGER_PROCESSING — extracted near-pure helpers
+# =========================================================================
+
+class TestRunAnomalyCheck:
+    """Tests for the extracted run_anomaly_check function."""
+
+    def test_no_anomalies_returns_zero_and_no_emit(self):
+        class _Guard:
+            def check_rates_bulk(self, bundle):
+                # Bundle must carry all four labelled rate dicts.
+                assert set(bundle) == {
+                    "USD_buying_transfer", "USD_selling",
+                    "EUR_buying_transfer", "EUR_selling",
+                }
+                return []
+
+        emitted = []
+        count = run_anomaly_check(
+            _Guard(),
+            lambda msg, etype: emitted.append((msg, etype)),
+            {}, {}, {}, {},
+        )
+        assert count == 0
+        assert emitted == []
+
+    def test_anomalies_emit_warning_per_record(self):
+        anomaly = SimpleNamespace(
+            currency="USD", rate_type="selling",
+            check_date=date(2025, 3, 10),
+            pct_change=12.5, prev_value="33.0000", new_value="37.0000",
+        )
+
+        class _Guard:
+            def check_rates_bulk(self, bundle):
+                return [anomaly, anomaly]
+
+        emitted = []
+        count = run_anomaly_check(
+            _Guard(),
+            lambda msg, etype: emitted.append((msg, etype)),
+            {}, {}, {}, {},
+        )
+        assert count == 2
+        assert len(emitted) == 2
+        assert all(etype == "warning" for _msg, etype in emitted)
+        assert "ANOMALY" in emitted[0][0]
+
+
+class TestPrescanTargetDates:
+    """Tests for the extracted prescan_target_dates function."""
+
+    _COLS = {"source_date": "Date", "currency": "Cur", "out_rate": "EX Rate"}
+
+    def test_extracts_all_dates(self, sample_xlsx):
+        dates = prescan_target_dates(sample_xlsx, self._COLS)
+        assert dates == {
+            date(2025, 3, 10), date(2025, 3, 11), date(2025, 3, 12),
+        }
+
+    def test_skips_skip_sheet_names(self, tmp_path):
+        filepath = tmp_path / "with_exrate.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Jan"
+        ws.append(["Date", "Cur", "EX Rate"])
+        ws.append([date(2025, 6, 2), "USD", None])
+        # ExRate is a SKIP sheet — its dates must NOT be collected.
+        ws_ex = wb.create_sheet("ExRate")
+        ws_ex.append(["Date", "USD Buying TT Rate"])
+        ws_ex.append([date(1999, 1, 1), 1.0])
+        wb.save(str(filepath))
+        wb.close()
+
+        dates = prescan_target_dates(str(filepath), self._COLS)
+        assert dates == {date(2025, 6, 2)}
+        assert date(1999, 1, 1) not in dates
+
+    def test_emit_callback_invoked(self, sample_xlsx):
+        msgs = []
+        prescan_target_dates(
+            sample_xlsx, self._COLS, emit_fn=msgs.append,
+        )
+        assert msgs == ["Scanning dates from workbook"]
+
+    def test_engine_method_delegates(self, engine, sample_xlsx):
+        """The engine shim returns identical results to the function."""
+        assert engine._prescan_target_dates(sample_xlsx) == prescan_target_dates(
+            sample_xlsx, engine.target_cols,
+        )

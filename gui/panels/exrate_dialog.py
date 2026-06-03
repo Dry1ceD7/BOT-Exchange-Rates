@@ -8,10 +8,11 @@ Extracted from gui/app.py to reduce God Object line count.
 """
 
 import asyncio
+import contextlib
 import logging
-import os
 import threading
 from datetime import date
+from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
@@ -338,10 +339,9 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
     app.update_idletasks()
 
     def _status_cb(msg: str):
-        try:
+        # app destroyed during ExRate generation
+        with contextlib.suppress(RuntimeError):
             app.after(0, _set_status, msg, t["text_secondary"])
-        except RuntimeError:
-            pass  # app destroyed during ExRate generation
 
     def _done(success: bool, message: str):
         """Main-thread callback to restore UI state."""
@@ -383,26 +383,20 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
             loop = asyncio.new_event_loop()
             try:
                 loop.run_until_complete(_run())
-                try:
+                with contextlib.suppress(RuntimeError):
                     app.after(0, _done, True,
-                              f"✓ ExRate created: {os.path.basename(dest)}")
-                except RuntimeError:
-                    pass
+                              f"✓ ExRate created: {Path(dest).name}")
             except (httpx.RequestError, httpx.HTTPStatusError,
                     OSError, ValueError) as e:
                 logger.error("ExRate standalone failed: %s", e)
-                try:
+                with contextlib.suppress(RuntimeError):
                     app.after(0, _done, False, f"Failed: {e}")
-                except RuntimeError:
-                    pass
             finally:
                 loop.close()
         except (OSError, ValueError) as e:
             logger.error("ExRate file creation failed: %s", e)
-            try:
+            with contextlib.suppress(RuntimeError):
                 app.after(0, _done, False, f"Failed: {e}")
-            except RuntimeError:
-                pass
 
     threading.Thread(target=_worker, daemon=True, name="ExRateWorker").start()
 

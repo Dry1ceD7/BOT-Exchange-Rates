@@ -7,21 +7,25 @@ Extracted from gui/app.py to reduce God Object line count.
 ---------------------------------------------------------------------------
 """
 
+import contextlib
 import logging
 import threading
 
 import customtkinter as ctk
 
+from gui.panels._base_panel import SafePanel
 from gui.theme import get_theme
 
 logger = logging.getLogger(__name__)
 
 
-class UpdateManager:
+class UpdateManager(SafePanel):
     """Manages the auto-update lifecycle: check → banner → download → restart.
 
     Holds a reference to the parent app for UI callbacks. All methods are
     designed to be called from the main Tk thread (workers use `_safe_after`).
+    Not a widget itself — `after()` is delegated to `self.app` via the
+    `_after_target()` hook from SafePanel.
     """
 
     def __init__(self, app):
@@ -29,17 +33,12 @@ class UpdateManager:
         self._banner = None
         self._dl_label = None
         self._pending_version = None
+        self._pending_sha256 = None
         self._destroyed = False
 
-    # ── Thread-safe after() wrapper ─────────────────────────────────
-    def _safe_after(self, ms, fn, *args) -> None:
-        """Schedule fn on the main thread only if app is still alive."""
-        if self._destroyed:
-            return
-        try:
-            self.app.after(ms, fn, *args)
-        except RuntimeError:
-            self._destroyed = True
+    def _after_target(self):
+        """SafePanel schedules `after()` on the owning app widget."""
+        return self.app
 
     def mark_destroyed(self) -> None:
         """Called by the app during teardown to prevent further scheduling."""
@@ -114,9 +113,9 @@ class UpdateManager:
     def _start_download(self, version: str) -> None:
         """Show install location confirmation, then download and install."""
         t = get_theme()
-        from core.auto_updater import _get_install_dir
+        from core.auto_updater import get_install_dir
 
-        self._install_dir = _get_install_dir()
+        self._install_dir = get_install_dir()
 
         if self._banner:
             for w in self._banner.winfo_children():
@@ -203,7 +202,7 @@ class UpdateManager:
             self._dl_label.place(relx=0.5, rely=0.5, anchor="center")
 
         def _worker():
-            from core.auto_updater import _fetch_expected_checksum
+            from core.auto_updater import fetch_expected_checksum
 
             asset = get_installer_asset_url(version)
             if asset.get("error") or not asset.get("url"):
@@ -214,9 +213,11 @@ class UpdateManager:
             # C-02: Fetch SHA-256 checksum for integrity verification
             expected_sha256 = None
             if asset.get("sha256_url"):
-                expected_sha256 = _fetch_expected_checksum(
+                expected_sha256 = fetch_expected_checksum(
                     asset["sha256_url"]
                 )
+            # Stash for the re-verify-before-exec step in _execute_installer.
+            self._pending_sha256 = expected_sha256
 
             def _progress(downloaded, total):
                 pct = int(downloaded / total * 100)
@@ -312,8 +313,14 @@ class UpdateManager:
                 text_color=t["banner_text_light"],
             ).place(relx=0.5, rely=0.5, anchor="center")
 
-        # Fire the detached process
-        apply_update(installer_path, install_dir=self._install_dir)
+        # Fire the detached process.
+        # SECURITY: pass the expected SHA-256 so apply_update re-verifies the
+        # file immediately before executing it (TOCTOU guard).
+        apply_update(
+            installer_path,
+            install_dir=self._install_dir,
+            expected_sha256=self._pending_sha256,
+        )
 
         # IMMEDIATELY kill this instance so the .bat file can overwrite BOT-ExRate.exe
         self._safe_after(500, self._exit_for_restart)
@@ -333,8 +340,6 @@ class UpdateManager:
     def _exit_for_restart(self) -> None:
         """Clean exit for restart — destroy window and exit process."""
         import sys
-        try:
+        with contextlib.suppress(RuntimeError):
             self.app.destroy()
-        except RuntimeError:
-            pass
         sys.exit(0)

@@ -11,14 +11,13 @@ SFFB: < 60 lines.
 """
 
 import os
-from typing import List, Optional
 
 import customtkinter as ctk
 
 from gui.theme import get_theme
 
 
-def choose_path_to_remove(parent, paths: List[str]) -> Optional[int]:
+def choose_path_to_remove(parent, paths: list[str]) -> int | None:
     """
     Show a modal with radio buttons for each path.
     Returns the index of the selected path, or None if cancelled.
@@ -47,7 +46,10 @@ def choose_path_to_remove(parent, paths: List[str]) -> Optional[int]:
 
     selected = ctk.IntVar(value=0)
     for i, path in enumerate(paths):
-        label = os.path.basename(path) or path
+        # noqa: PTH119 — os.path.basename returns "" for a trailing-separator
+        # dir path so the `or path` fallback shows the full path; Path.name
+        # would return the last segment instead. Keep exact display behavior.
+        label = os.path.basename(path) or path  # noqa: PTH119
         ctk.CTkRadioButton(
             dialog, text=f"📁 {label}",
             variable=selected, value=i,

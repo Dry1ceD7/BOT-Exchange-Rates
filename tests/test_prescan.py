@@ -40,6 +40,14 @@ class TestParseScanDate:
     def test_invalid_returns_none(self):
         assert _parse_scan_date("hello", self.FORMATS) is None
 
+    def test_uses_centralized_formats(self):
+        """Fix #5: prescan formats come from the single shared source."""
+        from core.constants import DATE_FORMATS as SHARED
+        assert tuple(DATE_FORMATS) == tuple(SHARED)
+        # Superset coverage preserved.
+        assert _parse_scan_date("10/03/2025", self.FORMATS) == date(2025, 3, 10)
+        assert _parse_scan_date("20250310", self.FORMATS) == date(2025, 3, 10)
+
 
 # =========================================================================
 #  PRESCAN

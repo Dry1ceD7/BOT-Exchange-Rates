@@ -16,8 +16,9 @@ Persists all configuration via core/config_manager.SettingsManager.
 
 import logging
 import os
+from collections.abc import Callable
+from pathlib import Path
 from tkinter import filedialog
-from typing import Callable, Optional
 
 import customtkinter as ctk
 
@@ -38,8 +39,8 @@ class SchedulerPanel(ctk.CTkFrame):
     def __init__(
         self,
         master,
-        on_start_scheduler: Optional[Callable] = None,
-        on_stop_scheduler: Optional[Callable] = None,
+        on_start_scheduler: Callable | None = None,
+        on_stop_scheduler: Callable | None = None,
         **kwargs,
     ):
         t = get_theme()
@@ -201,7 +202,7 @@ class SchedulerPanel(ctk.CTkFrame):
             self._minute_var.set(parts[1])
 
         # Load paths
-        self._paths = [p for p in paths if os.path.isdir(p)]
+        self._paths = [p for p in paths if Path(p).is_dir()]
         self._refresh_path_list()
 
         # Set toggle (triggers _on_toggle which shows/hides content)
@@ -260,21 +261,29 @@ class SchedulerPanel(ctk.CTkFrame):
             self._refresh_path_list()
             self._on_config_change()
             return
-        # Show a selection dialog for multiple paths
+        # Show a selection dialog for multiple paths. Snapshot the list so the
+        # chosen index maps to a stable value, then remove BY VALUE (not by the
+        # possibly-stale index) in case the list changed during the dialog.
         from gui.panels._path_chooser import choose_path_to_remove
-        idx = choose_path_to_remove(self, self._paths)
-        if idx is not None and 0 <= idx < len(self._paths):
-            self._paths.pop(idx)
-            self._refresh_path_list()
-            self._on_config_change()
+        snapshot = list(self._paths)
+        idx = choose_path_to_remove(self, snapshot)
+        if idx is not None and 0 <= idx < len(snapshot):
+            target = snapshot[idx]
+            if target in self._paths:
+                self._paths.remove(target)
+                self._refresh_path_list()
+                self._on_config_change()
 
     def _refresh_path_list(self):
         """Refresh the path list textbox."""
         self._path_list.configure(state="normal")
         self._path_list.delete("1.0", "end")
         for p in self._paths:
-            # Show abbreviated path for readability
-            display = os.path.basename(p) or p
+            # Show abbreviated path for readability.
+            # noqa: PTH119 — os.path.basename returns "" for a trailing-sep
+            # dir so the `or p` fallback shows the full path; Path.name would
+            # return the last segment instead. Keep exact display behavior.
+            display = os.path.basename(p) or p  # noqa: PTH119
             self._path_list.insert("end", f"📁 {display}\n")
         self._path_list.configure(state="disabled")
 
@@ -322,6 +331,5 @@ class SchedulerPanel(ctk.CTkFrame):
         )
         if hasattr(self, "_lbl_title"):
             self._lbl_title.configure(text_color=t["text_primary"])
-        if hasattr(self, "_lbl_status"):
-            # Don't override status color (success/warning) — only update if idle
-            pass
+        # _lbl_status color is intentionally left as-is so success/warning
+        # states survive a theme re-apply.

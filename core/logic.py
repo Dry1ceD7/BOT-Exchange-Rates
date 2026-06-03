@@ -11,9 +11,9 @@ day. No Excel formulas are used; outputs are guaranteed Python Decimal
 objects.
 """
 
-from datetime import date, timedelta
+import re
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Dict, List, Optional, Tuple
 
 # -------------------------------------------------------------------------
 # EXCEPTIONS
@@ -30,7 +30,7 @@ class RateNotFoundError(Exception):
 class BOTLogicEngine:
     """Mathematical engine for resolving strict Bank of Thailand trading dates."""
 
-    def __init__(self, holidays: List[date], max_rollback_days: int = 10):
+    def __init__(self, holidays: list[date], max_rollback_days: int = 10):
         """
         Args:
             holidays: A list of official BOT holiday dates.
@@ -46,19 +46,17 @@ class BOTLogicEngine:
         """
         if target_date.weekday() >= 5: # 5 = Saturday, 6 = Sunday
             return False
-        if target_date in self.holidays:
-            return False
-        return True
+        return target_date not in self.holidays
 
-    def _get_rate_for_date(self, target_date: date, rates_data: Dict[date, Decimal]) -> Optional[Decimal]:
+    def _get_rate_for_date(self, target_date: date, rates_data: dict[date, Decimal]) -> Decimal | None:
         """Safely extracts a Decimal rate for a specific date from the data dictionary."""
         return rates_data.get(target_date)
 
     def resolve_rate(
         self, target_date: date,
-        usd_rates: Dict[date, Decimal],
-        eur_rates: Dict[date, Decimal],
-    ) -> Tuple[date, Optional[Decimal], Optional[Decimal]]:
+        usd_rates: dict[date, Decimal],
+        eur_rates: dict[date, Decimal],
+    ) -> tuple[date, Decimal | None, Decimal | None]:
         """
         Standard Date Resolution Engine (V2.5).
 
@@ -112,8 +110,8 @@ class BOTLogicEngine:
 
     def resolve_rate_for_currency(
         self, target_date: date, currency: str,
-        usd_rates: Dict[date, Decimal], eur_rates: Dict[date, Decimal]
-    ) -> Tuple[date, Optional[Decimal]]:
+        usd_rates: dict[date, Decimal], eur_rates: dict[date, Decimal]
+    ) -> tuple[date, Decimal | None]:
         """
         Currency-aware date resolver.
 
@@ -140,10 +138,98 @@ class BOTLogicEngine:
         return target_date, None
 
 # -------------------------------------------------------------------------
+# YEAR-END & HOLIDAY HELPERS (pure functions — extracted from engine)
+# -------------------------------------------------------------------------
+
+def compute_year_start_date(
+    target_year: int,
+    holidays: list[date],
+) -> date:
+    """
+    Computes the last valid trading day of the PREVIOUS calendar year.
+    Dec 31 is always office day-off. Start from Dec 30 and roll back.
+    """
+    holidays_set = set(holidays)
+    prev_year = target_year - 1
+    check_date = date(prev_year, 12, 30)
+    # Roll back through December until a trading day is found. Do NOT
+    # return a fixed fallback (Dec 20 may itself be a weekend/holiday).
+    # Bound to December: a year-start outside Dec is meaningless, so
+    # raise rather than silently returning a November date.
+    while check_date.year == prev_year and check_date.month == 12:
+        if check_date.weekday() < 5 and check_date not in holidays_set:
+            return check_date
+        check_date -= timedelta(days=1)
+    raise ValueError(
+        f"No trading day found in December {prev_year} "
+        "(all weekends/holidays)."
+    )
+
+
+def build_holiday_lookup(
+    cache,
+    all_target_dates: set[date],
+    computed_start: date,
+    logic_engine,
+) -> tuple[set[date], dict[date, str]]:
+    """Build holiday sets and name mappings from cached holiday data.
+
+    Parses substitution holiday names (e.g., "Substitution for
+    Songkran Day (15th April 2025)") to map the original holiday
+    date as well.
+
+    Args:
+        cache: A cache object exposing ``get_holidays(year)``.
+        all_target_dates: Dates found in the ledger.
+        computed_start: The computed year-start trading date.
+        logic_engine: Engine whose ``holidays`` seeds the master set.
+
+    Returns:
+        Tuple of (master_holidays_set, holidays_names dict).
+    """
+    # Expected BOT format: "Substitution for Songkran Day (15th April 2025)"
+    sub_pattern = re.compile(r"^Substitution for ([^(]+)\s*\((.*?)\)$")
+    holidays_names: dict[date, str] = {}
+    master_holidays_set = set(logic_engine.holidays)
+
+    for year in {
+        d.year
+        for d in (all_target_dates | {computed_start, date.today()})
+    }:
+        cached_hols = cache.get_holidays(year)
+        for h_str, h_name in cached_hols:
+            try:
+                h_obj = datetime.strptime(h_str, "%Y-%m-%d").date()
+                holidays_names[h_obj] = h_name
+                m = sub_pattern.search(h_name)
+                if m:
+                    real_name = m.group(1).strip()
+                    date_str = m.group(2).strip()
+                    date_str_clean = re.sub(
+                        r'(\d+)(st|nd|rd|th)', r'\1', date_str
+                    )
+                    date_str_clean = re.sub(
+                        r'^[A-Za-z]+\s+', '', date_str_clean
+                    )
+                    try:
+                        real_dt = datetime.strptime(
+                            date_str_clean, '%d %B %Y'
+                        ).date()
+                        holidays_names[real_dt] = real_name
+                        master_holidays_set.add(real_dt)
+                    except (ValueError, TypeError):
+                        pass
+            except (ValueError, TypeError):
+                pass
+
+    return master_holidays_set, holidays_names
+
+
+# -------------------------------------------------------------------------
 # UTILITIES
 # -------------------------------------------------------------------------
 
-def safe_to_decimal(value: object) -> Optional[Decimal]:
+def safe_to_decimal(value: object) -> Decimal | None:
     """Strictly converts a float/string payload to a highly precise Decimal."""
     if value is None or value == "":
         return None

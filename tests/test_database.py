@@ -15,7 +15,8 @@ from decimal import Decimal
 
 import pytest
 
-from core.database import CacheDB
+import core.database as database
+from core.database import CacheDB, get_cache
 
 
 @pytest.fixture
@@ -95,6 +96,46 @@ class TestRates:
 
     def test_bulk_insert_empty_list(self, db):
         db.insert_rates_bulk([])  # Should not raise
+
+
+# =========================================================================
+#  MULTI-CURRENCY RATES (lossless Decimal round-trip)
+# =========================================================================
+
+class TestMultiRates:
+    """rates_multi must preserve exact Decimal values (TEXT affinity)."""
+
+    def test_insert_and_get_multi_rate_exact(self, db):
+        db.insert_multi_rates_bulk([
+            ("2025-01-02", "USD", "buying_transfer", Decimal("35.1150")),
+        ])
+        rate = db.get_multi_rate(date(2025, 1, 2), "USD", "buying_transfer")
+        assert isinstance(rate, Decimal)
+        assert rate == Decimal("35.1150")
+
+    def test_get_all_multi_rates_returns_exact_decimals(self, db):
+        db.insert_multi_rates_bulk([
+            ("2025-01-02", "GBP", "mid_rate", Decimal("44.1234")),
+            ("2025-01-02", "USD", "selling", Decimal("35.0000")),
+        ])
+        rows = db.get_all_multi_rates()
+        assert len(rows) == 2
+        as_dict = {(d, c, rt): v for (d, c, rt, v) in rows}
+        gbp = as_dict[("2025-01-02", "GBP", "mid_rate")]
+        assert isinstance(gbp, Decimal)
+        assert gbp == Decimal("44.1234")
+        assert as_dict[("2025-01-02", "USD", "selling")] == Decimal("35.0000")
+
+    def test_multi_rate_value_stored_as_text(self, db):
+        """4dp digits must survive verbatim (no REAL coercion)."""
+        db.insert_multi_rates_bulk([
+            ("2025-01-02", "JPY", "mid_rate", Decimal("0.2300")),
+        ])
+        raw = db._conn().execute(
+            "SELECT value, typeof(value) FROM rates_multi"
+        ).fetchone()
+        assert raw[0] == "0.2300"
+        assert raw[1] == "text"
 
 
 # =========================================================================
@@ -211,3 +252,175 @@ class TestThreadSafety:
         t2.join()
 
         assert len(errors) == 0, f"Thread errors: {errors}"
+
+
+# =========================================================================
+#  CONNECTION-PER-THREAD (fix #4)
+# =========================================================================
+
+class TestConnectionPerThread:
+    """Each thread should get its own sqlite3 connection."""
+
+    def test_distinct_connections_per_thread(self, db):
+        ids = {}
+
+        def grab(tag):
+            ids[tag] = id(db._conn())
+
+        main_conn = id(db._conn())
+        threads = [threading.Thread(target=grab, args=(i,)) for i in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Each worker thread's connection differs from the main thread's.
+        assert all(cid != main_conn for cid in ids.values())
+        # Same thread reuses its connection.
+        assert id(db._conn()) == main_conn
+
+    def test_write_visible_across_threads(self, db):
+        """A write committed on one thread is readable on another (WAL)."""
+        d = date(2025, 5, 1)
+        db.insert_rate(d, usd_buying=30.0, usd_selling=30.1)
+
+        result = {}
+
+        def reader():
+            result["row"] = db.get_rate(d)
+
+        t = threading.Thread(target=reader)
+        t.start()
+        t.join()
+
+        assert result["row"] is not None
+        assert result["row"]["usd_buying"] == Decimal("30.0")
+
+
+# =========================================================================
+#  LIFECYCLE: close / atexit / context manager (fix #5)
+# =========================================================================
+
+class TestLifecycle:
+    """Tests for close(), context-manager, and WAL checkpoint."""
+
+    def test_context_manager_closes(self, tmp_path):
+        tmp = str(tmp_path / "ctx.db")
+        with CacheDB(db_path=tmp) as cache:
+            cache.insert_rate(date(2025, 1, 1), usd_buying=1.0, usd_selling=1.1)
+        # After exit, the connection set is empty (closed).
+        assert cache._closed is True
+
+    def test_close_is_idempotent(self, tmp_path):
+        tmp = str(tmp_path / "idem.db")
+        cache = CacheDB(db_path=tmp)
+        cache.close()
+        cache.close()  # second close must not raise
+        assert cache._closed is True
+
+    def test_close_truncates_wal(self, tmp_path):
+        """After close, WAL checkpoint(TRUNCATE) should shrink the -wal file."""
+        tmp = str(tmp_path / "wal.db")
+        cache = CacheDB(db_path=tmp)
+        cache.insert_rates_bulk([
+            (f"2025-06-{d:02d}", 33.0, 33.1, 36.0, 36.1) for d in range(1, 28)
+        ])
+        cache.close()
+        wal = tmp + "-wal"
+        # WAL is either removed or truncated to zero bytes after checkpoint.
+        assert (not os.path.exists(wal)) or os.path.getsize(wal) == 0
+
+
+# =========================================================================
+#  SCHEMA MIGRATION (fix #9)
+# =========================================================================
+
+class TestSchemaMigration:
+    """Idempotent guarded migration from the old 2-column schema."""
+
+    def test_migrates_old_schema_and_backfills(self, tmp_path):
+        import sqlite3
+        tmp = str(tmp_path / "legacy.db")
+        # Build an OLD-schema DB by hand.
+        raw = sqlite3.connect(tmp)
+        raw.execute(
+            "CREATE TABLE rates (date TEXT PRIMARY KEY, usd_rate REAL, eur_rate REAL)"
+        )
+        raw.execute(
+            "INSERT INTO rates (date, usd_rate, eur_rate) VALUES ('2025-01-02', 33.5, 36.5)"
+        )
+        raw.commit()
+        raw.close()
+
+        # Opening via CacheDB should migrate without error.
+        cache = CacheDB(db_path=tmp)
+        row = cache.get_rate(date(2025, 1, 2))
+        assert row["usd_buying"] == Decimal("33.5")
+        assert row["usd_selling"] == Decimal("33.5")
+        assert row["eur_buying"] == Decimal("36.5")
+        cache.close()
+
+        # Re-opening (migration runs again) must be idempotent.
+        cache2 = CacheDB(db_path=tmp)
+        assert cache2.get_rate(date(2025, 1, 2))["usd_buying"] == Decimal("33.5")
+        cache2.close()
+
+
+# =========================================================================
+#  PUBLIC SINGLETON ACCESSOR: get_cache()
+# =========================================================================
+
+class TestGetCache:
+    """core.database.get_cache() is the public process-singleton accessor."""
+
+    @pytest.fixture
+    def reset_singleton(self, tmp_path, monkeypatch):
+        """Point the singleton at a temp DB and reset it before/after."""
+        tmp_db = str(tmp_path / "singleton_cache.db")
+
+        def _factory():
+            return CacheDB(db_path=tmp_db)
+
+        monkeypatch.setattr(database, "CacheDB", _factory)
+        # Ensure a clean slate so each test builds its own instance.
+        monkeypatch.setattr(database, "_cache_singleton", None)
+        yield
+        existing = getattr(database, "_cache_singleton", None)
+        if existing is not None:
+            existing.close()
+            database._cache_singleton = None
+
+    def test_returns_cachedb_instance(self, reset_singleton):
+        cache = get_cache()
+        assert isinstance(cache, CacheDB)
+
+    def test_returns_same_singleton(self, reset_singleton):
+        first = get_cache()
+        second = get_cache()
+        assert first is second
+
+    def test_singleton_is_usable(self, reset_singleton):
+        cache = get_cache()
+        cache.insert_rate(
+            date(2025, 7, 1), usd_buying=33.0, usd_selling=33.1
+        )
+        row = get_cache().get_rate(date(2025, 7, 1))
+        assert row["usd_buying"] == Decimal("33.0")
+
+    def test_thread_safe_singleton(self, reset_singleton):
+        """Concurrent first-callers all get the same instance."""
+        instances = []
+        barrier = threading.Barrier(5)
+
+        def grab():
+            barrier.wait()
+            instances.append(get_cache())
+
+        threads = [threading.Thread(target=grab) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(instances) == 5
+        assert all(inst is instances[0] for inst in instances)

@@ -122,3 +122,48 @@ class TestPanelModules:
 
     def test_control_panel_module_exists(self):
         from gui.panels.control_panel import ControlPanel  # noqa: F401
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 4. gui/app.py PURE HELPERS (no Tk root required)
+# ═══════════════════════════════════════════════════════════════════════════
+class TestAppExtensionResolution:
+    """Lock the single source of truth for supported Excel extensions."""
+
+    def test_single_extensions_constant(self):
+        """EXCEL_EXTENSIONS is the only supported-extension constant.
+
+        The duplicate OPENPYXL_NATIVE alias was dead code and must stay gone.
+        """
+        import gui.app as app
+
+        assert app.EXCEL_EXTENSIONS == (".xlsx", ".xlsm")
+        assert not hasattr(app, "OPENPYXL_NATIVE")
+
+    def test_resolve_filters_to_excel(self, tmp_path):
+        from gui.app import resolve_excel_files
+
+        keep = tmp_path / "ledger.xlsx"
+        keep.write_text("x")
+        macro = tmp_path / "macro.xlsm"
+        macro.write_text("x")
+        (tmp_path / "notes.txt").write_text("x")
+
+        resolved = resolve_excel_files([str(keep), str(macro),
+                                        str(tmp_path / "notes.txt")])
+        names = sorted(p.rsplit("/", 1)[-1] for p in resolved)
+        assert names == ["ledger.xlsx", "macro.xlsm"]
+
+    def test_resolve_collects_rejected_spreadsheets(self, tmp_path):
+        from gui.app import resolve_excel_files
+
+        ok = tmp_path / "a.xlsx"
+        ok.write_text("x")
+        legacy = tmp_path / "old.xls"
+        legacy.write_text("x")
+
+        accepted, rejected = resolve_excel_files(
+            [str(ok), str(legacy)], collect_rejected=True,
+        )
+        assert [p.rsplit("/", 1)[-1] for p in accepted] == ["a.xlsx"]
+        assert [p.rsplit("/", 1)[-1] for p in rejected] == ["old.xls"]

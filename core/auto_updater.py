@@ -17,17 +17,42 @@ v3.1.2 — Fixed install path resolution:
 Security: Read-only GET request. No tokens required for public repos.
 """
 
+import contextlib
 import hashlib
 import logging
 import os
 import platform
 import tempfile
-from typing import Optional
+from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from packaging.version import InvalidVersion, Version
 
 logger = logging.getLogger(__name__)
+
+# SECURITY (SSRF): only these hosts may be fetched for update assets.
+# GitHub serves release binaries from objects/release-assets subdomains.
+_ALLOWED_DOWNLOAD_HOSTS = frozenset({
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+})
+
+
+def _is_allowed_download_url(url: str) -> bool:
+    """Return True only for https URLs whose host is in the allowlist.
+
+    Used to block SSRF: a tampered GitHub API response (or a malicious
+    redirect) could otherwise point the downloader at an arbitrary host.
+    """
+    try:
+        parsed = urlparse(url)
+    except (ValueError, AttributeError):
+        return False
+    if parsed.scheme != "https":
+        return False
+    return (parsed.hostname or "").lower() in _ALLOWED_DOWNLOAD_HOSTS
 
 GITHUB_RELEASES_URL = (
     "https://api.github.com/repos/Dry1ceD7/BOT-Exchange-Rates/releases/latest"
@@ -40,7 +65,7 @@ GITHUB_ALL_RELEASES_URL = (
 INNO_APP_ID = "{B0T-EXRATE-2026-AAE}_is1"
 
 
-def _get_install_dir() -> Optional[str]:
+def get_install_dir() -> str | None:
     """
     Resolve the actual installation directory.
 
@@ -73,7 +98,7 @@ def _get_install_dir() -> Optional[str]:
                         install_loc, _ = winreg.QueryValueEx(
                             key, "InstallLocation"
                         )
-                        if install_loc and os.path.isdir(install_loc):
+                        if install_loc and Path(install_loc).is_dir():
                             logger.info(
                                 "Install dir from registry: %s", install_loc
                             )
@@ -88,18 +113,22 @@ def _get_install_dir() -> Optional[str]:
 
     # ── Strategy 2: sys.executable parent (frozen apps) ──────────────
     if getattr(sys, "frozen", False):
-        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        # noqa: PTH100,PTH120 — this install-dir string is later interpolated
+        # into the installer /DIR= flag; keep os.path's exact (no-symlink)
+        # normalization rather than Path.resolve()'s symlink resolution.
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))  # noqa: PTH100, PTH120
         logger.info("Install dir from sys.executable: %s", exe_dir)
         return exe_dir
 
     # ── Strategy 3: Development mode — project root ──────────────────
-    dev_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # noqa: PTH100,PTH120 — same exact-string requirement as above.
+    dev_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # noqa: PTH100, PTH120
     logger.info("Install dir from dev root: %s", dev_root)
     return dev_root
 
 
 def check_for_update(
-    current_version: Optional[str] = None,
+    current_version: str | None = None,
     include_prerelease: bool = False,
 ) -> dict:
     """
@@ -230,15 +259,26 @@ def get_installer_asset_url(tag: str) -> dict:
     return result
 
 
-def _fetch_expected_checksum(sha256_url: str) -> Optional[str]:
+def fetch_expected_checksum(sha256_url: str) -> str | None:
     """Download and parse a .sha256 checksum file.
 
     The file is expected to contain a single SHA-256 hex digest
     (optionally followed by a filename, like sha256sum output).
     Returns the hex digest string, or None on any error.
     """
+    if not _is_allowed_download_url(sha256_url):
+        logger.warning("Refusing checksum fetch from non-allowlisted host: %s", sha256_url)
+        return None
     try:
-        resp = httpx.get(sha256_url, timeout=10.0, follow_redirects=True)
+        # follow_redirects=False + manual host validation prevents a
+        # redirect from leading us off the allowlist (SSRF).
+        resp = httpx.get(sha256_url, timeout=10.0, follow_redirects=False)
+        while resp.is_redirect:
+            location = resp.headers.get("location", "")
+            if not _is_allowed_download_url(location):
+                logger.warning("Checksum redirect to non-allowlisted host blocked: %s", location)
+                return None
+            resp = httpx.get(location, timeout=10.0, follow_redirects=False)
         resp.raise_for_status()
         # Format: "abcdef123456...  filename.exe" or just "abcdef123456..."
         line = resp.text.strip().split()[0]
@@ -252,7 +292,7 @@ def _fetch_expected_checksum(sha256_url: str) -> Optional[str]:
 def _verify_file_sha256(filepath: str, expected_hash: str) -> bool:
     """Verify that a file's SHA-256 matches the expected hash."""
     sha256 = hashlib.sha256()
-    with open(filepath, "rb") as f:
+    with Path(filepath).open("rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             sha256.update(chunk)
     actual = sha256.hexdigest().lower()
@@ -267,10 +307,10 @@ def _verify_file_sha256(filepath: str, expected_hash: str) -> bool:
 
 def download_update(
     url: str,
-    dest_dir: Optional[str] = None,
-    filename: Optional[str] = None,
+    dest_dir: str | None = None,
+    filename: str | None = None,
     progress_cb=None,
-    expected_sha256: Optional[str] = None,
+    expected_sha256: str | None = None,
 ) -> dict:
     """
     Download the update installer to a temp directory.
@@ -280,8 +320,17 @@ def download_update(
       - File lock conflicts with the running application
       - Writing into the inner PyInstaller _MEIXXXXXX folder
 
-    v3.2.2: If expected_sha256 is provided, verify file integrity
-    after download. The download is rejected if the hash does not match.
+    SECURITY (integrity, HIGH): expected_sha256 is now MANDATORY. If it is
+    absent — or does not match — the download is rejected and the installer
+    is NEVER executed. There is currently no detached-signature mechanism on
+    the release pipeline, so the residual limitation is that integrity rests
+    on the sha256 published alongside the release; a sufficiently capable
+    MITM that controls BOTH the binary and its .sha256 over TLS could still
+    substitute a matching pair. TLS + the host allowlist below mitigate this.
+
+    SECURITY (SSRF, HIGH): the url and every redirect hop must be https and
+    on the host allowlist. follow_redirects is disabled and each hop is
+    validated manually.
 
     The Inno Setup installer will then copy files to the correct
     install directory via the /DIR= flag.
@@ -291,54 +340,97 @@ def download_update(
         dest_dir: Where to save (defaults to system temp dir)
         filename: Override filename (defaults to URL basename)
         progress_cb: Optional callback(downloaded_bytes, total_bytes)
-        expected_sha256: Optional hex SHA-256 hash to verify download
+        expected_sha256: REQUIRED hex SHA-256 hash to verify download
 
     Returns:
         {"path": str | None, "error": str | None}
     """
     result = {"path": None, "error": None}
 
-    # v3.1.2: Always download to temp directory
+    # SECURITY: integrity verification is mandatory. Refuse to download (and
+    # therefore refuse to ever run) a binary we cannot verify.
+    if not expected_sha256:
+        result["error"] = (
+            "Refusing update: no SHA-256 checksum available for integrity "
+            "verification. The release must publish a .sha256 checksum."
+        )
+        logger.error("download_update blocked: missing expected_sha256")
+        return result
+
+    # SECURITY: enforce https + host allowlist before fetching.
+    if not _is_allowed_download_url(url):
+        result["error"] = f"Refusing update: download host not allowed: {url}"
+        logger.error("download_update blocked non-allowlisted URL: %s", url)
+        return result
+
+    # SECURITY (TOCTOU): download into a PRIVATE per-run directory created
+    # 0700 instead of the shared temp root, so another local user cannot
+    # pre-create / race / read the downloaded installer before it runs.
     if dest_dir is None:
-        dest_dir = tempfile.gettempdir()
+        dest_dir = tempfile.mkdtemp(prefix="bot_exrate_dl_")
+        with contextlib.suppress(OSError):
+            Path(dest_dir).chmod(0o700)
 
     if filename is None:
         filename = url.rsplit("/", 1)[-1] if "/" in url else "update.exe"
 
-    # Download with a .tmp suffix to avoid partial overwrites
+    # Download with a .tmp suffix to avoid partial overwrites.
+    # Keep tmp_path/final_path as str: final_path is returned to callers.
     tmp_filename = filename + ".downloading"
-    tmp_path = os.path.join(dest_dir, tmp_filename)
-    final_path = os.path.join(dest_dir, filename)
+    tmp_path = str(Path(dest_dir) / tmp_filename)
+    final_path = str(Path(dest_dir) / filename)
 
     try:
-        with httpx.stream(
-            "GET", url, follow_redirects=True, timeout=120.0
-        ) as resp:
-            resp.raise_for_status()
-            total = int(resp.headers.get("content-length", 0))
-            downloaded = 0
+        # SECURITY: follow_redirects=False; validate each hop against the
+        # allowlist so a redirect cannot smuggle us to an arbitrary host.
+        stream_url = url
+        for _ in range(5):  # bounded redirect chain
+            with httpx.stream(
+                "GET", stream_url, follow_redirects=False, timeout=120.0
+            ) as resp:
+                if resp.is_redirect:
+                    location = resp.headers.get("location", "")
+                    if not _is_allowed_download_url(location):
+                        result["error"] = (
+                            f"Refusing update: redirect to non-allowlisted "
+                            f"host: {location}"
+                        )
+                        logger.error(
+                            "download_update blocked redirect: %s", location
+                        )
+                        return result
+                    stream_url = location
+                    continue
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length", 0))
+                downloaded = 0
 
-            with open(tmp_path, "wb") as f:
-                for chunk in resp.iter_bytes(chunk_size=65536):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if progress_cb and total > 0:
-                        progress_cb(downloaded, total)
+                with Path(tmp_path).open("wb") as f:
+                    for chunk in resp.iter_bytes(chunk_size=65536):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_cb and total > 0:
+                            progress_cb(downloaded, total)
+                break
+        else:
+            # Redirect chain exceeded the bound without a final response.
+            result["error"] = "Refusing update: too many redirects"
+            logger.error("download_update blocked: redirect limit exceeded")
+            return result
 
-        # Verify integrity if a checksum was provided
-        if expected_sha256:
-            if not _verify_file_sha256(tmp_path, expected_sha256):
-                os.remove(tmp_path)
-                result["error"] = (
-                    "Download integrity check failed (SHA-256 mismatch). "
-                    "The file may be corrupted or tampered with."
-                )
-                return result
+        # SECURITY: integrity is mandatory — verify or reject.
+        if not _verify_file_sha256(tmp_path, expected_sha256):
+            Path(tmp_path).unlink()
+            result["error"] = (
+                "Download integrity check failed (SHA-256 mismatch). "
+                "The file may be corrupted or tampered with."
+            )
+            return result
 
         # Rename from .downloading to final filename
-        if os.path.exists(final_path):
-            os.remove(final_path)
-        os.rename(tmp_path, final_path)
+        if Path(final_path).exists():
+            Path(final_path).unlink()
+        Path(tmp_path).rename(final_path)
 
         result["path"] = final_path
         logger.info("Update downloaded to: %s", final_path)
@@ -346,17 +438,16 @@ def download_update(
         logger.error("Download failed: %s", e)
         result["error"] = str(e)
         # Cleanup partial download
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+        if Path(tmp_path).exists():
+            with contextlib.suppress(OSError):
+                Path(tmp_path).unlink()
     return result
 
 
 def apply_update(
     new_exe_path: str,
-    install_dir: Optional[str] = None,
+    install_dir: str | None = None,
+    expected_sha256: str | None = None,
 ) -> dict:
     """
     Install the downloaded update silently.
@@ -372,9 +463,18 @@ def apply_update(
     For portable single-file builds:
       Falls back to atomic exe swap.
 
+    SECURITY (integrity TOCTOU, HIGH): the file is RE-VERIFIED against
+    expected_sha256 immediately before it is executed. download_update may
+    have verified the file earlier, but the file could be swapped between
+    download and launch (time-of-check / time-of-use). expected_sha256 is
+    MANDATORY: a missing hash, a missing file, or a mismatch refuses the
+    update and NEVER runs the binary. There is no verification-skipping path.
+
     Args:
         new_exe_path: Absolute path to the downloaded installer/exe.
         install_dir: Override install directory. If None, auto-resolved.
+        expected_sha256: REQUIRED hex SHA-256 of the installer. Re-checked
+            here right before execution.
 
     Returns:
         {"success": bool, "error": str | None,
@@ -391,17 +491,43 @@ def apply_update(
         )
         return result
 
+    # SECURITY (integrity, MANDATORY): re-verify the file hash right before
+    # we execute it. No fallback that skips verification.
+    if not expected_sha256:
+        result["error"] = (
+            "Refusing to apply update: no SHA-256 checksum supplied for "
+            "pre-execution integrity verification."
+        )
+        logger.error("apply_update blocked: missing expected_sha256")
+        return result
+    if not Path(new_exe_path).is_file():
+        result["error"] = (
+            f"Refusing to apply update: installer not found at {new_exe_path}"
+        )
+        logger.error("apply_update blocked: installer missing before exec")
+        return result
+    if not _verify_file_sha256(new_exe_path, expected_sha256):
+        result["error"] = (
+            "Refusing to apply update: installer SHA-256 mismatch immediately "
+            "before execution. The file may have been tampered with."
+        )
+        logger.error("apply_update blocked: re-hash mismatch before exec")
+        return result
+
     # v3.1.2: Resolve install directory from registry first
     if install_dir is None:
-        install_dir = _get_install_dir()
+        install_dir = get_install_dir()
 
     if install_dir is None:
         result["error"] = "Could not determine install directory"
         return result
 
     result["install_dir"] = install_dir
-    current_exe = os.path.join(install_dir, "BOT-ExRate.exe")
-    filename = os.path.basename(new_exe_path).lower()
+    # noqa: PTH118 — current_exe is interpolated verbatim into the Windows
+    # .bat updater script and validated against shell metacharacters; keep
+    # os.path.join's exact separator/string behavior for the frozen target.
+    current_exe = os.path.join(install_dir, "BOT-ExRate.exe")  # noqa: PTH118
+    filename = Path(new_exe_path).name.lower()
 
     try:
         if "setup" in filename:
@@ -413,9 +539,26 @@ def apply_update(
                 install_dir,
             )
 
-            bat_path = os.path.join(
-                tempfile.gettempdir(), "bot_exrate_updater.bat"
-            )
+            # SECURITY (TOCTOU): write the helper script into a private
+            # per-run directory created with mode 0700 instead of a fixed,
+            # predictable path in the shared temp dir. This prevents another
+            # local user from pre-creating / racing the .bat file. Verify the
+            # directory is owned by us before using it.
+            work_dir = tempfile.mkdtemp(prefix="bot_exrate_upd_")
+            with contextlib.suppress(OSError):
+                Path(work_dir).chmod(0o700)
+            try:
+                st = Path(work_dir).stat()
+                if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
+                    result["error"] = "Update workspace ownership check failed"
+                    logger.error("apply_update: temp dir not owned by current user")
+                    return result
+            except OSError as e:
+                result["error"] = f"Could not stat update workspace: {e}"
+                return result
+
+            # Keep bat_path as str: passed to subprocess and the .bat writer.
+            bat_path = str(Path(work_dir) / "bot_exrate_updater.bat")
 
             # H-02: Validate paths — reject shell metacharacters
             _UNSAFE_CHARS = set('&|<>^%!')
@@ -426,7 +569,7 @@ def apply_update(
                     )
                     return result
 
-            with open(bat_path, "w") as f:
+            with Path(bat_path).open("w") as f:
                 f.write("@echo off\n")
                 # Wait 3s for app to exit fully
                 f.write("timeout /t 3 /nobreak > NUL\n")
@@ -441,6 +584,10 @@ def apply_update(
                 f.write(f'start "" "{current_exe}"\n')
                 # Self-delete batch file
                 f.write('del "%~f0"\n')
+
+            # SECURITY: restrict the helper script to the owner only.
+            with contextlib.suppress(OSError):
+                Path(bat_path).chmod(0o600)
 
             if sys.platform == "win32":
                 flags = 0x00000008  # DETACHED_PROCESS
@@ -466,10 +613,10 @@ def apply_update(
         else:
             # Portable exe — atomic swap
             backup_path = current_exe + ".bak"
-            if os.path.exists(backup_path):
-                os.remove(backup_path)
-            os.rename(current_exe, backup_path)
-            os.rename(new_exe_path, current_exe)
+            if Path(backup_path).exists():
+                Path(backup_path).unlink()
+            Path(current_exe).rename(backup_path)
+            Path(new_exe_path).rename(current_exe)
             result["success"] = True
             logger.info("Atomic exe swap completed")
     except PermissionError:
@@ -501,3 +648,14 @@ def restart_app() -> None:
         subprocess.Popen([sys.executable] + sys.argv)
 
     sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# BACK-COMPAT ALIASES
+# ---------------------------------------------------------------------------
+# These helpers were promoted from private (_name) to public (name) so other
+# modules (e.g. GUI panels) can import them across package boundaries. The old
+# underscore names are kept as thin module-level aliases so existing importers
+# keep working until they migrate to the public names. Remove after migration.
+_get_install_dir = get_install_dir
+_fetch_expected_checksum = fetch_expected_checksum

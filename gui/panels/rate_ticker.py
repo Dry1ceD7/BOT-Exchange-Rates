@@ -13,17 +13,16 @@ import logging
 import threading
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Dict, Optional
 
 import customtkinter as ctk
 
+from gui.panels._base_panel import SafePanel
 from gui.theme import MONO_FONT, get_theme
 
 logger = logging.getLogger(__name__)
 
 
-
-class RateTicker(ctk.CTkFrame):
+class RateTicker(SafePanel, ctk.CTkFrame):
     """
     Compact live rate display for the header bar.
 
@@ -37,14 +36,13 @@ class RateTicker(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent", **kwargs)
 
         self._cache = cache_db
-        self._destroyed = False
-        self._rates: Dict[str, Optional[Decimal]] = {
+        self._rates: dict[str, Decimal | None] = {
             "usd_buying": None,
             "usd_selling": None,
             "eur_buying": None,
             "eur_selling": None,
         }
-        self._prev_rates: Dict[str, Optional[Decimal]] = dict(self._rates)
+        self._prev_rates: dict[str, Decimal | None] = dict(self._rates)
 
         t = get_theme()
 
@@ -133,15 +131,6 @@ class RateTicker(ctk.CTkFrame):
             if self._worker.is_alive():
                 logger.warning("RateTicker worker did not exit within 3s")
 
-    def _safe_after(self, ms, fn, *args) -> None:
-        """Thread-safe self.after() — ignores RuntimeError post-destroy."""
-        if self._destroyed:
-            return
-        try:
-            self.after(ms, fn, *args)
-        except RuntimeError:
-            self._destroyed = True
-
     def _worker_loop(self) -> None:
         """Persistent background thread: fetch rates on a timer."""
         while not self._stop_event.is_set():
@@ -163,7 +152,7 @@ class RateTicker(ctk.CTkFrame):
         except (OSError, ValueError, RuntimeError) as e:
             logger.debug("Rate ticker refresh failed: %s", e)
 
-    def _read_from_cache(self) -> Optional[Dict]:
+    def _read_from_cache(self) -> dict | None:
         """Read today's (or last available) rates from CacheDB."""
         if self._cache is None:
             return None
@@ -177,7 +166,7 @@ class RateTicker(ctk.CTkFrame):
             target -= timedelta(days=1)
         return None
 
-    def _fetch_today_from_api(self) -> Optional[Dict]:
+    def _fetch_today_from_api(self) -> dict | None:
         """Lightweight API call to get today's rates."""
         try:
             import httpx
@@ -231,14 +220,14 @@ class RateTicker(ctk.CTkFrame):
             logger.debug("Ticker API fetch failed: %s", e)
             return None
 
-    def _update_display(self, rates: Dict) -> None:
+    def _update_display(self, rates: dict) -> None:
         """Update the labels with fresh rate data."""
-        # Store previous for delta coloring
-        self._prev_rates = dict(self._rates)
-
-        # Update current rates
+        # Update only the keys actually present in this fetch. Snapshot prev
+        # for each key against the value present BEFORE this key's update, so
+        # a partial dict can't reset trend arrows for untouched currencies.
         for key in self._rates:
             if key in rates and rates[key] is not None:
+                self._prev_rates[key] = self._rates[key]
                 self._rates[key] = rates[key]
 
         # Format USD
@@ -268,7 +257,7 @@ class RateTicker(ctk.CTkFrame):
             text_color=t["ticker_live"] if current_color != t["ticker_live"] else t["ticker_live_alt"]
         )
 
-    def _format_single(self, rate: Optional[Decimal], trend_key: str) -> tuple:
+    def _format_single(self, rate: Decimal | None, trend_key: str) -> tuple:
         t = get_theme()
         if rate is None:
             return "--.--", t["ticker_muted"]

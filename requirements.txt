@@ -1,14 +1,17 @@
-# BOT Exchange Rate Processor V2.6.1 — Dependencies
+# BOT Exchange Rate Processor — Dependencies
 # Install: pip install -r requirements.txt
 
 customtkinter==5.2.2
 openpyxl==3.1.5
 httpx==0.28.1
 tenacity==9.1.4
-xlrd==2.0.2
 pydantic==2.12.5
 python-dotenv==1.2.2
 tkinterdnd2-universal==1.7.3
+packaging==26.0
+keyring==25.7.0
+sentry-sdk==2.57.0
+# pystray's Windows backend depends on pywin32; keep it explicit, win32-only.
 pywin32>=306 ; sys_platform == 'win32'
 pystray>=0.19.5 ; sys_platform == 'win32'
 Pillow>=10.0.0 ; sys_platform == 'win32'

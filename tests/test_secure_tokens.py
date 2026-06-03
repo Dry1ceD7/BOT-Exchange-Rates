@@ -8,6 +8,7 @@ import pytest
 from core.secure_tokens import (
     SERVICE_NAME,
     _keyring_available,
+    _purge_env_file_token,
     delete_token,
     get_token,
     migrate_env_to_keychain,
@@ -88,6 +89,54 @@ class TestGetToken:
         assert result == "migrate_me"
         mock_kr.set_password.assert_called_once_with(
             SERVICE_NAME, "bot_token_exg", "migrate_me"
+        )
+
+    def test_auto_migration_purges_env_file(self, tmp_path, monkeypatch):
+        """SECURITY: a successful keychain migration triggers a .env purge.
+
+        get_token resolves the .env path internally via get_project_root, so
+        we assert that the purge helper is invoked for the migrated key
+        (the file-rewrite behavior itself is covered by TestPurgeEnvFileToken).
+        """
+        # Keychain is available, but has no token yet → forces the
+        # env→keychain migration path (which performs the .env purge).
+        mock_kr = _make_keyring_mock(get_password_rv=None)
+        monkeypatch.setattr(
+            "core.secure_tokens._keyring_available", lambda: True
+        )
+        monkeypatch.setenv("BOT_TOKEN_EXG", "migrate_me")
+        purge_calls = []
+        monkeypatch.setattr(
+            "core.secure_tokens._purge_env_file_token",
+            lambda key, env_path=None: purge_calls.append(key),
+        )
+        with patch.dict("sys.modules", {"keyring": mock_kr}):
+            result = get_token("BOT_TOKEN_EXG")
+        assert result == "migrate_me"
+        assert "BOT_TOKEN_EXG" in purge_calls
+
+
+# ── _purge_env_file_token ───────────────────────────────────────────────
+
+class TestPurgeEnvFileToken:
+    """Tests for the .env plaintext purge helper."""
+
+    def test_removes_only_matching_line(self, tmp_path):
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "BOT_TOKEN_EXG=secret\nBOT_TOKEN_HOL=other\nFOO=bar\n",
+            encoding="utf-8",
+        )
+        _purge_env_file_token("BOT_TOKEN_EXG", env_path=str(env_path))
+        content = env_path.read_text(encoding="utf-8")
+        assert "BOT_TOKEN_EXG" not in content
+        assert "BOT_TOKEN_HOL=other" in content
+        assert "FOO=bar" in content
+
+    def test_noop_when_missing_file(self, tmp_path):
+        # Should not raise.
+        _purge_env_file_token(
+            "BOT_TOKEN_EXG", env_path=str(tmp_path / "nope.env")
         )
 
     def test_keychain_read_failure_falls_back(self, monkeypatch):

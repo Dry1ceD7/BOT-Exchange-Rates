@@ -12,7 +12,6 @@ import asyncio
 import logging
 import random
 from datetime import date, timedelta
-from typing import List, Optional
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
@@ -28,6 +27,59 @@ from core.constants import MAX_429_RETRIES
 
 logger = logging.getLogger(__name__)
 
+
+# -------------------------------------------------------------------------
+# SECURITY: TOKEN REDACTION LOGGING FILTER
+# -------------------------------------------------------------------------
+
+class TokenRedactionFilter(logging.Filter):
+    """Redact known BOT API token values from every log record.
+
+    tenacity's before_sleep_log and traceback formatting can otherwise
+    leak tokens (e.g. in request URLs/headers) into app.log or Sentry.
+    This filter reads the current token values from os.environ and the
+    keychain and replaces any occurrence with '***' in the formatted
+    message and its args.
+    """
+
+    _REPLACEMENT = "***"
+
+    def _token_values(self) -> list:
+        import os
+        values = []
+        for env_key in ("BOT_TOKEN_EXG", "BOT_TOKEN_HOL"):
+            val = os.environ.get(env_key)
+            if val:
+                values.append(val)
+        return [v for v in values if v]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        tokens = self._token_values()
+        if not tokens:
+            return True
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        redacted = msg
+        for tok in tokens:
+            if tok and tok in redacted:
+                redacted = redacted.replace(tok, self._REPLACEMENT)
+        if redacted != msg:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+def install_token_redaction_filter() -> None:
+    """Attach the redaction filter to the root logger's handlers."""
+    root = logging.getLogger()
+    filt = TokenRedactionFilter()
+    for handler in root.handlers:
+        # Avoid attaching duplicates
+        if not any(isinstance(f, TokenRedactionFilter) for f in handler.filters):
+            handler.addFilter(filt)
+
 # -------------------------------------------------------------------------
 # PYDANTIC v2 SCHEMAS
 # -------------------------------------------------------------------------
@@ -36,13 +88,13 @@ class BOTRateDetail(BaseModel):
     """Schema for a single day's exchange rate data point."""
     period: str
     currency: str = Field(alias="currency_id")
-    buying_transfer: Optional[float] = None
-    buying_sight: Optional[float] = None
-    selling: Optional[float] = None
-    mid_rate: Optional[float] = None
+    buying_transfer: float | None = None
+    buying_sight: float | None = None
+    selling: float | None = None
+    mid_rate: float | None = None
 
 class BOTRateData(BaseModel):
-    data_detail: List[BOTRateDetail]
+    data_detail: list[BOTRateDetail]
 
 class BOTRateResult(BaseModel):
     data: BOTRateData
@@ -57,7 +109,7 @@ class BOTHolidayDetail(BaseModel):
     description: str = Field(alias="HolidayDescription")
 
 class BOTHolidayResult(BaseModel):
-    data: List[BOTHolidayDetail]
+    data: list[BOTHolidayDetail]
 
 class BOTHolidayResponse(BaseModel):
     """Master schema for the BOT Holiday API payload."""
@@ -146,7 +198,7 @@ class BOTClient:
 
     async def get_exchange_rates(
         self, start_date: date, end_date: date, currency: str,
-    ) -> List[BOTRateDetail]:
+    ) -> list[BOTRateDetail]:
         all_results = []
         current_start = start_date
 
@@ -177,13 +229,19 @@ class BOTClient:
                     validated_response = BOTRateResponse.model_validate(raw_json)
                     all_results.extend(validated_response.result.data.data_detail)
                 except ValidationError as e:
-                    raise BOTAPIError(f"Schema mismatch! {e}")
+                    # SECURITY: the ValidationError embeds the raw response
+                    # body, which may contain echoed tokens/PII. Log the full
+                    # detail only at DEBUG and raise a generic message.
+                    logger.debug("BOT API schema validation failed: %s", e)
+                    raise BOTAPIError(
+                        "BOT API returned an unexpected schema."
+                    ) from None
             current_start = current_end + timedelta(days=1)
             # Inter-chunk cooldown: 0.3-0.8s (429 handler protects against rate limiting)
             await asyncio.sleep(random.uniform(0.3, 0.8))
         return all_results
 
-    async def get_holidays(self, year: int) -> List[BOTHolidayDetail]:
+    async def get_holidays(self, year: int) -> list[BOTHolidayDetail]:
         url = f"{self.gateway}{self.hol_path}?year={year}"
         raw_json = await self._fetch_json(url, self.token_hol)
         if not raw_json or "result" not in raw_json:
@@ -192,4 +250,4 @@ class BOTClient:
             validated_response = BOTHolidayResponse.model_validate(raw_json)
             return validated_response.result.data
         except ValidationError as e:
-            raise BOTAPIError(f"Schema mismatch! {e}")
+            raise BOTAPIError(f"Schema mismatch! {e}") from e

@@ -13,8 +13,9 @@ as long as the application is running.
 import logging
 import os
 import threading
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable, List, Optional
+from pathlib import Path
 
 from core.constants import (
     POLL_INTERVAL_SECONDS as _DEFAULT_POLL_INTERVAL,
@@ -24,8 +25,6 @@ from core.constants import (
 )
 
 logger = logging.getLogger(__name__)
-
-
 
 
 class AutoScheduler:
@@ -50,12 +49,12 @@ class AutoScheduler:
     POLL_INTERVAL_SECONDS = _DEFAULT_POLL_INTERVAL
 
     def __init__(self):
-        self._timer: Optional[threading.Timer] = None
+        self._timer: threading.Timer | None = None
         self._running = False
         self._target_time: str = "23:00"
-        self._watch_paths: List[str] = []
-        self._callback: Optional[Callable] = None
-        self._last_run_date: Optional[str] = None
+        self._watch_paths: list[str] = []
+        self._callback: Callable | None = None
+        self._last_run_date: str | None = None
         self._lock = threading.Lock()
 
     @property
@@ -69,7 +68,7 @@ class AutoScheduler:
         return self._target_time
 
     @property
-    def watch_paths(self) -> List[str]:
+    def watch_paths(self) -> list[str]:
         """Return the list of watched directories."""
         return list(self._watch_paths)
 
@@ -87,8 +86,8 @@ class AutoScheduler:
     def start(
         self,
         time_str: str,
-        watch_paths: List[str],
-        callback: Callable[[List[str]], None],
+        watch_paths: list[str],
+        callback: Callable[[list[str]], None],
     ) -> None:
         """
         Start the scheduler.
@@ -123,8 +122,8 @@ class AutoScheduler:
 
     def update_config(
         self,
-        time_str: Optional[str] = None,
-        watch_paths: Optional[List[str]] = None,
+        time_str: str | None = None,
+        watch_paths: list[str] | None = None,
     ) -> None:
         """Update scheduler configuration without restart."""
         with self._lock:
@@ -139,14 +138,21 @@ class AutoScheduler:
         )
 
     def _schedule_next(self) -> None:
-        """Schedule the next poll check."""
-        if not self._running:
-            return
-        self._timer = threading.Timer(
-            self.POLL_INTERVAL_SECONDS, self._check_and_fire,
-        )
-        self._timer.daemon = True
-        self._timer.start()
+        """Schedule the next poll check.
+
+        Re-checks self._running and installs the new timer under the lock so a
+        timer-thread call cannot race stop(): if stop() already flipped
+        _running and cancelled the timer, we must not install a replacement.
+        """
+        with self._lock:
+            if not self._running:
+                return
+            timer = threading.Timer(
+                self.POLL_INTERVAL_SECONDS, self._check_and_fire,
+            )
+            timer.daemon = True
+            self._timer = timer
+            timer.start()
 
     def _check_and_fire(self) -> None:
         """Check if it's time to run, and if so, fire the callback."""
@@ -181,7 +187,7 @@ class AutoScheduler:
 
         self._schedule_next()
 
-    def _scan_watch_paths(self) -> List[str]:
+    def _scan_watch_paths(self) -> list[str]:
         """
         Scan all configured watch paths for Excel files.
         Only looks in the specified directories (NOT recursive).
@@ -190,15 +196,19 @@ class AutoScheduler:
         seen = set()
 
         for path in self._watch_paths:
-            if not os.path.isdir(path):
+            if not Path(path).is_dir():
                 logger.debug("Watch path not found: %s", path)
                 continue
 
-            for fname in sorted(os.listdir(path)):
+            # Keep os.listdir + sorted(bare names) + os.path.join here: the
+            # returned `full` strings are fed to the processing engine and the
+            # os.path.normpath-based dedup is the exact identity check. Path
+            # iterdir/sort would change ordering and the path-string form.
+            for fname in sorted(os.listdir(path)):  # noqa: PTH208
                 if fname.startswith("."):
                     continue
                 if fname.lower().endswith(SUPPORTED_EXCEL_EXTENSIONS):
-                    full = os.path.join(path, fname)
+                    full = os.path.join(path, fname)  # noqa: PTH118
                     norm = os.path.normpath(full)
                     if norm not in seen:
                         seen.add(norm)

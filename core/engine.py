@@ -11,16 +11,17 @@ Slim orchestrator. Heavy logic extracted to:
 """
 
 import asyncio
+import contextlib
 import gc
 import logging
 import os
-import re
 import shutil
 import threading
 import traceback
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from pathlib import Path
 
 import openpyxl
 
@@ -34,6 +35,7 @@ from core.constants import (
     MAX_FILE_SIZE_MB,
     MIN_DISK_SPACE_MB,
     SKIP_SHEET_NAMES,
+    parse_date,
 )
 from core.database import CacheDB
 from core.excel_io import (
@@ -41,13 +43,31 @@ from core.excel_io import (
     inject_xlookup_formulas,
     scan_sheet_headers,
     write_custom_exrate_data,
-    zero_touch_write,
 )
 from core.exrate_sheet import update_master_exrate_sheet
-from core.logic import BOTLogicEngine, safe_to_decimal
+from core.ledger_processing import (
+    prescan_target_dates,
+    run_anomaly_check,
+)
+from core.logic import (
+    BOTLogicEngine,
+    build_holiday_lookup,
+    compute_year_start_date,
+    safe_to_decimal,
+)
 from core.prescan import prescan_oldest_date
 
 logger = logging.getLogger(__name__)
+
+# Backward-compat re-export: pure functions now live in core.logic but are
+# still importable from core.engine (e.g. `from core.engine import
+# compute_year_start_date`).
+__all__ = [
+    "FileSizeLimitError",
+    "LedgerEngine",
+    "build_holiday_lookup",
+    "compute_year_start_date",
+]
 
 # -------------------------------------------------------------------------
 # EXCEPTIONS
@@ -100,8 +120,8 @@ class LedgerEngine:
         self,
         api_client: BOTClient,
         event_bus=None,
-        backup: Optional[BackupManager] = None,
-        cache: Optional[CacheDB] = None,
+        backup: BackupManager | None = None,
+        cache: CacheDB | None = None,
     ) -> None:
         """Initialize the processing engine.
 
@@ -145,75 +165,43 @@ class LedgerEngine:
         return self._last_batch_anomaly_count
 
     def _check_memory_guardrail(self, filepath: str):
-        if not os.path.exists(filepath):
+        fp = Path(filepath)
+        if not fp.exists():
             raise FileNotFoundError(f"Cannot find: {filepath}")
-        file_size = os.path.getsize(filepath)
+        file_size = fp.stat().st_size
         if file_size > self.MAX_FILE_BYTES:
             raise FileSizeLimitError(
                 f"File too large (> {self.MAX_FILE_SIZE_MB}MB)."
             )
 
-    def _parse_date(self, cell_value) -> Optional[date]:
-        if isinstance(cell_value, datetime):
-            return cell_value.date()
-        if isinstance(cell_value, date):
-            return cell_value
-        if isinstance(cell_value, str):
-            val = cell_value.strip()
-            if not val or val.lower() in ("nan", "null"):
-                return None
-            formats = [
-                "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d",
-                "%d %b %Y", "%d %B %Y", "%Y%m%d",
-            ]
-            for fmt in formats:
-                try:
-                    return datetime.strptime(val, fmt).date()
-                except ValueError:
-                    continue
-        return None
+    def _parse_date(self, cell_value) -> date | None:
+        """Parse a date from a cell value (shared parser, full superset)."""
+        return parse_date(cell_value)
 
     # ── Static delegates (kept for backward compat) ──────────────────
     @staticmethod
     def prescan_oldest_date(
-        filepaths: List[str],
+        filepaths: list[str],
         target_col_name: str = "Date",
-    ) -> Tuple[date, bool]:
+    ) -> tuple[date, bool]:
         """Delegate to core.prescan module."""
         return prescan_oldest_date(filepaths, target_col_name)
 
     @staticmethod
     def compute_year_start_date(
         target_year: int,
-        holidays: List[date],
+        holidays: list[date],
     ) -> date:
-        """
-        Computes the last valid trading day of the PREVIOUS calendar year.
-        Dec 31 is always office day-off. Start from Dec 30 and roll back.
-        """
-        holidays_set = set(holidays)
-        prev_year = target_year - 1
-        check_date = date(prev_year, 12, 30)
-        for _ in range(10):
-            if check_date.weekday() < 5 and check_date not in holidays_set:
-                return check_date
-            check_date -= timedelta(days=1)
-        return date(prev_year, 12, 20)
+        """Backward-compat delegate to core.logic.compute_year_start_date."""
+        return compute_year_start_date(target_year, holidays)
 
-
-
-    # ── Zero-Touch Write (delegates to excel_io) ──────────────────
-    @staticmethod
-    def _zero_touch_write(ws, row: int, col: int, value) -> None:
-        """Write a value without touching formatting. Delegates to excel_io."""
-        zero_touch_write(ws, row, col, value)
 
     # ================================================================== #
     #  CACHE-FIRST DATA LOADING (v2.6.1)
     # ================================================================== #
     async def _preload_api_data(
-        self, dates: Set[date], start_date: str
-    ) -> Tuple:
+        self, dates: set[date], start_date: str
+    ) -> tuple:
         """
         Cache-First Architecture: SQLite → API fallback → cache store.
         Returns (logic_engine, usd_selling, eur_selling,
@@ -235,7 +223,7 @@ class LedgerEngine:
         for year in years:
             if self.cache.has_holidays_for_year(year):
                 cached_hols = self.cache.get_holidays(year)
-                for h_date, h_name in cached_hols:
+                for h_date, _h_name in cached_hols:
                     try:
                         holidays_list.append(
                             datetime.strptime(h_date, "%Y-%m-%d").date()
@@ -263,10 +251,10 @@ class LedgerEngine:
 
         # ── RATES: Cache-first (4 columns) ───────────────────────────
         cached_rates = self.cache.get_rates_bulk(min_date, max_date)
-        usd_buying: Dict[date, Decimal] = {}
-        usd_selling: Dict[date, Decimal] = {}
-        eur_buying: Dict[date, Decimal] = {}
-        eur_selling: Dict[date, Decimal] = {}
+        usd_buying: dict[date, Decimal] = {}
+        usd_selling: dict[date, Decimal] = {}
+        eur_buying: dict[date, Decimal] = {}
+        eur_selling: dict[date, Decimal] = {}
 
         for d, rate_dict in cached_rates.items():
             if rate_dict["usd_buying"] is not None:
@@ -292,11 +280,9 @@ class LedgerEngine:
             fetch_start = min(missing_dates)
             fetch_end = max(missing_dates)
             self._emit(
-                "Cache miss: %d dates (%s to %s). Calling API" % (
-                    len(missing_dates),
-                    fetch_start.strftime("%Y-%m-%d"),
-                    fetch_end.strftime("%Y-%m-%d"),
-                ),
+                f"Cache miss: {len(missing_dates)} dates "
+                f"({fetch_start.strftime('%Y-%m-%d')} to "
+                f"{fetch_end.strftime('%Y-%m-%d')}). Calling API",
             )
             logger.info(
                 "Cache miss: %d dates missing (%s → %s). Fetching from API...",
@@ -337,9 +323,8 @@ class LedgerEngine:
             ]
             self.cache.insert_rates_bulk(bulk)
             self._emit(
-                "API fetch done: %d USD + %d EUR records cached" % (
-                    len(usd_data), len(eur_data),
-                ),
+                f"API fetch done: {len(usd_data)} USD + "
+                f"{len(eur_data)} EUR records cached",
                 etype="success",
             )
             logger.info(
@@ -357,36 +342,21 @@ class LedgerEngine:
 
     def _run_anomaly_check(
         self,
-        usd_buying: Dict[date, Decimal],
-        usd_selling: Dict[date, Decimal],
-        eur_buying: Dict[date, Decimal],
-        eur_selling: Dict[date, Decimal],
+        usd_buying: dict[date, Decimal],
+        usd_selling: dict[date, Decimal],
+        eur_buying: dict[date, Decimal],
+        eur_selling: dict[date, Decimal],
     ) -> int:
+        """Delegate to core.ledger_processing.run_anomaly_check (v3.1.0).
+
+        Injects this engine's anomaly guard and emit callback; returns the
+        number of anomalies found.
         """
-        v3.1.0: Run anomaly detection across all loaded rates.
-        Returns the number of anomalies found.
-        """
-        rates_bundle = {
-            "USD_buying_transfer": usd_buying,
-            "USD_selling": usd_selling,
-            "EUR_buying_transfer": eur_buying,
-            "EUR_selling": eur_selling,
-        }
-        anomalies = self._anomaly_guard.check_rates_bulk(rates_bundle)
-        for a in anomalies:
-            self._emit(
-                f"⚠ ANOMALY: {a.currency} {a.rate_type} on "
-                f"{a.check_date.strftime('%d %b %Y')}: "
-                f"{a.pct_change:.2f}% change "
-                f"({a.prev_value} → {a.new_value})",
-                etype="warning",
-            )
-        if anomalies:
-            logger.warning(
-                "Anomaly guard: %d suspicious rate(s) detected",
-                len(anomalies),
-            )
-        return len(anomalies)
+        return run_anomaly_check(
+            self._anomaly_guard,
+            lambda msg, etype="log": self._emit(msg, etype),
+            usd_buying, usd_selling, eur_buying, eur_selling,
+        )
 
     # ================================================================== #
     #  PRIVATE HELPERS — Extracted from process_ledger for readability
@@ -394,7 +364,7 @@ class LedgerEngine:
 
     async def _detect_standalone_exrate(
         self, filepath: str,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Detect if the file is a standalone ExRate workbook (no month tabs).
 
         Returns the result of update_exrate_standalone() if standalone,
@@ -438,122 +408,39 @@ class LedgerEngine:
         # Reject unsupported formats
         if not filepath.lower().endswith((".xlsx", ".xlsm")):
             raise ValueError(
-                f"Unsupported format: {os.path.basename(filepath)}. "
+                f"Unsupported format: {Path(filepath).name}. "
                 "Only .xlsx and .xlsm files are supported."
             )
 
         return None  # Not standalone — proceed with normal processing
 
-    def _prescan_target_dates(self, filepath: str) -> Set[date]:
-        """Scan the workbook in read-only mode to extract all target dates.
+    def _prescan_target_dates(self, filepath: str) -> set[date]:
+        """Delegate to core.ledger_processing.prescan_target_dates.
 
-        Opens the workbook in read-only mode, scans all non-skipped sheets
-        for the source date column, and returns a set of all parsed dates.
-        The workbook is properly closed and garbage-collected after scanning.
+        Injects this engine's column map, parser, and emit callback so the
+        read-only date scan keeps identical behavior.
         """
-        self._emit("Scanning dates from workbook")
-        all_target_dates: Set[date] = set()
-
-        wb_scan = None
-        try:
-            wb_scan = openpyxl.load_workbook(
-                filepath, read_only=True, data_only=True,
-            )
-            for sheet_name in wb_scan.sheetnames:
-                if sheet_name in SKIP_SHEET_NAMES:
-                    continue
-                ws = wb_scan[sheet_name]
-                header_row_idx = None
-                col_indices: Dict[str, int] = {}
-                for row_idx, row in enumerate(
-                    ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
-                ):
-                    row_strs = [
-                        str(c).strip() if c is not None else "" for c in row
-                    ]
-                    if self.target_cols["source_date"] in row_strs:
-                        header_row_idx = row_idx
-                        for ci, val in enumerate(row_strs):
-                            if val == self.target_cols["source_date"]:
-                                col_indices["source"] = ci
-                        break
-
-                if header_row_idx is None or "source" not in col_indices:
-                    continue
-
-                src_idx = col_indices["source"] + 1
-                for row_idx in range(header_row_idx + 1, (ws.max_row or 0) + 1):
-                    parsed_date = self._parse_date(
-                        ws.cell(row=row_idx, column=src_idx).value
-                    )
-                    if parsed_date:
-                        all_target_dates.add(parsed_date)
-        except (ValueError, TypeError, KeyError,
-                openpyxl.utils.exceptions.InvalidFileException):
-            raise
-        finally:
-            if wb_scan is not None:
-                try:
-                    wb_scan.close()
-                except OSError:
-                    pass
-                del wb_scan
-                wb_scan = None
-            gc.collect()
-
-        return all_target_dates
+        return prescan_target_dates(
+            filepath,
+            self.target_cols,
+            parse_date_fn=self._parse_date,
+            emit_fn=self._emit,
+        )
 
     def _build_holiday_lookup(
         self,
-        all_target_dates: Set[date],
+        all_target_dates: set[date],
         computed_start: date,
         logic_engine,
-    ) -> Tuple[Set[date], Dict[date, str]]:
-        """Build holiday sets and name mappings from cached holiday data.
+    ) -> tuple[set[date], dict[date, str]]:
+        """Backward-compat delegate to core.logic.build_holiday_lookup.
 
-        Parses substitution holiday names (e.g., "Substitution for
-        Songkran Day (15th April 2025)") to map the original holiday
-        date as well.
-
-        Returns:
-            Tuple of (master_holidays_set, holidays_names dict).
+        Injects this engine's cache so existing instance callers keep
+        working unchanged.
         """
-        # Expected BOT format: "Substitution for Songkran Day (15th April 2025)"
-        sub_pattern = re.compile(r"^Substitution for ([^(]+)\s*\((.*?)\)$")
-        holidays_names: Dict[date, str] = {}
-        master_holidays_set = set(logic_engine.holidays)
-
-        for year in {
-            d.year
-            for d in (all_target_dates | {computed_start, date.today()})
-        }:
-            cached_hols = self.cache.get_holidays(year)
-            for h_str, h_name in cached_hols:
-                try:
-                    h_obj = datetime.strptime(h_str, "%Y-%m-%d").date()
-                    holidays_names[h_obj] = h_name
-                    m = sub_pattern.search(h_name)
-                    if m:
-                        real_name = m.group(1).strip()
-                        date_str = m.group(2).strip()
-                        date_str_clean = re.sub(
-                            r'(\d+)(st|nd|rd|th)', r'\1', date_str
-                        )
-                        date_str_clean = re.sub(
-                            r'^[A-Za-z]+\s+', '', date_str_clean
-                        )
-                        try:
-                            real_dt = datetime.strptime(
-                                date_str_clean, '%d %B %Y'
-                            ).date()
-                            holidays_names[real_dt] = real_name
-                            master_holidays_set.add(real_dt)
-                        except (ValueError, TypeError):
-                            pass
-                except (ValueError, TypeError):
-                    pass
-
-        return master_holidays_set, holidays_names
+        return build_holiday_lookup(
+            self.cache, all_target_dates, computed_start, logic_engine,
+        )
 
     # ================================================================== #
     #  PROCESS SINGLE LEDGER
@@ -561,12 +448,15 @@ class LedgerEngine:
     async def process_ledger(
         self,
         filepath: str,
-        start_date: Optional[str] = None,
+        start_date: str | None = None,
         dry_run: bool = False,
     ) -> str:
         """Process a single ledger file end-to-end."""
 
-        filepath = os.path.abspath(filepath)
+        # noqa: PTH100 — os.path.abspath normalizes WITHOUT resolving symlinks;
+        # Path.resolve() would resolve symlinks and could change the in-place
+        # save target string. Keep exact legacy behavior.
+        filepath = os.path.abspath(filepath)  # noqa: PTH100
         self._last_anomaly_count = 0
 
         self._check_memory_guardrail(filepath)
@@ -611,13 +501,13 @@ class LedgerEngine:
                 etype="warning",
             )
 
-        computed_start = self.compute_year_start_date(
+        computed_start = compute_year_start_date(
             target_year, logic_engine.holidays
         )
 
         # ── Build holiday names lookup ───────────────────────────────
-        master_holidays_set, holidays_names = self._build_holiday_lookup(
-            all_target_dates, computed_start, logic_engine
+        master_holidays_set, holidays_names = build_holiday_lookup(
+            self.cache, all_target_dates, computed_start, logic_engine
         )
         # ══════════════════════════════════════════════════════════════
         #  openpyxl ENGINE
@@ -668,11 +558,11 @@ class LedgerEngine:
             if dry_run:
                 self._emit(
                     "[SIM] File NOT saved (dry run) "
-                    f"— {os.path.basename(filepath)}"
+                    f"— {Path(filepath).name}"
                 )
             else:
                 # ERR-03: Check disk space before saving
-                drive_stat = shutil.disk_usage(os.path.dirname(filepath))
+                drive_stat = shutil.disk_usage(Path(filepath).parent)
                 free_mb = drive_stat.free // (1024 * 1024)
                 if free_mb < MIN_DISK_SPACE_MB:
                     raise OSError(
@@ -682,7 +572,7 @@ class LedgerEngine:
                 wb.save(filepath)
                 logger.info(
                     "Overwritten in-place: %s",
-                    os.path.basename(filepath),
+                    Path(filepath).name,
                 )
             wb.close()
             del wb  # release file handle immediately
@@ -707,23 +597,21 @@ class LedgerEngine:
     # ================================================================== #
     async def process_batch(
         self,
-        filepaths: List[str],
-        start_date: Optional[str] = None,
-        progress_cb: Optional[
-            Callable[[int, int, str, Optional[str]], None]
-        ] = None,
+        filepaths: list[str],
+        start_date: str | None = None,
+        progress_cb: Callable[[int, int, str, str | None], None] | None = None,
         dry_run: bool = False,
-    ) -> Tuple[int, int, List[str]]:
+    ) -> tuple[int, int, list[str]]:
         """Batch processing with pre-edit backup, cache, and auto-cleanup."""
         if not dry_run:
             self.backup.cleanup_old_backups(max_age_days=BACKUP_MAX_AGE_DAYS)
         total = len(filepaths)
         success = 0
         anomaly_total = 0
-        errors: List[str] = []
+        errors: list[str] = []
 
         for idx, fp in enumerate(filepaths):
-            fname = os.path.basename(fp)
+            fname = Path(fp).name
             try:
                 await self.process_ledger(
                     fp, start_date=start_date, dry_run=dry_run,
@@ -772,10 +660,10 @@ class LedgerEngine:
     async def update_exrate_standalone(
         self,
         filepath: str,
-        progress_cb: Optional[Callable[[str], None]] = None,
-        currencies: Optional[List[str]] = None,
-        rate_types: Optional[Dict[str, str]] = None,
-        date_range: Optional[Tuple[date, date]] = None,
+        progress_cb: Callable[[str], None] | None = None,
+        currencies: list[str] | None = None,
+        rate_types: dict[str, str] | None = None,
+        date_range: tuple[date, date] | None = None,
     ) -> str:
         """
         Update a standalone ExRate .xlsx file with fresh exchange rates.
@@ -816,144 +704,195 @@ class LedgerEngine:
                 progress_cb(msg)
             self._emit(msg)
 
+        # ── Fail-safe preconditions (mirror process_ledger) ───────────
+        # Every in-place overwrite path must enforce the size guardrail and
+        # create a pre-edit backup BEFORE load_workbook. If the file does not
+        # yet exist this is a creation path — skip backup, but the loaded
+        # save below would fail anyway, so a missing file is still an error.
+        # noqa: PTH100 — keep os.path.abspath (no symlink resolution) so the
+        # in-place save target string stays identical to the legacy behavior.
+        filepath = os.path.abspath(filepath)  # noqa: PTH100
+        self._check_memory_guardrail(filepath)
+        _status("Size check passed")
+        if Path(filepath).exists():
+            self.backup.create_backup(filepath)
+            _status("Backup created")
+
         _status("Opening ExRate file...")
         wb = openpyxl.load_workbook(filepath)
 
         if "ExRate" not in wb.sheetnames:
             wb.close()
+            del wb
+            gc.collect()
             raise ValueError("No ExRate sheet found in the selected file.")
 
         # ── Standard path (backward compatible) ───────────────────────
         if is_standard:
             from core.exrate_sheet import update_master_exrate_sheet
 
-            ws_ex = wb["ExRate"]
-            existing_dates = set()
-            for row_idx in range(2, (ws_ex.max_row or 1) + 1):
-                cell_val = ws_ex.cell(row=row_idx, column=1).value
-                parsed = self._parse_date(cell_val)
-                if parsed:
-                    existing_dates.add(parsed)
+            # try/finally guarantees the OS file handle is released and gc
+            # runs even if API fetch / write / save raises (mirrors
+            # process_ledger). Otherwise an exception would leak the handle.
+            try:
+                ws_ex = wb["ExRate"]
+                existing_dates = set()
+                for row_idx in range(2, (ws_ex.max_row or 1) + 1):
+                    cell_val = ws_ex.cell(row=row_idx, column=1).value
+                    parsed = self._parse_date(cell_val)
+                    if parsed:
+                        existing_dates.add(parsed)
 
-            if existing_dates:
-                target_year = min(existing_dates).year
-            else:
-                target_year = date.today().year
+                target_year = min(existing_dates).year if existing_dates else date.today().year
 
-            # Override with manual date_range if provided
-            if date_range:
-                dr_start, dr_end = date_range
-                target_year = dr_start.year
-                all_target_dates = {dr_start, dr_end, date.today()}
-                start_date_str = f"{dr_start.year - 1}-12-20"
-            else:
-                start_date_str = f"{target_year - 1}-12-20"
-                all_target_dates = existing_dates | {date.today()}
+                # Override with manual date_range if provided
+                if date_range:
+                    dr_start, dr_end = date_range
+                    target_year = dr_start.year
+                    all_target_dates = {dr_start, dr_end, date.today()}
+                    start_date_str = f"{dr_start.year - 1}-12-20"
+                else:
+                    start_date_str = f"{target_year - 1}-12-20"
+                    all_target_dates = existing_dates | {date.today()}
 
-            _status("Fetching exchange rates from BOT API...")
-            (
-                logic_engine, usd_selling, eur_selling,
-                usd_buying, eur_buying, _usd_data, _eur_data,
-            ) = await self._preload_api_data(all_target_dates, start_date_str)
+                _status("Fetching exchange rates from BOT API...")
+                (
+                    logic_engine, usd_selling, eur_selling,
+                    usd_buying, eur_buying, _usd_data, _eur_data,
+                ) = await self._preload_api_data(
+                    all_target_dates, start_date_str
+                )
 
-            computed_start = self.compute_year_start_date(
-                target_year, logic_engine.holidays
-            )
+                computed_start = compute_year_start_date(
+                    target_year, logic_engine.holidays
+                )
 
-            master_holidays_set, holidays_names = self._build_holiday_lookup(
-                all_target_dates, computed_start, logic_engine
-            )
+                master_holidays_set, holidays_names = build_holiday_lookup(
+                    self.cache, all_target_dates, computed_start, logic_engine,
+                )
 
-            _status("Writing exchange rate data...")
-            update_master_exrate_sheet(
-                wb, usd_buying, usd_selling, eur_buying, eur_selling,
-                sorted(master_holidays_set), holidays_names, computed_start,
-            )
-            wb.save(filepath)
-            wb.close()
-            _status(f"✓ ExRate updated: {os.path.basename(filepath)}")
-            return filepath
+                _status("Writing exchange rate data...")
+                update_master_exrate_sheet(
+                    wb, usd_buying, usd_selling, eur_buying, eur_selling,
+                    sorted(master_holidays_set), holidays_names,
+                    computed_start,
+                )
+                # ERR-03: Check disk space before saving
+                drive_stat = shutil.disk_usage(Path(filepath).parent)
+                free_mb = drive_stat.free // (1024 * 1024)
+                if free_mb < MIN_DISK_SPACE_MB:
+                    raise OSError(
+                        f"Insufficient disk space ({free_mb}MB free, "
+                        f"need {MIN_DISK_SPACE_MB}MB). File NOT saved."
+                    )
+                wb.save(filepath)
+                _status(f"✓ ExRate updated: {Path(filepath).name}")
+                return filepath
+            finally:
+                try:
+                    wb.close()
+                except OSError:
+                    logger.debug("Failed to close workbook (standard path)")
+                del wb
+                gc.collect()
 
         # ── Custom path (any currencies / rate types) ─────────────────
-        _status(f"Fetching rates for {', '.join(currencies)}...")
+        # try/finally guarantees handle release + gc on any error below.
+        try:
+            _status(f"Fetching rates for {', '.join(currencies)}...")
 
-        # Fetch from API for each currency
-        if date_range:
-            start_dt, end_dt = date_range
-        else:
-            target_year = date.today().year
-            start_dt = date(target_year - 1, 12, 20)
-            end_dt = date.today()
+            # Fetch from API for each currency
+            if date_range:
+                start_dt, end_dt = date_range
+            else:
+                target_year = date.today().year
+                start_dt = date(target_year - 1, 12, 20)
+                end_dt = date.today()
 
-        # rate_data[currency][api_field][date] = value
-        rate_data: Dict[str, Dict[str, Dict[date, float]]] = {}
+            # rate_data[currency][api_field][date] = value
+            rate_data: dict[str, dict[str, dict[date, float]]] = {}
 
-        for ccy in currencies:
-            _status(f"Fetching {ccy} rates...")
-            raw_results = await self.api.get_exchange_rates(
-                start_dt, end_dt, ccy,
-            )
-            rate_data[ccy] = {}
-            for label, api_field in rate_types.items():
-                rate_data[ccy][api_field] = {}
+            for ccy in currencies:
+                _status(f"Fetching {ccy} rates...")
+                raw_results = await self.api.get_exchange_rates(
+                    start_dt, end_dt, ccy,
+                )
+                rate_data[ccy] = {}
+                for _label, api_field in rate_types.items():
+                    rate_data[ccy][api_field] = {}
 
-            for rec in raw_results:
-                try:
-                    rec_date = datetime.strptime(
-                        rec.period, "%Y-%m-%d"
-                    ).date()
-                except (ValueError, TypeError):
-                    continue
+                for rec in raw_results:
+                    try:
+                        rec_date = datetime.strptime(
+                            rec.period, "%Y-%m-%d"
+                        ).date()
+                    except (ValueError, TypeError):
+                        continue
+                    for _label, api_field in rate_types.items():
+                        val = getattr(rec, api_field, None)
+                        if val is not None:
+                            # Mathematical Truth: quantize to 4dp Decimal, same
+                            # discipline as the standard USD/EUR path — never
+                            # write the raw API float.
+                            rate_data[ccy][api_field][rec_date] = safe_to_decimal(val)
+
+            # Fetch holidays
+            _status("Fetching holidays...")
+            all_target_dates = {date.today()}
+            (
+                logic_engine, _, _, _, _, _, _,
+            ) = await self._preload_api_data(all_target_dates, str(start_dt))
+
+            holidays_set = set(logic_engine.holidays)
+            holidays_names_map: dict[date, str] = {}
+            for year in {start_dt.year, end_dt.year}:
+                for h_str, h_name in self.cache.get_holidays(year):
+                    with contextlib.suppress(ValueError, TypeError):
+                        holidays_names_map[
+                            datetime.strptime(h_str, "%Y-%m-%d").date()
+                        ] = h_name
+
+            # Build column headers: Date + (CCY RateType)... + Holidays
+            headers = ["Date"]
+            col_specs = []  # (currency, api_field) per data column
+            for ccy in currencies:
                 for label, api_field in rate_types.items():
-                    val = getattr(rec, api_field, None)
-                    if val is not None:
-                        rate_data[ccy][api_field][rec_date] = val
+                    headers.append(f"{ccy} {label}")
+                    col_specs.append((ccy, api_field))
+            headers.append("Holidays/Weekend")
 
-        # Fetch holidays
-        _status("Fetching holidays...")
-        all_target_dates = {date.today()}
-        (
-            logic_engine, _, _, _, _, _, _,
-        ) = await self._preload_api_data(all_target_dates, str(start_dt))
+            # Build date range
+            all_dates = []
+            d = start_dt
+            while d <= end_dt:
+                all_dates.append(d)
+                d += timedelta(days=1)
+            all_dates.sort()
 
-        holidays_set = set(logic_engine.holidays)
-        holidays_names_map: Dict[date, str] = {}
-        for year in {start_dt.year, end_dt.year}:
-            for h_str, h_name in self.cache.get_holidays(year):
-                try:
-                    holidays_names_map[
-                        datetime.strptime(h_str, "%Y-%m-%d").date()
-                    ] = h_name
-                except (ValueError, TypeError):
-                    pass
+            # ── Write to sheet ────────────────────────────────────────
+            ws = wb["ExRate"]
+            _status("Writing custom ExRate data...")
 
-        # Build column headers: Date + (CCY RateType)... + Holidays
-        headers = ["Date"]
-        col_specs = []  # (currency, api_field) per data column
-        for ccy in currencies:
-            for label, api_field in rate_types.items():
-                headers.append(f"{ccy} {label}")
-                col_specs.append((ccy, api_field))
-        headers.append("Holidays/Weekend")
+            write_custom_exrate_data(
+                ws, rate_data, col_specs, headers,
+                all_dates, holidays_set, holidays_names_map,
+            )
 
-        # Build date range
-        all_dates = []
-        d = start_dt
-        while d <= end_dt:
-            all_dates.append(d)
-            d += timedelta(days=1)
-        all_dates.sort()
-
-        # ── Write to sheet ────────────────────────────────────────────
-        ws = wb["ExRate"]
-        _status("Writing custom ExRate data...")
-
-        write_custom_exrate_data(
-            ws, rate_data, col_specs, headers,
-            all_dates, holidays_set, holidays_names_map,
-        )
-
-        wb.save(filepath)
-        wb.close()
-        _status(f"✓ ExRate created: {os.path.basename(filepath)}")
-        return filepath
+            # ERR-03: Check disk space before saving
+            drive_stat = shutil.disk_usage(Path(filepath).parent)
+            free_mb = drive_stat.free // (1024 * 1024)
+            if free_mb < MIN_DISK_SPACE_MB:
+                raise OSError(
+                    f"Insufficient disk space ({free_mb}MB free, "
+                    f"need {MIN_DISK_SPACE_MB}MB). File NOT saved."
+                )
+            wb.save(filepath)
+            _status(f"✓ ExRate created: {Path(filepath).name}")
+            return filepath
+        finally:
+            try:
+                wb.close()
+            except OSError:
+                logger.debug("Failed to close workbook (custom path)")
+            del wb
+            gc.collect()

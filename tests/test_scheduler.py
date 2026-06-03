@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for core/scheduler.py — Auto-Scheduler."""
 
+import contextlib
 import os
 import time
 from unittest.mock import MagicMock
@@ -92,10 +93,9 @@ class TestAutoScheduler:
         scheduler._target_time = _time.strftime("%H:%M")
 
         # Call the check directly (without scheduling next)
-        try:
+        # Timer scheduling may fail in test context
+        with contextlib.suppress(Exception):
             scheduler._check_and_fire()
-        except Exception:
-            pass  # Timer scheduling may fail in test context
 
         # Callback should have been called with the discovered file
         callback.assert_called_once()
@@ -117,3 +117,32 @@ class TestAutoScheduler:
         scheduler._check_and_fire()
         callback.assert_not_called()
         scheduler.stop()
+
+    def test_schedule_next_noop_after_stop(self):
+        """Fix #6: a timer-thread call to _schedule_next after stop() must
+        NOT install a new timer that survives stop().
+        """
+        scheduler = AutoScheduler()
+        scheduler.start(
+            time_str="23:00",
+            watch_paths=[],
+            callback=lambda f: None,
+        )
+        scheduler.stop()
+        assert not scheduler.is_running
+
+        # Simulate the timer thread racing in after stop().
+        scheduler._schedule_next()
+        assert scheduler._timer is None
+
+    def test_stop_cancels_timer(self):
+        """After start, a live timer exists; stop() cancels and clears it."""
+        scheduler = AutoScheduler()
+        scheduler.start(
+            time_str="23:00",
+            watch_paths=[],
+            callback=lambda f: None,
+        )
+        assert scheduler._timer is not None
+        scheduler.stop()
+        assert scheduler._timer is None
