@@ -141,6 +141,31 @@ class TestAnomalyGuardBulk:
         anomalies = guard.check_rates_bulk(rates)
         assert len(anomalies) == 0
 
+    def test_bulk_skips_comparison_across_large_day_gap(self):
+        """A jump across a >4-day gap must NOT be flagged (false anomaly)."""
+        guard = AnomalyGuard(threshold_pct=5.0)
+        rates = {
+            "USD_buying_transfer": {
+                date(2025, 1, 2): Decimal("34.00"),
+                # 8-day gap (e.g. extended holiday closure), ~18% jump.
+                date(2025, 1, 10): Decimal("40.00"),
+            },
+        }
+        anomalies = guard.check_rates_bulk(rates)
+        assert len(anomalies) == 0
+
+    def test_bulk_flags_jump_within_day_gap(self):
+        """Same-size jump within a <=4-day gap is still flagged."""
+        guard = AnomalyGuard(threshold_pct=5.0)
+        rates = {
+            "USD_buying_transfer": {
+                date(2025, 1, 2): Decimal("34.00"),
+                date(2025, 1, 6): Decimal("40.00"),  # 4-day gap, ~18%
+            },
+        }
+        anomalies = guard.check_rates_bulk(rates)
+        assert len(anomalies) == 1
+
     def test_bulk_skips_none_values(self):
         """None values in the series are skipped — prev stays unchanged."""
         guard = AnomalyGuard(threshold_pct=5.0)

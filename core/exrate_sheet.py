@@ -8,12 +8,14 @@ Separated from engine.py for SFFB compliance (<200 lines).
 Builds and updates the unified "ExRate" master tab in Excel workbooks.
 """
 
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional
 
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+from core.constants import parse_date as _shared_parse_date
 
 
 def update_master_exrate_sheet(
@@ -123,18 +125,8 @@ def _read_existing_data(ws, data_start_row: int) -> Dict[date, dict]:
 
 
 def _parse_cell_date(cell_val) -> Optional[date]:
-    """Parse a date from a cell value."""
-    if isinstance(cell_val, datetime):
-        return cell_val.date()
-    if isinstance(cell_val, date):
-        return cell_val
-    if isinstance(cell_val, str):
-        for fmt in ("%Y-%m-%d", "%d %b %Y"):
-            try:
-                return datetime.strptime(cell_val.strip(), fmt).date()
-            except ValueError:
-                continue
-    return None
+    """Parse a date from a cell value (shared parser, full format superset)."""
+    return _shared_parse_date(cell_val)
 
 
 def _build_date_range(
@@ -162,10 +154,13 @@ def _merge_rate_data(
         is_weekend = d.weekday() >= 5
         is_holiday = d in holidays_set
 
-        ub = float(usd_buying_rates[d]) if d in usd_buying_rates and usd_buying_rates[d] is not None else None
-        us = float(usd_selling_rates[d]) if d in usd_selling_rates and usd_selling_rates[d] is not None else None
-        eb = float(eur_buying_rates[d]) if d in eur_buying_rates and eur_buying_rates[d] is not None else None
-        es = float(eur_selling_rates[d]) if d in eur_selling_rates and eur_selling_rates[d] is not None else None
+        # Keep rate values as Decimal end-to-end — NEVER cast to float.
+        # float() corrupts 4dp precision (34.5650 -> 34.564999...).
+        # openpyxl writes Decimal cells natively.
+        ub = usd_buying_rates.get(d)
+        us = usd_selling_rates.get(d)
+        eb = eur_buying_rates.get(d)
+        es = eur_selling_rates.get(d)
 
         holiday_label = ""
         if is_weekend and is_holiday:

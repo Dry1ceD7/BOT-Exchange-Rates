@@ -7,53 +7,65 @@ Thread-safe Producer-Consumer event queue for GUI ↔ Worker communication.
 Workers push structured events; the CTk main loop drains and renders them.
 """
 
+import logging
 import threading
+import time
+from collections import deque
 from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
 
 
 class EventBus:
-    """Thread-safe event bus using a simple list + lock.
+    """Thread-safe event bus backed by a bounded deque.
 
     Args:
-        maxlen: Maximum number of queued events. When exceeded, oldest
-                events are silently dropped to prevent unbounded memory
-                growth from a stuck or slow consumer.
+        maxlen: Maximum number of queued events. When exceeded, the oldest
+                events are dropped in O(1) (deque drop-oldest) to prevent
+                unbounded memory growth from a stuck or slow consumer.
     """
 
     MAX_QUEUE_WARNING = 500  # log warning at this threshold
+    OVERFLOW_WARN_INTERVAL = 30.0  # seconds between overflow warnings
 
     def __init__(self, maxlen: int = 2000):
         self._lock = threading.Lock()
-        self._queue: List[Dict[str, Any]] = []
         self._maxlen = maxlen
-        self._overflow_warned = False
+        self._queue: deque = deque(maxlen=maxlen)
+        self._dropped_since_warn = 0
+        self._last_warn_ts = 0.0
 
     def push(self, event: Dict[str, Any]) -> None:
         """Push an event from any thread."""
         with self._lock:
+            was_full = len(self._queue) >= self._maxlen
+            # deque(maxlen) drops the oldest item automatically when full.
             self._queue.append(event)
-            qlen = len(self._queue)
-            if qlen > self._maxlen:
-                # Drop oldest events to stay within bounds
-                excess = qlen - self._maxlen
-                self._queue = self._queue[excess:]
-                if not self._overflow_warned:
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "EventBus overflow: dropped %d oldest events (maxlen=%d)",
-                        excess, self._maxlen,
-                    )
-                    self._overflow_warned = True
-            elif qlen >= self.MAX_QUEUE_WARNING and not self._overflow_warned:
-                import logging
-                logging.getLogger(__name__).warning(
-                    "EventBus queue growing large: %d events pending", qlen,
-                )
 
+            if was_full:
+                self._dropped_since_warn += 1
+                now = time.monotonic()
+                # Throttle (don't latch): warn at most once per interval.
+                if now - self._last_warn_ts >= self.OVERFLOW_WARN_INTERVAL:
+                    logger.warning(
+                        "EventBus overflow: dropped %d oldest events "
+                        "since last warning (maxlen=%d)",
+                        self._dropped_since_warn, self._maxlen,
+                    )
+                    self._dropped_since_warn = 0
+                    self._last_warn_ts = now
+            elif len(self._queue) >= self.MAX_QUEUE_WARNING:
+                now = time.monotonic()
+                if now - self._last_warn_ts >= self.OVERFLOW_WARN_INTERVAL:
+                    logger.warning(
+                        "EventBus queue growing large: %d events pending",
+                        len(self._queue),
+                    )
+                    self._last_warn_ts = now
 
     def drain(self) -> List[Dict[str, Any]]:
         """Drain all pending events. Returns a list (may be empty)."""
         with self._lock:
-            events = self._queue[:]
+            events = list(self._queue)
             self._queue.clear()
         return events

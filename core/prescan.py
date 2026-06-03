@@ -11,17 +11,18 @@ source column. Uses openpyxl for all modern Excel formats.
 
 import logging
 import os
-from datetime import date, datetime
+from datetime import date
 from typing import List, Optional, Tuple
 
 import openpyxl
 
+from core.constants import DATE_FORMATS
+from core.constants import parse_date as _shared_parse_date
+
 logger = logging.getLogger(__name__)
 
-DATE_FORMATS = [
-    "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y",
-    "%d %b %Y", "%d %B %Y", "%Y%m%d",
-]
+# Re-export for backward compatibility; canonical source is core.constants.
+DATE_FORMATS = list(DATE_FORMATS)
 
 
 def prescan_oldest_date(
@@ -111,17 +112,9 @@ def _scan_xlsx(filepath: str, target_col_name: str) -> Optional[date]:
 
 
 def _parse_scan_date(cell_val, formats: List[str]) -> Optional[date]:
-    """Parse a date from a cell value using multiple format strings."""
-    if isinstance(cell_val, datetime):
-        return cell_val.date()
-    if isinstance(cell_val, date):
-        return cell_val
-    if isinstance(cell_val, str):
-        val = cell_val.strip()
-        if val and val.lower() not in ("nan", "null"):
-            for fmt in formats:
-                try:
-                    return datetime.strptime(val, fmt).date()
-                except ValueError:
-                    continue
-    return None
+    """Parse a date from a cell value (shared parser).
+
+    The ``formats`` arg is retained for backward-compatible call sites; the
+    canonical format list lives in core.constants.DATE_FORMATS.
+    """
+    return _shared_parse_date(cell_val)

@@ -15,6 +15,8 @@ from datetime import date
 from decimal import Decimal
 from typing import Dict, List, Optional
 
+from core.constants import ANOMALY_MAX_DAY_GAP
+
 logger = logging.getLogger(__name__)
 
 
@@ -128,6 +130,15 @@ class AnomalyGuard:
         """
         Check all rates in a bulk dictionary for anomalies.
 
+        Behavior: for each "{currency}_{rate_type}" series the dates are
+        sorted ascending and each value is compared to the most recent
+        *previous non-None* value. The comparison is SKIPPED when the
+        calendar-day gap between the two observations exceeds
+        ``ANOMALY_MAX_DAY_GAP`` (default 4 days). This avoids inflating the
+        percentage change across long weekends / holiday closures (e.g. a
+        Friday→Tuesday gap), which would otherwise produce false anomalies.
+        The skipped value still becomes the new ``prev`` for the next date.
+
         Args:
             rates: Dict keyed by "{currency}_{rate_type}" mapping to
                    {date: Decimal}. Example:
@@ -146,10 +157,19 @@ class AnomalyGuard:
 
             sorted_dates = sorted(date_rates.keys())
             prev_val: Optional[Decimal] = None
+            prev_date: Optional[date] = None
 
             for d in sorted_dates:
                 val = date_rates[d]
                 if val is None:
+                    continue
+
+                # Skip comparison across an excessive day gap to avoid
+                # false anomalies over long weekends/holiday closures.
+                day_gap = (d - prev_date).days if prev_date else 0
+                if prev_val is not None and day_gap > ANOMALY_MAX_DAY_GAP:
+                    prev_val = val
+                    prev_date = d
                     continue
 
                 result = self.check_rate(
@@ -163,5 +183,6 @@ class AnomalyGuard:
                     anomalies.append(result)
 
                 prev_val = val
+                prev_date = d
 
         return anomalies

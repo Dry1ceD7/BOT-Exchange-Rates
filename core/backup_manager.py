@@ -13,6 +13,7 @@ import glob
 import os
 import shutil
 from datetime import datetime, timedelta
+from typing import Optional
 
 
 class BackupError(Exception):
@@ -40,11 +41,32 @@ class BackupManager:
         self.backup_dir = backup_dir
         os.makedirs(self.backup_dir, exist_ok=True)
 
+    # Timestamp embedded in backup filenames. Microsecond precision avoids
+    # same-second collisions that would overwrite a pristine copy.
+    _TS_FORMAT = "%Y%m%d_%H%M%S_%f"
+
     def _generate_backup_name(self, filepath: str) -> str:
         """Generates a timestamped backup filename with unique separator."""
         basename = os.path.splitext(os.path.basename(filepath))[0]
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime(self._TS_FORMAT)
         return f"{basename}__bak__{timestamp}.xlsx"
+
+    def _parse_backup_timestamp(self, fpath: str) -> Optional[datetime]:
+        """Extract the embedded timestamp from a backup filename.
+
+        Returns None if the filename does not match the backup pattern
+        (so non-backup *.xlsx files are safely ignored).
+        """
+        name = os.path.splitext(os.path.basename(fpath))[0]
+        marker = "__bak__"
+        idx = name.rfind(marker)
+        if idx == -1:
+            return None
+        ts_str = name[idx + len(marker):]
+        try:
+            return datetime.strptime(ts_str, self._TS_FORMAT)
+        except ValueError:
+            return None
 
     def _get_backup_key(self, filepath: str) -> str:
         """Extracts the base name (without extension) used as a lookup key."""
@@ -102,6 +124,23 @@ class BackupManager:
 
         latest_backup = matches[0]
 
+        # Integrity check: backup must be a readable, non-empty .xlsx.
+        try:
+            if os.path.getsize(latest_backup) <= 0:
+                raise BackupError(
+                    f"Backup is empty, refusing to restore: {latest_backup}"
+                )
+        except OSError as e:
+            raise BackupError(f"Backup not readable: {e}")
+
+        # Snapshot the current live file before overwriting so a bad revert
+        # is recoverable.
+        if os.path.exists(filepath):
+            try:
+                shutil.copy2(filepath, filepath + ".pre-revert")
+            except (OSError, IOError) as e:
+                raise BackupError(f"Pre-revert snapshot failed: {e}")
+
         try:
             shutil.copy2(latest_backup, filepath)
         except (OSError, IOError) as e:
@@ -124,13 +163,19 @@ class BackupManager:
         deleted = 0
 
         for fpath in glob.glob(os.path.join(self.backup_dir, "*.xlsx")):
-            try:
-                mtime = datetime.fromtimestamp(os.path.getmtime(fpath))
-                if mtime < cutoff:
+            # Derive age from the timestamp embedded in the filename, NOT
+            # os.path.getmtime: copy2 preserves the SOURCE mtime, so a fresh
+            # backup of an old file would otherwise be deleted immediately.
+            ts = self._parse_backup_timestamp(fpath)
+            if ts is None:
+                # Not a recognizable backup file — skip it.
+                continue
+            if ts < cutoff:
+                try:
                     os.remove(fpath)
                     deleted += 1
-            except OSError:
-                continue
+                except OSError:
+                    continue
 
         return deleted
 

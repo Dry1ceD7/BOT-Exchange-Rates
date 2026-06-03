@@ -28,6 +28,59 @@ from core.constants import MAX_429_RETRIES
 
 logger = logging.getLogger(__name__)
 
+
+# -------------------------------------------------------------------------
+# SECURITY: TOKEN REDACTION LOGGING FILTER
+# -------------------------------------------------------------------------
+
+class TokenRedactionFilter(logging.Filter):
+    """Redact known BOT API token values from every log record.
+
+    tenacity's before_sleep_log and traceback formatting can otherwise
+    leak tokens (e.g. in request URLs/headers) into app.log or Sentry.
+    This filter reads the current token values from os.environ and the
+    keychain and replaces any occurrence with '***' in the formatted
+    message and its args.
+    """
+
+    _REPLACEMENT = "***"
+
+    def _token_values(self) -> list:
+        import os
+        values = []
+        for env_key in ("BOT_TOKEN_EXG", "BOT_TOKEN_HOL"):
+            val = os.environ.get(env_key)
+            if val:
+                values.append(val)
+        return [v for v in values if v]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        tokens = self._token_values()
+        if not tokens:
+            return True
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        redacted = msg
+        for tok in tokens:
+            if tok and tok in redacted:
+                redacted = redacted.replace(tok, self._REPLACEMENT)
+        if redacted != msg:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+def install_token_redaction_filter() -> None:
+    """Attach the redaction filter to the root logger's handlers."""
+    root = logging.getLogger()
+    filt = TokenRedactionFilter()
+    for handler in root.handlers:
+        # Avoid attaching duplicates
+        if not any(isinstance(f, TokenRedactionFilter) for f in handler.filters):
+            handler.addFilter(filt)
+
 # -------------------------------------------------------------------------
 # PYDANTIC v2 SCHEMAS
 # -------------------------------------------------------------------------
@@ -177,7 +230,13 @@ class BOTClient:
                     validated_response = BOTRateResponse.model_validate(raw_json)
                     all_results.extend(validated_response.result.data.data_detail)
                 except ValidationError as e:
-                    raise BOTAPIError(f"Schema mismatch! {e}")
+                    # SECURITY: the ValidationError embeds the raw response
+                    # body, which may contain echoed tokens/PII. Log the full
+                    # detail only at DEBUG and raise a generic message.
+                    logger.debug("BOT API schema validation failed: %s", e)
+                    raise BOTAPIError(
+                        "BOT API returned an unexpected schema."
+                    ) from None
             current_start = current_end + timedelta(days=1)
             # Inter-chunk cooldown: 0.3-0.8s (429 handler protects against rate limiting)
             await asyncio.sleep(random.uniform(0.3, 0.8))

@@ -35,6 +35,39 @@ load_dotenv(dotenv_path=ENV_PATH)
 # ── Sentry Telemetry (v3.2.4) ───────────────────────────────────────────
 # Conditionally initialize Sentry crash reporting. If SENTRY_DSN is not
 # set, Sentry is completely disabled — zero overhead, zero network calls.
+def _sentry_token_scrubber(event, hint):
+    """Sentry before_send hook: replace known token values with '***'.
+
+    Tokens can otherwise surface in event messages, exception values, or
+    request data. We recursively walk the event and substitute any known
+    token string. Returns the (mutated) event so it is still sent.
+    """
+    tokens = [
+        os.environ.get("BOT_TOKEN_EXG"),
+        os.environ.get("BOT_TOKEN_HOL"),
+    ]
+    tokens = [t for t in tokens if t]
+    if not tokens:
+        return event
+
+    def _scrub(obj):
+        if isinstance(obj, str):
+            out = obj
+            for tok in tokens:
+                out = out.replace(tok, "***")
+            return out
+        if isinstance(obj, dict):
+            return {k: _scrub(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_scrub(v) for v in obj]
+        return obj
+
+    try:
+        return _scrub(event)
+    except Exception:
+        return event
+
+
 _SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
 if _SENTRY_DSN:
     try:
@@ -46,6 +79,7 @@ if _SENTRY_DSN:
             release=f"bot-exrate@{__version__}",
             traces_sample_rate=0.2,  # 20% of transactions for performance monitoring
             send_default_pii=False,  # Never send user PII
+            before_send=_sentry_token_scrubber,  # Redact tokens from events
         )
     except Exception:
         pass  # Sentry is optional — never block app startup
@@ -67,6 +101,14 @@ logging.basicConfig(
         logging.StreamHandler(),
     ],
 )
+
+# SECURITY: redact BOT API token values from all log records before they
+# reach the file/console handlers (defends app.log + Sentry breadcrumbs).
+try:
+    from core.api_client import install_token_redaction_filter
+    install_token_redaction_filter()
+except Exception:
+    pass
 
 
 # ── Cold-Start: Ensure required directories exist ────────────────────────

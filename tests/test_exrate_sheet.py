@@ -40,6 +40,13 @@ class TestParseCellDate:
     def test_integer_returns_none(self):
         assert _parse_cell_date(42) is None
 
+    def test_shared_superset_formats(self):
+        """Now uses shared parser — full format superset, not just 2."""
+        assert _parse_cell_date("10/03/2025") == date(2025, 3, 10)
+        assert _parse_cell_date("10-03-2025") == date(2025, 3, 10)
+        assert _parse_cell_date("20250310") == date(2025, 3, 10)
+        assert _parse_cell_date("10 Mar 2025") == date(2025, 3, 10)
+
 
 class TestBuildDateRange:
     """Tests for _build_date_range helper."""
@@ -84,8 +91,43 @@ class TestMergeRateData:
             usd_b, usd_s, eur_b, eur_s,
         )
         entry = merged[date(2025, 3, 10)]
-        assert entry["usd_buy"] == 33.5  # API overrides existing
-        assert entry["eur_sell"] == 37.1
+        # API overrides existing, value stays exact Decimal (no float cast).
+        assert entry["usd_buy"] == Decimal("33.5")
+        assert entry["eur_sell"] == Decimal("37.1")
+
+    def test_decimal_precision_preserved_no_float(self):
+        """Rate values must stay exact Decimal — never cast to float."""
+        d = date(2025, 3, 10)
+        usd_b = {d: Decimal("34.5650")}
+        merged = _merge_rate_data(
+            {d}, {}, set(), {},
+            usd_b, {}, {}, {},
+        )
+        val = merged[d]["usd_buy"]
+        assert isinstance(val, Decimal)
+        # Exact value preserved (float would yield 34.564999...).
+        assert val == Decimal("34.5650")
+        assert str(val) == "34.5650"
+
+    def test_decimal_written_to_sheet_exact(self):
+        """End-to-end: Decimal survives into the written cell exactly."""
+        wb = openpyxl.Workbook()
+        d = date(2025, 3, 10)
+        update_master_exrate_sheet(
+            wb,
+            usd_buying_rates={d: Decimal("34.5650")},
+            usd_selling_rates={d: Decimal("34.7350")},
+            eur_buying_rates={d: Decimal("37.1250")},
+            eur_selling_rates={d: Decimal("37.4450")},
+            holidays_list=[],
+            holidays_names={},
+            start_date=d,
+        )
+        ws = wb["ExRate"]
+        cell = ws.cell(row=2, column=2).value
+        assert isinstance(cell, Decimal)
+        assert cell == Decimal("34.5650")
+        wb.close()
 
     def test_weekend_label(self):
         sat = date(2025, 3, 8)  # Saturday
@@ -157,7 +199,7 @@ class TestUpdateMasterExrateSheet:
             start_date=d,
         )
         ws = wb["ExRate"]
-        # Row 2 should have data (row 1 = header)
-        assert ws.cell(row=2, column=2).value == 33.5
-        assert ws.cell(row=2, column=3).value == 33.6
+        # Row 2 should have data (row 1 = header). Cells hold exact Decimal.
+        assert ws.cell(row=2, column=2).value == Decimal("33.5")
+        assert ws.cell(row=2, column=3).value == Decimal("33.6")
         wb.close()

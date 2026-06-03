@@ -5,16 +5,20 @@ core/database.py
 BOT Exchange Rate Processor (v2.6.1) - Zero-Latency Local Cache
 ---------------------------------------------------------------------------
 Ultra-lightweight SQLite cache using only Python's built-in sqlite3.
-Thread-safe via check_same_thread=False + threading.Lock() on all operations.
+Thread-safe via connection-per-thread (threading.local): each thread opens
+its own sqlite3 connection so WAL mode can actually overlap readers and the
+writer instead of serializing everything behind a single global lock.
 Zero external dependencies.
 
 V2.6.1 Schema: Expanded rates table with Buying TT / Selling columns
 for both USD and EUR (4 rate columns total).
 """
 
+import atexit
 import os
 import sqlite3
 import threading
+import weakref
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
@@ -41,38 +45,55 @@ class CacheDB:
             db_path = os.path.join(db_dir, "cache.db")
 
         self.db_path = db_path
-        self._lock = threading.Lock()
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")  # Better concurrency
+        # Connection-per-thread: each thread gets its own sqlite3 connection
+        # so WAL can overlap concurrent readers with the writer. A lock guards
+        # the shared bookkeeping (the set of open connections) only.
+        self._local = threading.local()
+        self._conn_lock = threading.Lock()
+        self._all_conns: set = set()
+        self._closed = False
+
         self._create_tables()
         self._migrate_schema()
+        atexit.register(_atexit_close, weakref.ref(self))
+
+    def _conn(self) -> sqlite3.Connection:
+        """Return this thread's connection, creating it on first use."""
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("PRAGMA journal_mode=WAL")
+            self._local.conn = conn
+            with self._conn_lock:
+                self._all_conns.add(conn)
+        return conn
 
     def _create_tables(self):
         """Safely create tables if they do not exist."""
-        with self._lock:
-            self._conn.executescript("""
-                CREATE TABLE IF NOT EXISTS rates (
-                    date          TEXT PRIMARY KEY,
-                    usd_buying    REAL,
-                    usd_selling   REAL,
-                    eur_buying    REAL,
-                    eur_selling   REAL
-                );
+        conn = self._conn()
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS rates (
+                date          TEXT PRIMARY KEY,
+                usd_buying    REAL,
+                usd_selling   REAL,
+                eur_buying    REAL,
+                eur_selling   REAL
+            );
 
-                CREATE TABLE IF NOT EXISTS holidays (
-                    date           TEXT PRIMARY KEY,
-                    holiday_name   TEXT
-                );
+            CREATE TABLE IF NOT EXISTS holidays (
+                date           TEXT PRIMARY KEY,
+                holiday_name   TEXT
+            );
 
-                CREATE TABLE IF NOT EXISTS rates_multi (
-                    date       TEXT NOT NULL,
-                    currency   TEXT NOT NULL,
-                    rate_type  TEXT NOT NULL,
-                    value      REAL,
-                    PRIMARY KEY (date, currency, rate_type)
-                );
-            """)
-            self._conn.commit()
+            CREATE TABLE IF NOT EXISTS rates_multi (
+                date       TEXT NOT NULL,
+                currency   TEXT NOT NULL,
+                rate_type  TEXT NOT NULL,
+                value      REAL,
+                PRIMARY KEY (date, currency, rate_type)
+            );
+        """)
+        conn.commit()
 
     def _migrate_schema(self):
         """
@@ -80,35 +101,36 @@ class CacheDB:
         If old columns (usd_rate, eur_rate) exist, add new columns and
         copy data: selling gets the old rate, buying also gets it as
         best-available fallback for historical data.
+
+        Each ALTER is guarded by an existence check (idempotent) rather than
+        relying on an unguarded multi-statement executescript that cannot
+        partially roll back.
         """
-        with self._lock:
-            cursor = self._conn.execute("PRAGMA table_info(rates)")
-            columns = [row[1] for row in cursor.fetchall()]
+        conn = self._conn()
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(rates)").fetchall()]
 
-            if "usd_rate" in columns and "usd_buying" not in columns:
-                # Old schema detected — migrate (add new columns)
-                self._conn.executescript("""
-                    ALTER TABLE rates ADD COLUMN usd_buying REAL;
-                    ALTER TABLE rates ADD COLUMN usd_selling REAL;
-                    ALTER TABLE rates ADD COLUMN eur_buying REAL;
-                    ALTER TABLE rates ADD COLUMN eur_selling REAL;
-
-                    UPDATE rates SET
-                        usd_buying  = usd_rate,
-                        usd_selling = usd_rate,
-                        eur_buying  = eur_rate,
-                        eur_selling = eur_rate;
-                """)
-                self._conn.commit()
-            elif "usd_rate" in columns and "usd_buying" in columns:
-                # Migration ran before but didn't backfill buying — fix it
-                self._conn.execute("""
-                    UPDATE rates SET
-                        usd_buying  = COALESCE(usd_buying, usd_selling, usd_rate),
-                        eur_buying  = COALESCE(eur_buying, eur_selling, eur_rate)
-                    WHERE usd_buying IS NULL OR eur_buying IS NULL
-                """)
-                self._conn.commit()
+        if "usd_rate" in columns and "usd_buying" not in columns:
+            # Old schema detected — add only the columns that are missing.
+            for col in ("usd_buying", "usd_selling", "eur_buying", "eur_selling"):
+                if col not in columns:
+                    conn.execute(f"ALTER TABLE rates ADD COLUMN {col} REAL")
+            conn.execute("""
+                UPDATE rates SET
+                    usd_buying  = usd_rate,
+                    usd_selling = usd_rate,
+                    eur_buying  = eur_rate,
+                    eur_selling = eur_rate
+            """)
+            conn.commit()
+        elif "usd_rate" in columns and "usd_buying" in columns:
+            # Migration ran before but didn't backfill buying — fix it
+            conn.execute("""
+                UPDATE rates SET
+                    usd_buying  = COALESCE(usd_buying, usd_selling, usd_rate),
+                    eur_buying  = COALESCE(eur_buying, eur_selling, eur_rate)
+                WHERE usd_buying IS NULL OR eur_buying IS NULL
+            """)
+            conn.commit()
 
     # ================================================================== #
     #  RATES
@@ -122,11 +144,10 @@ class CacheDB:
             or None if not cached.
         """
         date_str = target_date.strftime("%Y-%m-%d")
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT usd_buying, usd_selling, eur_buying, eur_selling FROM rates WHERE date = ?",
-                (date_str,)
-            ).fetchone()
+        row = self._conn().execute(
+            "SELECT usd_buying, usd_selling, eur_buying, eur_selling FROM rates WHERE date = ?",
+            (date_str,)
+        ).fetchone()
 
         if row is None:
             return None
@@ -145,12 +166,11 @@ class CacheDB:
         """
         s_str = start.strftime("%Y-%m-%d")
         e_str = end.strftime("%Y-%m-%d")
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT date, usd_buying, usd_selling, eur_buying, eur_selling "
-                "FROM rates WHERE date BETWEEN ? AND ?",
-                (s_str, e_str)
-            ).fetchall()
+        rows = self._conn().execute(
+            "SELECT date, usd_buying, usd_selling, eur_buying, eur_selling "
+            "FROM rates WHERE date BETWEEN ? AND ?",
+            (s_str, e_str)
+        ).fetchall()
 
         result = {}
         for r in rows:
@@ -168,14 +188,14 @@ class CacheDB:
                     eur_selling: float = None):
         """Insert or update a single rate entry."""
         date_str = target_date.strftime("%Y-%m-%d")
-        with self._lock:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO rates "
-                "(date, usd_buying, usd_selling, eur_buying, eur_selling) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (date_str, usd_buying, usd_selling, eur_buying, eur_selling)
-            )
-            self._conn.commit()
+        conn = self._conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO rates "
+            "(date, usd_buying, usd_selling, eur_buying, eur_selling) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (date_str, usd_buying, usd_selling, eur_buying, eur_selling)
+        )
+        conn.commit()
 
     def insert_rates_bulk(self, entries: List[Tuple]):
         """
@@ -184,14 +204,14 @@ class CacheDB:
         """
         if not entries:
             return
-        with self._lock:
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO rates "
-                "(date, usd_buying, usd_selling, eur_buying, eur_selling) "
-                "VALUES (?, ?, ?, ?, ?)",
-                entries
-            )
-            self._conn.commit()
+        conn = self._conn()
+        conn.executemany(
+            "INSERT OR REPLACE INTO rates "
+            "(date, usd_buying, usd_selling, eur_buying, eur_selling) "
+            "VALUES (?, ?, ?, ?, ?)",
+            entries
+        )
+        conn.commit()
 
     # ================================================================== #
     #  HOLIDAYS
@@ -201,27 +221,26 @@ class CacheDB:
         Returns cached holidays as [(date_str, name), ...].
         If year is specified, filters to that year.
         """
-        with self._lock:
-            if year:
-                prefix = f"{year}-"
-                rows = self._conn.execute(
-                    "SELECT date, holiday_name FROM holidays WHERE date LIKE ?",
-                    (prefix + "%",)
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT date, holiday_name FROM holidays"
-                ).fetchall()
+        conn = self._conn()
+        if year:
+            prefix = f"{year}-"
+            rows = conn.execute(
+                "SELECT date, holiday_name FROM holidays WHERE date LIKE ?",
+                (prefix + "%",)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT date, holiday_name FROM holidays"
+            ).fetchall()
         return rows
 
     def has_holidays_for_year(self, year: int) -> bool:
         """Quick check if holidays for a year are already cached."""
         prefix = f"{year}-"
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) FROM holidays WHERE date LIKE ?",
-                (prefix + "%",)
-            ).fetchone()
+        row = self._conn().execute(
+            "SELECT COUNT(*) FROM holidays WHERE date LIKE ?",
+            (prefix + "%",)
+        ).fetchone()
         return row[0] > 0
 
     def insert_holidays(self, holidays: List[Tuple[str, str]]):
@@ -230,12 +249,12 @@ class CacheDB:
         """
         if not holidays:
             return
-        with self._lock:
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO holidays (date, holiday_name) VALUES (?, ?)",
-                holidays
-            )
-            self._conn.commit()
+        conn = self._conn()
+        conn.executemany(
+            "INSERT OR REPLACE INTO holidays (date, holiday_name) VALUES (?, ?)",
+            holidays
+        )
+        conn.commit()
 
     # ================================================================== #
     #  MULTI-CURRENCY RATES (v3.1.0)
@@ -246,12 +265,11 @@ class CacheDB:
     ) -> Optional[Decimal]:
         """Get a single rate from the multi-currency table."""
         date_str = target_date.strftime("%Y-%m-%d")
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT value FROM rates_multi "
-                "WHERE date = ? AND currency = ? AND rate_type = ?",
-                (date_str, currency, rate_type),
-            ).fetchone()
+        row = self._conn().execute(
+            "SELECT value FROM rates_multi "
+            "WHERE date = ? AND currency = ? AND rate_type = ?",
+            (date_str, currency, rate_type),
+        ).fetchone()
         if row is None or row[0] is None:
             return None
         return Decimal(str(row[0]))
@@ -266,14 +284,14 @@ class CacheDB:
         """
         if not entries:
             return
-        with self._lock:
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO rates_multi "
-                "(date, currency, rate_type, value) "
-                "VALUES (?, ?, ?, ?)",
-                entries,
-            )
-            self._conn.commit()
+        conn = self._conn()
+        conn.executemany(
+            "INSERT OR REPLACE INTO rates_multi "
+            "(date, currency, rate_type, value) "
+            "VALUES (?, ?, ?, ?)",
+            entries,
+        )
+        conn.commit()
 
     # ================================================================== #
     #  EXPORT HELPERS
@@ -285,31 +303,54 @@ class CacheDB:
         [(date_str, usd_buying, usd_selling, eur_buying, eur_selling), ...]
         Ordered by date ascending. Used by csv_export.
         """
-        with self._lock:
-            return self._conn.execute(
-                "SELECT date, usd_buying, usd_selling, eur_buying, eur_selling "
-                "FROM rates ORDER BY date ASC"
-            ).fetchall()
+        return self._conn().execute(
+            "SELECT date, usd_buying, usd_selling, eur_buying, eur_selling "
+            "FROM rates ORDER BY date ASC"
+        ).fetchall()
 
     # ================================================================== #
     #  CLEANUP
     # ================================================================== #
     def close(self):
-        """Close the database connection."""
-        with self._lock:
-            self._conn.close()
+        """Checkpoint the WAL and close every per-thread connection."""
+        with self._conn_lock:
+            if self._closed:
+                return
+            self._closed = True
+            conns = list(self._all_conns)
+            self._all_conns.clear()
+
+        for conn in conns:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error:
+                pass
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+        # Drop this thread's cached handle so a later call re-opens cleanly.
+        if getattr(self._local, "conn", None) is not None:
+            self._local.conn = None
+
+    def __enter__(self) -> "CacheDB":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
     def get_stats(self) -> dict:
         """Returns cache statistics for UI display."""
-        with self._lock:
-            rates_count = self._conn.execute("SELECT COUNT(*) FROM rates").fetchone()[0]
-            hol_count = self._conn.execute("SELECT COUNT(*) FROM holidays").fetchone()[0]
-            try:
-                multi_count = self._conn.execute(
-                    "SELECT COUNT(*) FROM rates_multi"
-                ).fetchone()[0]
-            except sqlite3.OperationalError:
-                multi_count = 0
+        conn = self._conn()
+        rates_count = conn.execute("SELECT COUNT(*) FROM rates").fetchone()[0]
+        hol_count = conn.execute("SELECT COUNT(*) FROM holidays").fetchone()[0]
+        try:
+            multi_count = conn.execute(
+                "SELECT COUNT(*) FROM rates_multi"
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            multi_count = 0
         size_bytes = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
         return {
             "rates": rates_count,
@@ -317,3 +358,13 @@ class CacheDB:
             "holidays": hol_count,
             "size_kb": round(size_bytes / 1024, 1)
         }
+
+
+def _atexit_close(db_ref) -> None:
+    """Module-level atexit handler: checkpoint + close the singleton cache."""
+    db = db_ref()
+    if db is not None:
+        try:
+            db.close()
+        except Exception:
+            pass

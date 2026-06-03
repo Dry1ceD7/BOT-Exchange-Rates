@@ -11,6 +11,7 @@ Security: Uses a random nonce stored in a lockfile to authenticate IPC
 commands, preventing arbitrary local processes from triggering RESTORE.
 """
 
+import hmac
 import logging
 import os
 import secrets
@@ -81,7 +82,11 @@ def ping_running_instance() -> bool:
     address = _get_ipc_address()
     try:
         with Client(address) as conn:
-            conn.send(f"RESTORE:{nonce}")
+            # SECURITY: send_bytes transmits raw bytes only. We never use
+            # send()/recv() because multiprocessing.connection pickles
+            # objects, and recv() would UNPICKLE attacker-controlled bytes
+            # before any authentication — a local pickle RCE vector.
+            conn.send_bytes(f"RESTORE:{nonce}".encode("utf-8"))
             return True
     except (ConnectionRefusedError, FileNotFoundError, OSError):
         return False
@@ -117,6 +122,14 @@ class SingleInstanceServer:
 
             self._listener = Listener(address)
             self._running = True
+
+            # SECURITY: restrict the unix socket to the owner only (0o600)
+            # so other local users cannot connect and attempt RESTORE.
+            if sys.platform != "win32":
+                try:
+                    os.chmod(address, 0o600)
+                except OSError:
+                    pass
 
             # Generate authentication nonce for this session
             self._nonce = _generate_nonce()
@@ -162,14 +175,18 @@ class SingleInstanceServer:
 
                 conn = self._listener.accept()
                 try:
-                    message = conn.recv()
-                    # Authenticate: expect "RESTORE:<nonce>"
-                    if message == f"RESTORE:{self._nonce}":
+                    # SECURITY: recv_bytes returns raw bytes and does NOT
+                    # unpickle. Cap at 256 bytes to bound memory. We compare
+                    # with hmac.compare_digest (constant-time) and NEVER
+                    # interpret the payload as a pickled object.
+                    raw = conn.recv_bytes(256)
+                    expected = f"RESTORE:{self._nonce}".encode("utf-8")
+                    if hmac.compare_digest(raw, expected):
                         logger.info("Authenticated RESTORE signal received.")
                         self.on_restore()
                     else:
                         logger.warning("IPC: rejected unauthenticated command")
-                except EOFError:
+                except (EOFError, OSError):
                     pass
                 finally:
                     conn.close()

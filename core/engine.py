@@ -34,6 +34,7 @@ from core.constants import (
     MAX_FILE_SIZE_MB,
     MIN_DISK_SPACE_MB,
     SKIP_SHEET_NAMES,
+    parse_date,
 )
 from core.database import CacheDB
 from core.excel_io import (
@@ -154,24 +155,8 @@ class LedgerEngine:
             )
 
     def _parse_date(self, cell_value) -> Optional[date]:
-        if isinstance(cell_value, datetime):
-            return cell_value.date()
-        if isinstance(cell_value, date):
-            return cell_value
-        if isinstance(cell_value, str):
-            val = cell_value.strip()
-            if not val or val.lower() in ("nan", "null"):
-                return None
-            formats = [
-                "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d",
-                "%d %b %Y", "%d %B %Y", "%Y%m%d",
-            ]
-            for fmt in formats:
-                try:
-                    return datetime.strptime(val, fmt).date()
-                except ValueError:
-                    continue
-        return None
+        """Parse a date from a cell value (shared parser, full superset)."""
+        return parse_date(cell_value)
 
     # ── Static delegates (kept for backward compat) ──────────────────
     @staticmethod
@@ -194,11 +179,18 @@ class LedgerEngine:
         holidays_set = set(holidays)
         prev_year = target_year - 1
         check_date = date(prev_year, 12, 30)
-        for _ in range(10):
+        # Roll back through December until a trading day is found. Do NOT
+        # return a fixed fallback (Dec 20 may itself be a weekend/holiday).
+        # Bound to December: a year-start outside Dec is meaningless, so
+        # raise rather than silently returning a November date.
+        while check_date.year == prev_year and check_date.month == 12:
             if check_date.weekday() < 5 and check_date not in holidays_set:
                 return check_date
             check_date -= timedelta(days=1)
-        return date(prev_year, 12, 20)
+        raise ValueError(
+            f"No trading day found in December {prev_year} "
+            "(all weekends/holidays)."
+        )
 
 
 
@@ -816,144 +808,197 @@ class LedgerEngine:
                 progress_cb(msg)
             self._emit(msg)
 
+        # ── Fail-safe preconditions (mirror process_ledger) ───────────
+        # Every in-place overwrite path must enforce the size guardrail and
+        # create a pre-edit backup BEFORE load_workbook. If the file does not
+        # yet exist this is a creation path — skip backup, but the loaded
+        # save below would fail anyway, so a missing file is still an error.
+        filepath = os.path.abspath(filepath)
+        self._check_memory_guardrail(filepath)
+        _status("Size check passed")
+        if os.path.exists(filepath):
+            self.backup.create_backup(filepath)
+            _status("Backup created")
+
         _status("Opening ExRate file...")
         wb = openpyxl.load_workbook(filepath)
 
         if "ExRate" not in wb.sheetnames:
             wb.close()
+            del wb
+            gc.collect()
             raise ValueError("No ExRate sheet found in the selected file.")
 
         # ── Standard path (backward compatible) ───────────────────────
         if is_standard:
             from core.exrate_sheet import update_master_exrate_sheet
 
-            ws_ex = wb["ExRate"]
-            existing_dates = set()
-            for row_idx in range(2, (ws_ex.max_row or 1) + 1):
-                cell_val = ws_ex.cell(row=row_idx, column=1).value
-                parsed = self._parse_date(cell_val)
-                if parsed:
-                    existing_dates.add(parsed)
+            # try/finally guarantees the OS file handle is released and gc
+            # runs even if API fetch / write / save raises (mirrors
+            # process_ledger). Otherwise an exception would leak the handle.
+            try:
+                ws_ex = wb["ExRate"]
+                existing_dates = set()
+                for row_idx in range(2, (ws_ex.max_row or 1) + 1):
+                    cell_val = ws_ex.cell(row=row_idx, column=1).value
+                    parsed = self._parse_date(cell_val)
+                    if parsed:
+                        existing_dates.add(parsed)
 
-            if existing_dates:
-                target_year = min(existing_dates).year
-            else:
-                target_year = date.today().year
+                if existing_dates:
+                    target_year = min(existing_dates).year
+                else:
+                    target_year = date.today().year
 
-            # Override with manual date_range if provided
-            if date_range:
-                dr_start, dr_end = date_range
-                target_year = dr_start.year
-                all_target_dates = {dr_start, dr_end, date.today()}
-                start_date_str = f"{dr_start.year - 1}-12-20"
-            else:
-                start_date_str = f"{target_year - 1}-12-20"
-                all_target_dates = existing_dates | {date.today()}
+                # Override with manual date_range if provided
+                if date_range:
+                    dr_start, dr_end = date_range
+                    target_year = dr_start.year
+                    all_target_dates = {dr_start, dr_end, date.today()}
+                    start_date_str = f"{dr_start.year - 1}-12-20"
+                else:
+                    start_date_str = f"{target_year - 1}-12-20"
+                    all_target_dates = existing_dates | {date.today()}
 
-            _status("Fetching exchange rates from BOT API...")
-            (
-                logic_engine, usd_selling, eur_selling,
-                usd_buying, eur_buying, _usd_data, _eur_data,
-            ) = await self._preload_api_data(all_target_dates, start_date_str)
+                _status("Fetching exchange rates from BOT API...")
+                (
+                    logic_engine, usd_selling, eur_selling,
+                    usd_buying, eur_buying, _usd_data, _eur_data,
+                ) = await self._preload_api_data(
+                    all_target_dates, start_date_str
+                )
 
-            computed_start = self.compute_year_start_date(
-                target_year, logic_engine.holidays
-            )
+                computed_start = self.compute_year_start_date(
+                    target_year, logic_engine.holidays
+                )
 
-            master_holidays_set, holidays_names = self._build_holiday_lookup(
-                all_target_dates, computed_start, logic_engine
-            )
+                master_holidays_set, holidays_names = (
+                    self._build_holiday_lookup(
+                        all_target_dates, computed_start, logic_engine
+                    )
+                )
 
-            _status("Writing exchange rate data...")
-            update_master_exrate_sheet(
-                wb, usd_buying, usd_selling, eur_buying, eur_selling,
-                sorted(master_holidays_set), holidays_names, computed_start,
-            )
-            wb.save(filepath)
-            wb.close()
-            _status(f"✓ ExRate updated: {os.path.basename(filepath)}")
-            return filepath
+                _status("Writing exchange rate data...")
+                update_master_exrate_sheet(
+                    wb, usd_buying, usd_selling, eur_buying, eur_selling,
+                    sorted(master_holidays_set), holidays_names,
+                    computed_start,
+                )
+                # ERR-03: Check disk space before saving
+                drive_stat = shutil.disk_usage(os.path.dirname(filepath))
+                free_mb = drive_stat.free // (1024 * 1024)
+                if free_mb < MIN_DISK_SPACE_MB:
+                    raise OSError(
+                        f"Insufficient disk space ({free_mb}MB free, "
+                        f"need {MIN_DISK_SPACE_MB}MB). File NOT saved."
+                    )
+                wb.save(filepath)
+                _status(f"✓ ExRate updated: {os.path.basename(filepath)}")
+                return filepath
+            finally:
+                try:
+                    wb.close()
+                except OSError:
+                    logger.debug("Failed to close workbook (standard path)")
+                del wb
+                gc.collect()
 
         # ── Custom path (any currencies / rate types) ─────────────────
-        _status(f"Fetching rates for {', '.join(currencies)}...")
+        # try/finally guarantees handle release + gc on any error below.
+        try:
+            _status(f"Fetching rates for {', '.join(currencies)}...")
 
-        # Fetch from API for each currency
-        if date_range:
-            start_dt, end_dt = date_range
-        else:
-            target_year = date.today().year
-            start_dt = date(target_year - 1, 12, 20)
-            end_dt = date.today()
+            # Fetch from API for each currency
+            if date_range:
+                start_dt, end_dt = date_range
+            else:
+                target_year = date.today().year
+                start_dt = date(target_year - 1, 12, 20)
+                end_dt = date.today()
 
-        # rate_data[currency][api_field][date] = value
-        rate_data: Dict[str, Dict[str, Dict[date, float]]] = {}
+            # rate_data[currency][api_field][date] = value
+            rate_data: Dict[str, Dict[str, Dict[date, float]]] = {}
 
-        for ccy in currencies:
-            _status(f"Fetching {ccy} rates...")
-            raw_results = await self.api.get_exchange_rates(
-                start_dt, end_dt, ccy,
-            )
-            rate_data[ccy] = {}
-            for label, api_field in rate_types.items():
-                rate_data[ccy][api_field] = {}
-
-            for rec in raw_results:
-                try:
-                    rec_date = datetime.strptime(
-                        rec.period, "%Y-%m-%d"
-                    ).date()
-                except (ValueError, TypeError):
-                    continue
+            for ccy in currencies:
+                _status(f"Fetching {ccy} rates...")
+                raw_results = await self.api.get_exchange_rates(
+                    start_dt, end_dt, ccy,
+                )
+                rate_data[ccy] = {}
                 for label, api_field in rate_types.items():
-                    val = getattr(rec, api_field, None)
-                    if val is not None:
-                        rate_data[ccy][api_field][rec_date] = val
+                    rate_data[ccy][api_field] = {}
 
-        # Fetch holidays
-        _status("Fetching holidays...")
-        all_target_dates = {date.today()}
-        (
-            logic_engine, _, _, _, _, _, _,
-        ) = await self._preload_api_data(all_target_dates, str(start_dt))
+                for rec in raw_results:
+                    try:
+                        rec_date = datetime.strptime(
+                            rec.period, "%Y-%m-%d"
+                        ).date()
+                    except (ValueError, TypeError):
+                        continue
+                    for label, api_field in rate_types.items():
+                        val = getattr(rec, api_field, None)
+                        if val is not None:
+                            rate_data[ccy][api_field][rec_date] = val
 
-        holidays_set = set(logic_engine.holidays)
-        holidays_names_map: Dict[date, str] = {}
-        for year in {start_dt.year, end_dt.year}:
-            for h_str, h_name in self.cache.get_holidays(year):
-                try:
-                    holidays_names_map[
-                        datetime.strptime(h_str, "%Y-%m-%d").date()
-                    ] = h_name
-                except (ValueError, TypeError):
-                    pass
+            # Fetch holidays
+            _status("Fetching holidays...")
+            all_target_dates = {date.today()}
+            (
+                logic_engine, _, _, _, _, _, _,
+            ) = await self._preload_api_data(all_target_dates, str(start_dt))
 
-        # Build column headers: Date + (CCY RateType)... + Holidays
-        headers = ["Date"]
-        col_specs = []  # (currency, api_field) per data column
-        for ccy in currencies:
-            for label, api_field in rate_types.items():
-                headers.append(f"{ccy} {label}")
-                col_specs.append((ccy, api_field))
-        headers.append("Holidays/Weekend")
+            holidays_set = set(logic_engine.holidays)
+            holidays_names_map: Dict[date, str] = {}
+            for year in {start_dt.year, end_dt.year}:
+                for h_str, h_name in self.cache.get_holidays(year):
+                    try:
+                        holidays_names_map[
+                            datetime.strptime(h_str, "%Y-%m-%d").date()
+                        ] = h_name
+                    except (ValueError, TypeError):
+                        pass
 
-        # Build date range
-        all_dates = []
-        d = start_dt
-        while d <= end_dt:
-            all_dates.append(d)
-            d += timedelta(days=1)
-        all_dates.sort()
+            # Build column headers: Date + (CCY RateType)... + Holidays
+            headers = ["Date"]
+            col_specs = []  # (currency, api_field) per data column
+            for ccy in currencies:
+                for label, api_field in rate_types.items():
+                    headers.append(f"{ccy} {label}")
+                    col_specs.append((ccy, api_field))
+            headers.append("Holidays/Weekend")
 
-        # ── Write to sheet ────────────────────────────────────────────
-        ws = wb["ExRate"]
-        _status("Writing custom ExRate data...")
+            # Build date range
+            all_dates = []
+            d = start_dt
+            while d <= end_dt:
+                all_dates.append(d)
+                d += timedelta(days=1)
+            all_dates.sort()
 
-        write_custom_exrate_data(
-            ws, rate_data, col_specs, headers,
-            all_dates, holidays_set, holidays_names_map,
-        )
+            # ── Write to sheet ────────────────────────────────────────
+            ws = wb["ExRate"]
+            _status("Writing custom ExRate data...")
 
-        wb.save(filepath)
-        wb.close()
-        _status(f"✓ ExRate created: {os.path.basename(filepath)}")
-        return filepath
+            write_custom_exrate_data(
+                ws, rate_data, col_specs, headers,
+                all_dates, holidays_set, holidays_names_map,
+            )
+
+            # ERR-03: Check disk space before saving
+            drive_stat = shutil.disk_usage(os.path.dirname(filepath))
+            free_mb = drive_stat.free // (1024 * 1024)
+            if free_mb < MIN_DISK_SPACE_MB:
+                raise OSError(
+                    f"Insufficient disk space ({free_mb}MB free, "
+                    f"need {MIN_DISK_SPACE_MB}MB). File NOT saved."
+                )
+            wb.save(filepath)
+            _status(f"✓ ExRate created: {os.path.basename(filepath)}")
+            return filepath
+        finally:
+            try:
+                wb.close()
+            except OSError:
+                logger.debug("Failed to close workbook (custom path)")
+            del wb
+            gc.collect()

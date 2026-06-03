@@ -259,11 +259,12 @@ class TestFetchExpectedChecksum:
         """Parses a standalone SHA-256 hex string."""
         expected = "a" * 64
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.text = f"  {expected}  \n"
         mock_resp.raise_for_status = MagicMock()
 
         with patch("core.auto_updater.httpx.get", return_value=mock_resp):
-            result = _fetch_expected_checksum("https://example.com/hash.sha256")
+            result = _fetch_expected_checksum("https://github.com/hash.sha256")
 
         assert result == expected
 
@@ -271,22 +272,24 @@ class TestFetchExpectedChecksum:
         """Parses sha256sum-style format: '<hash>  <filename>'."""
         expected = "b" * 64
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.text = f"{expected}  BOT-ExRate-Setup.exe\n"
         mock_resp.raise_for_status = MagicMock()
 
         with patch("core.auto_updater.httpx.get", return_value=mock_resp):
-            result = _fetch_expected_checksum("https://example.com/hash.sha256")
+            result = _fetch_expected_checksum("https://github.com/hash.sha256")
 
         assert result == expected
 
     def test_returns_none_for_invalid_hash(self):
         """Returns None when hash isn't 64 hex chars."""
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.text = "short_hash"
         mock_resp.raise_for_status = MagicMock()
 
         with patch("core.auto_updater.httpx.get", return_value=mock_resp):
-            result = _fetch_expected_checksum("https://example.com/hash.sha256")
+            result = _fetch_expected_checksum("https://github.com/hash.sha256")
 
         assert result is None
 
@@ -296,7 +299,7 @@ class TestFetchExpectedChecksum:
             "core.auto_updater.httpx.get",
             side_effect=httpx.ConnectError("nope"),
         ):
-            result = _fetch_expected_checksum("https://example.com/hash.sha256")
+            result = _fetch_expected_checksum("https://github.com/hash.sha256")
 
         assert result is None
 
@@ -352,9 +355,11 @@ class TestDownloadUpdate:
     def test_successful_download(self, tmp_path):
         """Downloads file successfully to specified directory."""
         content = b"fake installer content"
+        expected_hash = hashlib.sha256(content).hexdigest()
         dest = str(tmp_path)
 
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.headers = {"content-length": str(len(content))}
         mock_resp.iter_bytes.return_value = [content]
         mock_resp.raise_for_status = MagicMock()
@@ -363,9 +368,10 @@ class TestDownloadUpdate:
 
         with patch("core.auto_updater.httpx.stream", return_value=mock_resp):
             result = download_update(
-                url="https://dl/setup.exe",
+                url="https://github.com/dl/setup.exe",
                 dest_dir=dest,
                 filename="setup.exe",
+                expected_sha256=expected_hash,
             )
 
         assert result["error"] is None
@@ -379,6 +385,7 @@ class TestDownloadUpdate:
         dest = str(tmp_path)
 
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.headers = {"content-length": str(len(content))}
         mock_resp.iter_bytes.return_value = [content]
         mock_resp.raise_for_status = MagicMock()
@@ -387,7 +394,7 @@ class TestDownloadUpdate:
 
         with patch("core.auto_updater.httpx.stream", return_value=mock_resp):
             result = download_update(
-                url="https://dl/setup.exe",
+                url="https://github.com/dl/setup.exe",
                 dest_dir=dest,
                 filename="verified.exe",
                 expected_sha256=expected_hash,
@@ -403,6 +410,7 @@ class TestDownloadUpdate:
         dest = str(tmp_path)
 
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.headers = {"content-length": str(len(content))}
         mock_resp.iter_bytes.return_value = [content]
         mock_resp.raise_for_status = MagicMock()
@@ -411,7 +419,7 @@ class TestDownloadUpdate:
 
         with patch("core.auto_updater.httpx.stream", return_value=mock_resp):
             result = download_update(
-                url="https://dl/setup.exe",
+                url="https://github.com/dl/setup.exe",
                 dest_dir=dest,
                 filename="bad.exe",
                 expected_sha256=wrong_hash,
@@ -428,6 +436,7 @@ class TestDownloadUpdate:
         dest = str(tmp_path)
 
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.headers = {"content-length": "1000000"}
         mock_resp.iter_bytes.side_effect = httpx.ReadError("connection reset")
         mock_resp.raise_for_status = MagicMock()
@@ -436,9 +445,10 @@ class TestDownloadUpdate:
 
         with patch("core.auto_updater.httpx.stream", return_value=mock_resp):
             result = download_update(
-                url="https://dl/setup.exe",
+                url="https://github.com/dl/setup.exe",
                 dest_dir=dest,
                 filename="partial.exe",
+                expected_sha256="a" * 64,
             )
 
         assert result["error"] is not None
@@ -447,10 +457,12 @@ class TestDownloadUpdate:
     def test_progress_callback(self, tmp_path):
         """Invokes progress_cb with download progress."""
         content = b"x" * 1024
+        expected_hash = hashlib.sha256(content).hexdigest()
         dest = str(tmp_path)
         cb_calls = []
 
         mock_resp = MagicMock()
+        mock_resp.is_redirect = False
         mock_resp.headers = {"content-length": str(len(content))}
         mock_resp.iter_bytes.return_value = [content]
         mock_resp.raise_for_status = MagicMock()
@@ -459,14 +471,105 @@ class TestDownloadUpdate:
 
         with patch("core.auto_updater.httpx.stream", return_value=mock_resp):
             download_update(
-                url="https://dl/setup.exe",
+                url="https://github.com/dl/setup.exe",
                 dest_dir=dest,
                 filename="progress.exe",
+                expected_sha256=expected_hash,
                 progress_cb=lambda d, t: cb_calls.append((d, t)),
             )
 
         assert len(cb_calls) > 0
         assert cb_calls[-1][0] == len(content)
+
+    def test_refuses_missing_sha256(self, tmp_path):
+        """SECURITY: refuse to download without a mandatory sha256."""
+        result = download_update(
+            url="https://github.com/dl/setup.exe",
+            dest_dir=str(tmp_path),
+            filename="nohash.exe",
+            expected_sha256=None,
+        )
+        assert result["path"] is None
+        assert result["error"] is not None
+        assert "checksum" in result["error"].lower()
+
+    def test_refuses_non_allowlisted_host(self, tmp_path):
+        """SECURITY: refuse non-allowlisted download hosts (SSRF)."""
+        result = download_update(
+            url="https://evil.example.com/setup.exe",
+            dest_dir=str(tmp_path),
+            filename="evil.exe",
+            expected_sha256="a" * 64,
+        )
+        assert result["path"] is None
+        assert result["error"] is not None
+        assert "host" in result["error"].lower()
+
+    def test_refuses_http_scheme(self, tmp_path):
+        """SECURITY: refuse non-https schemes even for allowlisted host."""
+        result = download_update(
+            url="http://github.com/dl/setup.exe",
+            dest_dir=str(tmp_path),
+            filename="insecure.exe",
+            expected_sha256="a" * 64,
+        )
+        assert result["path"] is None
+        assert result["error"] is not None
+
+    def test_refuses_redirect_to_non_allowlisted_host(self, tmp_path):
+        """SECURITY: a redirect off the allowlist is blocked (SSRF)."""
+        mock_resp = MagicMock()
+        mock_resp.is_redirect = True
+        mock_resp.headers = {"location": "https://evil.example.com/x.exe"}
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("core.auto_updater.httpx.stream", return_value=mock_resp):
+            result = download_update(
+                url="https://github.com/dl/setup.exe",
+                dest_dir=str(tmp_path),
+                filename="redir.exe",
+                expected_sha256="a" * 64,
+            )
+
+        assert result["path"] is None
+        assert result["error"] is not None
+        assert "host" in result["error"].lower()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  _is_allowed_download_url (SSRF host allowlist)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestAllowedDownloadUrl:
+    """Tests for the SSRF host allowlist helper."""
+
+    def test_allows_known_github_hosts(self):
+        from core.auto_updater import _is_allowed_download_url
+
+        assert _is_allowed_download_url("https://github.com/a/b.exe")
+        assert _is_allowed_download_url(
+            "https://objects.githubusercontent.com/x"
+        )
+        assert _is_allowed_download_url(
+            "https://release-assets.githubusercontent.com/y"
+        )
+
+    def test_blocks_unknown_host(self):
+        from core.auto_updater import _is_allowed_download_url
+
+        assert not _is_allowed_download_url("https://evil.example.com/x")
+
+    def test_blocks_non_https(self):
+        from core.auto_updater import _is_allowed_download_url
+
+        assert not _is_allowed_download_url("http://github.com/x")
+
+    def test_blocks_garbage(self):
+        from core.auto_updater import _is_allowed_download_url
+
+        assert not _is_allowed_download_url("not a url")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

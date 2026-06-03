@@ -14,6 +14,7 @@ SFFB: Strict < 100 lines.
 
 import logging
 import threading
+import time
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -72,12 +73,14 @@ class ThreadRegistry:
             logger.debug("Signaling stop: %s", name)
             evt.set()
 
-        # 2. Join all threads
+        # 2. Join all threads against a shared monotonic deadline so the
+        #    total wait is `timeout` overall, not divided per thread (which
+        #    caused premature "hung" reports when many threads were registered).
         hung = []
-        per_thread_timeout = timeout / max(len(threads), 1)
+        deadline = time.monotonic() + timeout
         for name, thread in threads.items():
             if thread.is_alive():
-                thread.join(timeout=per_thread_timeout)
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
                 if thread.is_alive():
                     hung.append(name)
                     logger.warning("Thread did not exit: %s", name)

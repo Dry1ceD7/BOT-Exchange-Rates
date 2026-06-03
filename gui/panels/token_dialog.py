@@ -18,7 +18,7 @@ from typing import Optional
 import customtkinter as ctk
 
 from core.paths import get_project_root
-from core.secure_tokens import set_token
+from core.secure_tokens import _keyring_available, set_token
 from gui.theme import MONO_FONT, get_theme
 
 logger = logging.getLogger(__name__)
@@ -196,26 +196,33 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
             )
             return
 
-        # Write to .env
-        try:
-            self._write_env(exg, hol)
-        except OSError as e:
-            self._lbl_status.configure(
-                text="Failed to save .env: %s" % e, text_color=t["error_text"],
-            )
-            logger.error("Failed to write .env: %s", e)
-            return
+        # SECURITY: prefer the OS keychain. Only write plaintext to .env when
+        # no secure keychain backend is available, and lock the file to 0o600.
+        stored_in_keychain = False
+        if _keyring_available():
+            exg_ok = set_token("BOT_TOKEN_EXG", exg)
+            hol_ok = set_token("BOT_TOKEN_HOL", hol)
+            stored_in_keychain = exg_ok and hol_ok
 
-        # Store in OS keychain (primary secure storage)
-        set_token("BOT_TOKEN_EXG", exg)
-        set_token("BOT_TOKEN_HOL", hol)
+        if not stored_in_keychain:
+            try:
+                self._write_env(exg, hol)
+            except OSError as e:
+                self._lbl_status.configure(
+                    text="Failed to save .env: %s" % e, text_color=t["error_text"],
+                )
+                logger.error("Failed to write .env: %s", e)
+                return
 
         # Also inject into current process for immediate availability
         os.environ["BOT_TOKEN_EXG"] = exg
         os.environ["BOT_TOKEN_HOL"] = hol
 
         self.activated = True
-        logger.info("API tokens activated and saved to keychain + .env")
+        if stored_in_keychain:
+            logger.info("API tokens activated and stored in OS keychain.")
+        else:
+            logger.info("API tokens activated and saved to .env (no keychain available).")
         self.grab_release()
         self.destroy()
 
@@ -247,6 +254,12 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
 
         with open(self._env_path, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
+
+        # SECURITY: restrict the plaintext .env to the owner only.
+        try:
+            os.chmod(self._env_path, 0o600)
+        except OSError:
+            pass
 
     def _on_close(self):
         self.activated = False

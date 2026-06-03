@@ -23,11 +23,35 @@ import os
 import platform
 import tempfile
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 from packaging.version import InvalidVersion, Version
 
 logger = logging.getLogger(__name__)
+
+# SECURITY (SSRF): only these hosts may be fetched for update assets.
+# GitHub serves release binaries from objects/release-assets subdomains.
+_ALLOWED_DOWNLOAD_HOSTS = frozenset({
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+})
+
+
+def _is_allowed_download_url(url: str) -> bool:
+    """Return True only for https URLs whose host is in the allowlist.
+
+    Used to block SSRF: a tampered GitHub API response (or a malicious
+    redirect) could otherwise point the downloader at an arbitrary host.
+    """
+    try:
+        parsed = urlparse(url)
+    except (ValueError, AttributeError):
+        return False
+    if parsed.scheme != "https":
+        return False
+    return (parsed.hostname or "").lower() in _ALLOWED_DOWNLOAD_HOSTS
 
 GITHUB_RELEASES_URL = (
     "https://api.github.com/repos/Dry1ceD7/BOT-Exchange-Rates/releases/latest"
@@ -237,8 +261,19 @@ def _fetch_expected_checksum(sha256_url: str) -> Optional[str]:
     (optionally followed by a filename, like sha256sum output).
     Returns the hex digest string, or None on any error.
     """
+    if not _is_allowed_download_url(sha256_url):
+        logger.warning("Refusing checksum fetch from non-allowlisted host: %s", sha256_url)
+        return None
     try:
-        resp = httpx.get(sha256_url, timeout=10.0, follow_redirects=True)
+        # follow_redirects=False + manual host validation prevents a
+        # redirect from leading us off the allowlist (SSRF).
+        resp = httpx.get(sha256_url, timeout=10.0, follow_redirects=False)
+        while resp.is_redirect:
+            location = resp.headers.get("location", "")
+            if not _is_allowed_download_url(location):
+                logger.warning("Checksum redirect to non-allowlisted host blocked: %s", location)
+                return None
+            resp = httpx.get(location, timeout=10.0, follow_redirects=False)
         resp.raise_for_status()
         # Format: "abcdef123456...  filename.exe" or just "abcdef123456..."
         line = resp.text.strip().split()[0]
@@ -280,8 +315,17 @@ def download_update(
       - File lock conflicts with the running application
       - Writing into the inner PyInstaller _MEIXXXXXX folder
 
-    v3.2.2: If expected_sha256 is provided, verify file integrity
-    after download. The download is rejected if the hash does not match.
+    SECURITY (integrity, HIGH): expected_sha256 is now MANDATORY. If it is
+    absent — or does not match — the download is rejected and the installer
+    is NEVER executed. There is currently no detached-signature mechanism on
+    the release pipeline, so the residual limitation is that integrity rests
+    on the sha256 published alongside the release; a sufficiently capable
+    MITM that controls BOTH the binary and its .sha256 over TLS could still
+    substitute a matching pair. TLS + the host allowlist below mitigate this.
+
+    SECURITY (SSRF, HIGH): the url and every redirect hop must be https and
+    on the host allowlist. follow_redirects is disabled and each hop is
+    validated manually.
 
     The Inno Setup installer will then copy files to the correct
     install directory via the /DIR= flag.
@@ -291,12 +335,28 @@ def download_update(
         dest_dir: Where to save (defaults to system temp dir)
         filename: Override filename (defaults to URL basename)
         progress_cb: Optional callback(downloaded_bytes, total_bytes)
-        expected_sha256: Optional hex SHA-256 hash to verify download
+        expected_sha256: REQUIRED hex SHA-256 hash to verify download
 
     Returns:
         {"path": str | None, "error": str | None}
     """
     result = {"path": None, "error": None}
+
+    # SECURITY: integrity verification is mandatory. Refuse to download (and
+    # therefore refuse to ever run) a binary we cannot verify.
+    if not expected_sha256:
+        result["error"] = (
+            "Refusing update: no SHA-256 checksum available for integrity "
+            "verification. The release must publish a .sha256 checksum."
+        )
+        logger.error("download_update blocked: missing expected_sha256")
+        return result
+
+    # SECURITY: enforce https + host allowlist before fetching.
+    if not _is_allowed_download_url(url):
+        result["error"] = f"Refusing update: download host not allowed: {url}"
+        logger.error("download_update blocked non-allowlisted URL: %s", url)
+        return result
 
     # v3.1.2: Always download to temp directory
     if dest_dir is None:
@@ -311,29 +371,51 @@ def download_update(
     final_path = os.path.join(dest_dir, filename)
 
     try:
-        with httpx.stream(
-            "GET", url, follow_redirects=True, timeout=120.0
-        ) as resp:
-            resp.raise_for_status()
-            total = int(resp.headers.get("content-length", 0))
-            downloaded = 0
+        # SECURITY: follow_redirects=False; validate each hop against the
+        # allowlist so a redirect cannot smuggle us to an arbitrary host.
+        stream_url = url
+        for _ in range(5):  # bounded redirect chain
+            with httpx.stream(
+                "GET", stream_url, follow_redirects=False, timeout=120.0
+            ) as resp:
+                if resp.is_redirect:
+                    location = resp.headers.get("location", "")
+                    if not _is_allowed_download_url(location):
+                        result["error"] = (
+                            f"Refusing update: redirect to non-allowlisted "
+                            f"host: {location}"
+                        )
+                        logger.error(
+                            "download_update blocked redirect: %s", location
+                        )
+                        return result
+                    stream_url = location
+                    continue
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length", 0))
+                downloaded = 0
 
-            with open(tmp_path, "wb") as f:
-                for chunk in resp.iter_bytes(chunk_size=65536):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if progress_cb and total > 0:
-                        progress_cb(downloaded, total)
+                with open(tmp_path, "wb") as f:
+                    for chunk in resp.iter_bytes(chunk_size=65536):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_cb and total > 0:
+                            progress_cb(downloaded, total)
+                break
+        else:
+            # Redirect chain exceeded the bound without a final response.
+            result["error"] = "Refusing update: too many redirects"
+            logger.error("download_update blocked: redirect limit exceeded")
+            return result
 
-        # Verify integrity if a checksum was provided
-        if expected_sha256:
-            if not _verify_file_sha256(tmp_path, expected_sha256):
-                os.remove(tmp_path)
-                result["error"] = (
-                    "Download integrity check failed (SHA-256 mismatch). "
-                    "The file may be corrupted or tampered with."
-                )
-                return result
+        # SECURITY: integrity is mandatory — verify or reject.
+        if not _verify_file_sha256(tmp_path, expected_sha256):
+            os.remove(tmp_path)
+            result["error"] = (
+                "Download integrity check failed (SHA-256 mismatch). "
+                "The file may be corrupted or tampered with."
+            )
+            return result
 
         # Rename from .downloading to final filename
         if os.path.exists(final_path):
@@ -413,9 +495,27 @@ def apply_update(
                 install_dir,
             )
 
-            bat_path = os.path.join(
-                tempfile.gettempdir(), "bot_exrate_updater.bat"
-            )
+            # SECURITY (TOCTOU): write the helper script into a private
+            # per-run directory created with mode 0700 instead of a fixed,
+            # predictable path in the shared temp dir. This prevents another
+            # local user from pre-creating / racing the .bat file. Verify the
+            # directory is owned by us before using it.
+            work_dir = tempfile.mkdtemp(prefix="bot_exrate_upd_")
+            try:
+                os.chmod(work_dir, 0o700)
+            except OSError:
+                pass
+            try:
+                st = os.stat(work_dir)
+                if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
+                    result["error"] = "Update workspace ownership check failed"
+                    logger.error("apply_update: temp dir not owned by current user")
+                    return result
+            except OSError as e:
+                result["error"] = f"Could not stat update workspace: {e}"
+                return result
+
+            bat_path = os.path.join(work_dir, "bot_exrate_updater.bat")
 
             # H-02: Validate paths — reject shell metacharacters
             _UNSAFE_CHARS = set('&|<>^%!')
@@ -441,6 +541,12 @@ def apply_update(
                 f.write(f'start "" "{current_exe}"\n')
                 # Self-delete batch file
                 f.write('del "%~f0"\n')
+
+            # SECURITY: restrict the helper script to the owner only.
+            try:
+                os.chmod(bat_path, 0o600)
+            except OSError:
+                pass
 
             if sys.platform == "win32":
                 flags = 0x00000008  # DETACHED_PROCESS

@@ -37,3 +37,29 @@ def test_global_exception_handler_writes_error_log_to_data_logs(tmp_path, monkey
         content = f.read()
     assert "--- FATAL ERROR ---" in content
     assert "RuntimeError: boom" in content
+
+
+def test_sentry_scrubber_redacts_tokens(monkeypatch):
+    """SECURITY: the Sentry before_send scrubber replaces token values."""
+    monkeypatch.setenv("BOT_TOKEN_EXG", "exgsecretAAA")
+    monkeypatch.setenv("BOT_TOKEN_HOL", "holsecretBBB")
+    main = _import_main_with_fake_tk(monkeypatch)
+
+    event = {
+        "message": "failed with token exgsecretAAA",
+        "extra": {"hdr": "Bearer holsecretBBB", "ok": "fine"},
+        "list": ["exgsecretAAA", 1],
+    }
+    scrubbed = main._sentry_token_scrubber(event, {})
+    assert "exgsecretAAA" not in str(scrubbed)
+    assert "holsecretBBB" not in str(scrubbed)
+    assert scrubbed["extra"]["ok"] == "fine"
+
+
+def test_sentry_scrubber_noop_without_tokens(monkeypatch):
+    """Scrubber returns event unchanged when no tokens are set."""
+    monkeypatch.delenv("BOT_TOKEN_EXG", raising=False)
+    monkeypatch.delenv("BOT_TOKEN_HOL", raising=False)
+    main = _import_main_with_fake_tk(monkeypatch)
+    event = {"message": "hello"}
+    assert main._sentry_token_scrubber(event, {}) == event

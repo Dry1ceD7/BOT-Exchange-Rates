@@ -7,6 +7,7 @@ Unit tests for core/api_client.py — BOTClient with mocked HTTP responses.
 """
 
 import asyncio
+import logging
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,6 +18,7 @@ from core.api_client import (
     BOTClient,
     BOTHolidayDetail,
     BOTRateDetail,
+    TokenRedactionFilter,
 )
 
 # =========================================================================
@@ -211,7 +213,9 @@ class TestBOTClient:
         mock_resp.raise_for_status = MagicMock()
         mock_http_client.get = AsyncMock(return_value=mock_resp)
 
-        with pytest.raises(BOTAPIError, match="Schema mismatch"):
+        # SECURITY: generic message — raw ValidationError (response body)
+        # must NOT be surfaced to the user.
+        with pytest.raises(BOTAPIError, match="unexpected schema"):
             asyncio.run(bot_client.get_exchange_rates(
                 date(2025, 3, 10), date(2025, 3, 10), "USD"
             ))
@@ -243,3 +247,40 @@ class TestBOTClient:
 
         assert mock_http_client.get.call_count == 2
         assert len(rates) == 2  # 1 result per chunk * 2 chunks
+
+
+# =========================================================================
+#  TOKEN REDACTION LOGGING FILTER (security)
+# =========================================================================
+
+class TestTokenRedactionFilter:
+    """The filter must scrub token values out of log records."""
+
+    def _make_record(self, msg, args=()):
+        return logging.LogRecord(
+            name="test", level=logging.WARNING, pathname=__file__,
+            lineno=1, msg=msg, args=args, exc_info=None,
+        )
+
+    def test_scrubs_token_from_message(self, monkeypatch):
+        monkeypatch.setenv("BOT_TOKEN_EXG", "supersecrettoken123")
+        f = TokenRedactionFilter()
+        rec = self._make_record("requesting with token supersecrettoken123 done")
+        assert f.filter(rec) is True
+        assert "supersecrettoken123" not in rec.getMessage()
+        assert "***" in rec.getMessage()
+
+    def test_scrubs_token_in_args(self, monkeypatch):
+        monkeypatch.setenv("BOT_TOKEN_HOL", "holtoken999")
+        f = TokenRedactionFilter()
+        rec = self._make_record("header=%s", ("holtoken999",))
+        assert f.filter(rec) is True
+        assert "holtoken999" not in rec.getMessage()
+
+    def test_passes_through_when_no_token(self, monkeypatch):
+        monkeypatch.delenv("BOT_TOKEN_EXG", raising=False)
+        monkeypatch.delenv("BOT_TOKEN_HOL", raising=False)
+        f = TokenRedactionFilter()
+        rec = self._make_record("nothing secret here")
+        assert f.filter(rec) is True
+        assert rec.getMessage() == "nothing secret here"

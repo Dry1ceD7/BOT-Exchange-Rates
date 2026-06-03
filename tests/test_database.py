@@ -211,3 +211,115 @@ class TestThreadSafety:
         t2.join()
 
         assert len(errors) == 0, f"Thread errors: {errors}"
+
+
+# =========================================================================
+#  CONNECTION-PER-THREAD (fix #4)
+# =========================================================================
+
+class TestConnectionPerThread:
+    """Each thread should get its own sqlite3 connection."""
+
+    def test_distinct_connections_per_thread(self, db):
+        ids = {}
+
+        def grab(tag):
+            ids[tag] = id(db._conn())
+
+        main_conn = id(db._conn())
+        threads = [threading.Thread(target=grab, args=(i,)) for i in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Each worker thread's connection differs from the main thread's.
+        assert all(cid != main_conn for cid in ids.values())
+        # Same thread reuses its connection.
+        assert id(db._conn()) == main_conn
+
+    def test_write_visible_across_threads(self, db):
+        """A write committed on one thread is readable on another (WAL)."""
+        d = date(2025, 5, 1)
+        db.insert_rate(d, usd_buying=30.0, usd_selling=30.1)
+
+        result = {}
+
+        def reader():
+            result["row"] = db.get_rate(d)
+
+        t = threading.Thread(target=reader)
+        t.start()
+        t.join()
+
+        assert result["row"] is not None
+        assert result["row"]["usd_buying"] == Decimal("30.0")
+
+
+# =========================================================================
+#  LIFECYCLE: close / atexit / context manager (fix #5)
+# =========================================================================
+
+class TestLifecycle:
+    """Tests for close(), context-manager, and WAL checkpoint."""
+
+    def test_context_manager_closes(self, tmp_path):
+        tmp = str(tmp_path / "ctx.db")
+        with CacheDB(db_path=tmp) as cache:
+            cache.insert_rate(date(2025, 1, 1), usd_buying=1.0, usd_selling=1.1)
+        # After exit, the connection set is empty (closed).
+        assert cache._closed is True
+
+    def test_close_is_idempotent(self, tmp_path):
+        tmp = str(tmp_path / "idem.db")
+        cache = CacheDB(db_path=tmp)
+        cache.close()
+        cache.close()  # second close must not raise
+        assert cache._closed is True
+
+    def test_close_truncates_wal(self, tmp_path):
+        """After close, WAL checkpoint(TRUNCATE) should shrink the -wal file."""
+        tmp = str(tmp_path / "wal.db")
+        cache = CacheDB(db_path=tmp)
+        cache.insert_rates_bulk([
+            (f"2025-06-{d:02d}", 33.0, 33.1, 36.0, 36.1) for d in range(1, 28)
+        ])
+        cache.close()
+        wal = tmp + "-wal"
+        # WAL is either removed or truncated to zero bytes after checkpoint.
+        assert (not os.path.exists(wal)) or os.path.getsize(wal) == 0
+
+
+# =========================================================================
+#  SCHEMA MIGRATION (fix #9)
+# =========================================================================
+
+class TestSchemaMigration:
+    """Idempotent guarded migration from the old 2-column schema."""
+
+    def test_migrates_old_schema_and_backfills(self, tmp_path):
+        import sqlite3
+        tmp = str(tmp_path / "legacy.db")
+        # Build an OLD-schema DB by hand.
+        raw = sqlite3.connect(tmp)
+        raw.execute(
+            "CREATE TABLE rates (date TEXT PRIMARY KEY, usd_rate REAL, eur_rate REAL)"
+        )
+        raw.execute(
+            "INSERT INTO rates (date, usd_rate, eur_rate) VALUES ('2025-01-02', 33.5, 36.5)"
+        )
+        raw.commit()
+        raw.close()
+
+        # Opening via CacheDB should migrate without error.
+        cache = CacheDB(db_path=tmp)
+        row = cache.get_rate(date(2025, 1, 2))
+        assert row["usd_buying"] == Decimal("33.5")
+        assert row["usd_selling"] == Decimal("33.5")
+        assert row["eur_buying"] == Decimal("36.5")
+        cache.close()
+
+        # Re-opening (migration runs again) must be idempotent.
+        cache2 = CacheDB(db_path=tmp)
+        assert cache2.get_rate(date(2025, 1, 2))["usd_buying"] == Decimal("33.5")
+        cache2.close()

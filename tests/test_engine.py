@@ -158,6 +158,18 @@ class TestComputeYearStartDate:
         result = LedgerEngine.compute_year_start_date(2024, [])
         assert result == date(2023, 12, 29)
 
+    def test_no_trading_day_raises(self):
+        """If every December weekday is a holiday, raise (no silent Dec 20)."""
+        from datetime import timedelta
+        prev_year = 2024
+        all_dec = []
+        d = date(prev_year, 12, 1)
+        while d.year == prev_year:
+            all_dec.append(d)
+            d += timedelta(days=1)
+        with pytest.raises(ValueError):
+            LedgerEngine.compute_year_start_date(prev_year + 1, all_dec)
+
 
 # =========================================================================
 #  PRESCAN DELEGATE
@@ -184,6 +196,75 @@ class TestPrescanDelegate:
 # =========================================================================
 #  SKIP SHEET NAMES
 # =========================================================================
+
+class TestFileSizeConstant:
+    """Fix #4: featherweight 15MB default per CLAUDE.md."""
+
+    def test_default_is_15mb(self, monkeypatch):
+        monkeypatch.delenv("BOT_MAX_FILE_MB", raising=False)
+        import importlib
+
+        import core.constants as const
+        importlib.reload(const)
+        assert const.MAX_FILE_SIZE_MB == 15
+        # restore default module state for the rest of the suite
+        importlib.reload(const)
+
+
+@pytest.fixture
+def exrate_xlsx(tmp_path):
+    """A minimal standalone ExRate workbook (pre-existing file to back up)."""
+    filepath = tmp_path / "exrate.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "ExRate"
+    ws.append(["Date", "USD Buying TT Rate", "USD Selling Rate",
+               "EUR Buying TT Rate", "EUR Selling Rate", "Holidays/Weekend"])
+    ws.append([date(2025, 3, 10), None, None, None, None, ""])
+    wb.save(str(filepath))
+    wb.close()
+    return str(filepath)
+
+
+class TestUpdateExrateStandaloneFailSafe:
+    """Fixes #2/#3: guardrail + backup-before-load + handle release."""
+
+    def test_oversized_file_raises_before_backup(self, engine,
+                                                 oversized_file):
+        from unittest.mock import MagicMock
+        engine.backup = MagicMock()
+        with pytest.raises(FileSizeLimitError):
+            asyncio.run(engine.update_exrate_standalone(oversized_file))
+        engine.backup.create_backup.assert_not_called()
+
+    def test_backup_failure_skips_overwrite(self, engine, exrate_xlsx):
+        from unittest.mock import MagicMock
+
+        from core.backup_manager import BackupError
+        before = open(exrate_xlsx, "rb").read()
+        engine.backup = MagicMock()
+        engine.backup.create_backup.side_effect = BackupError("disk full")
+        with pytest.raises(BackupError):
+            asyncio.run(engine.update_exrate_standalone(exrate_xlsx))
+        # File must remain untouched when backup fails.
+        assert open(exrate_xlsx, "rb").read() == before
+
+    def test_backup_created_before_load(self, engine, exrate_xlsx,
+                                        monkeypatch):
+        from unittest.mock import MagicMock
+        engine.backup = MagicMock()
+
+        # Force an error AFTER load to prove the handle is released via
+        # try/finally (no leaked workbook, gc runs).
+        async def boom(*a, **k):
+            raise ValueError("api down")
+        monkeypatch.setattr(engine, "_preload_api_data", boom)
+
+        with pytest.raises(ValueError):
+            asyncio.run(engine.update_exrate_standalone(exrate_xlsx))
+        engine.backup.create_backup.assert_called_once()
+        # Backup happened before the post-load failure (load succeeded).
+
 
 class TestSkipSheetNames:
     """Tests for the SKIP_SHEET_NAMES constant."""

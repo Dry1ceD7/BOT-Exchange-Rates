@@ -139,14 +139,21 @@ class AutoScheduler:
         )
 
     def _schedule_next(self) -> None:
-        """Schedule the next poll check."""
-        if not self._running:
-            return
-        self._timer = threading.Timer(
-            self.POLL_INTERVAL_SECONDS, self._check_and_fire,
-        )
-        self._timer.daemon = True
-        self._timer.start()
+        """Schedule the next poll check.
+
+        Re-checks self._running and installs the new timer under the lock so a
+        timer-thread call cannot race stop(): if stop() already flipped
+        _running and cancelled the timer, we must not install a replacement.
+        """
+        with self._lock:
+            if not self._running:
+                return
+            timer = threading.Timer(
+                self.POLL_INTERVAL_SECONDS, self._check_and_fire,
+            )
+            timer.daemon = True
+            self._timer = timer
+            timer.start()
 
     def _check_and_fire(self) -> None:
         """Check if it's time to run, and if so, fire the callback."""
