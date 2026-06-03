@@ -831,7 +831,10 @@ class LedgerEngine:
                     for _label, api_field in rate_types.items():
                         val = getattr(rec, api_field, None)
                         if val is not None:
-                            rate_data[ccy][api_field][rec_date] = val
+                            # Mathematical Truth: quantize to 4dp Decimal, same
+                            # discipline as the standard USD/EUR path — never
+                            # write the raw API float.
+                            rate_data[ccy][api_field][rec_date] = safe_to_decimal(val)
 
             # Fetch holidays
             _status("Fetching holidays...")

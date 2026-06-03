@@ -232,6 +232,39 @@ class TestCustomMultiCurrency:
         assert cell.number_format == "0.0000"
         wb.close()
 
+    def test_raw_api_float_is_quantized_to_4dp(
+        self, exrate_file, temp_backup, tmp_cache,
+    ):
+        """Production BOTRateDetail fields are floats with arbitrary precision.
+
+        The custom path must apply the same safe_to_decimal 4dp quantization as
+        the standard USD/EUR path — never persist the raw API float. Feeds a
+        value with >4dp and asserts the stored value equals the 4dp-quantized
+        rate (Mathematical Truth), not the raw float.
+        """
+        from core.logic import safe_to_decimal
+
+        raw = 42.123456  # 6dp float, as the live API would return
+        dr = (date(2025, 3, 10), date(2025, 3, 10))
+        per_ccy = {
+            "GBP": [SimpleNamespace(
+                period="2025-03-10", currency="GBP",
+                buying_transfer=raw,
+                selling=None, buying_sight=None, mid_rate=None,
+            )],
+        }
+        _eng, out = self._run(
+            exrate_file, temp_backup, tmp_cache, per_ccy,
+            {"Buying TT": "buying_transfer"}, ["GBP"], dr,
+        )
+        wb = openpyxl.load_workbook(out)
+        ws = wb["ExRate"]
+        cell_val = ws.cell(row=2, column=2).value
+        # Quantized to exactly 4dp, matching the standard path's discipline.
+        assert _cell_decimal(cell_val) == safe_to_decimal(raw)
+        assert _cell_decimal(cell_val) != Decimal(str(raw))  # raw float NOT stored
+        wb.close()
+
     def test_stale_content_cleared_and_rewritten(
         self, exrate_file, temp_backup, tmp_cache,
     ):
