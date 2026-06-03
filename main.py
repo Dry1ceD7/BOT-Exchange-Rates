@@ -26,7 +26,7 @@ from tkinter import messagebox
 
 from dotenv import load_dotenv
 
-from core.paths import get_project_root
+from core.paths import get_project_root, harden_data_dirs
 
 # Securely load API Keys to os.environ BEFORE anything else
 ENV_PATH = os.path.join(get_project_root(), ".env")
@@ -122,6 +122,9 @@ def _ensure_directories():
     project_root = get_project_root()
     for subdir in ["data", "data/input", "data/backups", "data/logs"]:
         os.makedirs(os.path.join(project_root, subdir), exist_ok=True)
+    # Restrict data dir perms (0700) so cached rates, backups, and audit
+    # logs are not world-readable on shared/server-share installs.
+    harden_data_dirs(project_root)
 
 
 # ── Token Check + Registration Dialog ───────────────────────────────────
