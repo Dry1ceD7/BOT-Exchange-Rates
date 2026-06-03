@@ -20,6 +20,7 @@ from core.engine import (
     FileSizeLimitError,
     LedgerEngine,
 )
+from core.ledger_processing import prescan_target_dates, run_anomaly_check
 
 # =========================================================================
 #  FIXTURES
@@ -420,3 +421,95 @@ class TestProcessLedgerEndToEnd:
             assert f.read() == before
         # Backup must be skipped on dry runs.
         engine.backup.create_backup.assert_not_called()
+
+
+# =========================================================================
+#  LEDGER_PROCESSING — extracted near-pure helpers
+# =========================================================================
+
+class TestRunAnomalyCheck:
+    """Tests for the extracted run_anomaly_check function."""
+
+    def test_no_anomalies_returns_zero_and_no_emit(self):
+        class _Guard:
+            def check_rates_bulk(self, bundle):
+                # Bundle must carry all four labelled rate dicts.
+                assert set(bundle) == {
+                    "USD_buying_transfer", "USD_selling",
+                    "EUR_buying_transfer", "EUR_selling",
+                }
+                return []
+
+        emitted = []
+        count = run_anomaly_check(
+            _Guard(),
+            lambda msg, etype: emitted.append((msg, etype)),
+            {}, {}, {}, {},
+        )
+        assert count == 0
+        assert emitted == []
+
+    def test_anomalies_emit_warning_per_record(self):
+        anomaly = SimpleNamespace(
+            currency="USD", rate_type="selling",
+            check_date=date(2025, 3, 10),
+            pct_change=12.5, prev_value="33.0000", new_value="37.0000",
+        )
+
+        class _Guard:
+            def check_rates_bulk(self, bundle):
+                return [anomaly, anomaly]
+
+        emitted = []
+        count = run_anomaly_check(
+            _Guard(),
+            lambda msg, etype: emitted.append((msg, etype)),
+            {}, {}, {}, {},
+        )
+        assert count == 2
+        assert len(emitted) == 2
+        assert all(etype == "warning" for _msg, etype in emitted)
+        assert "ANOMALY" in emitted[0][0]
+
+
+class TestPrescanTargetDates:
+    """Tests for the extracted prescan_target_dates function."""
+
+    _COLS = {"source_date": "Date", "currency": "Cur", "out_rate": "EX Rate"}
+
+    def test_extracts_all_dates(self, sample_xlsx):
+        dates = prescan_target_dates(sample_xlsx, self._COLS)
+        assert dates == {
+            date(2025, 3, 10), date(2025, 3, 11), date(2025, 3, 12),
+        }
+
+    def test_skips_skip_sheet_names(self, tmp_path):
+        filepath = tmp_path / "with_exrate.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Jan"
+        ws.append(["Date", "Cur", "EX Rate"])
+        ws.append([date(2025, 6, 2), "USD", None])
+        # ExRate is a SKIP sheet — its dates must NOT be collected.
+        ws_ex = wb.create_sheet("ExRate")
+        ws_ex.append(["Date", "USD Buying TT Rate"])
+        ws_ex.append([date(1999, 1, 1), 1.0])
+        wb.save(str(filepath))
+        wb.close()
+
+        dates = prescan_target_dates(str(filepath), self._COLS)
+        assert dates == {date(2025, 6, 2)}
+        assert date(1999, 1, 1) not in dates
+
+    def test_emit_callback_invoked(self, sample_xlsx):
+        msgs = []
+        prescan_target_dates(
+            sample_xlsx, self._COLS, emit_fn=msgs.append,
+        )
+        assert msgs == ["Scanning dates from workbook"]
+
+    def test_engine_method_delegates(self, engine, sample_xlsx):
+        """The engine shim returns identical results to the function."""
+        assert engine._prescan_target_dates(sample_xlsx) == prescan_target_dates(
+            sample_xlsx, engine.target_cols,
+        )

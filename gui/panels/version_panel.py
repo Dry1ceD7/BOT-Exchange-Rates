@@ -15,8 +15,8 @@ SFFB: Strict < 200 lines.
 
 import contextlib
 import logging
-import os
 import threading
+from pathlib import Path
 
 import customtkinter as ctk
 import httpx
@@ -454,7 +454,7 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
         # Run the installer silently if we have a downloaded file.
         # SECURITY: pass the expected SHA-256 so apply_update re-verifies the
         # file immediately before executing it (TOCTOU guard).
-        if installer and os.path.isfile(installer):
+        if installer and Path(installer).is_file():
             result = apply_update(
                 installer, expected_sha256=self._pending_sha256
             )

@@ -11,7 +11,7 @@ SFFB: Strict < 200 lines.  (Previously 731 → now ~130)
 """
 
 import logging
-import os
+from pathlib import Path
 
 import customtkinter as ctk
 
@@ -174,7 +174,7 @@ class SettingsModal(ctk.CTkToplevel):
         from core.paths import get_project_root
         from gui.panels.token_dialog import TokenRegistrationDialog
 
-        env_path = os.path.join(get_project_root(), ".env")
+        env_path = str(Path(get_project_root()) / ".env")
         dialog = TokenRegistrationDialog(
             self,
             env_path=env_path,

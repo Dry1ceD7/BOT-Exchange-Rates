@@ -15,6 +15,7 @@ import os
 import threading
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 
 from core.constants import (
     POLL_INTERVAL_SECONDS as _DEFAULT_POLL_INTERVAL,
@@ -24,8 +25,6 @@ from core.constants import (
 )
 
 logger = logging.getLogger(__name__)
-
-
 
 
 class AutoScheduler:
@@ -197,15 +196,19 @@ class AutoScheduler:
         seen = set()
 
         for path in self._watch_paths:
-            if not os.path.isdir(path):
+            if not Path(path).is_dir():
                 logger.debug("Watch path not found: %s", path)
                 continue
 
-            for fname in sorted(os.listdir(path)):
+            # Keep os.listdir + sorted(bare names) + os.path.join here: the
+            # returned `full` strings are fed to the processing engine and the
+            # os.path.normpath-based dedup is the exact identity check. Path
+            # iterdir/sort would change ordering and the path-string form.
+            for fname in sorted(os.listdir(path)):  # noqa: PTH208
                 if fname.startswith("."):
                     continue
                 if fname.lower().endswith(SUPPORTED_EXCEL_EXTENSIONS):
-                    full = os.path.join(path, fname)
+                    full = os.path.join(path, fname)  # noqa: PTH118
                     norm = os.path.normpath(full)
                     if norm not in seen:
                         seen.add(norm)

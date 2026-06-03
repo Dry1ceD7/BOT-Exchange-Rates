@@ -26,6 +26,7 @@ import subprocess
 import threading
 import tkinter
 from datetime import date, datetime
+from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -81,7 +82,6 @@ def parse_drop_data(raw: str, tk_root=None) -> list[str]:
 
 # Supported Excel extensions (openpyxl handles .xlsx and .xlsm natively)
 EXCEL_EXTENSIONS = (".xlsx", ".xlsm")
-OPENPYXL_NATIVE = (".xlsx", ".xlsm")
 
 
 def resolve_excel_files(paths: list[str], collect_rejected: bool = False):
@@ -97,20 +97,23 @@ def resolve_excel_files(paths: list[str], collect_rejected: bool = False):
     queue = []
     rejected = []
     for p in paths:
-        if os.path.isfile(p):
-            base = os.path.basename(p)
+        if Path(p).is_file():
+            base = Path(p).name
             if base.startswith("."):
                 continue
             if p.lower().endswith(EXCEL_EXTENSIONS):
                 queue.append(p)
             elif p.lower().endswith(UNSUPPORTED_EXTENSIONS):
                 rejected.append(p)
-        elif os.path.isdir(p):
-            for fname in sorted(os.listdir(p)):
+        elif Path(p).is_dir():
+            # Keep os.listdir + os.path.join: queued entries are full-path
+            # strings handed to the engine; sorting bare names then joining is
+            # the exact prior behavior the os.path.normpath dedup relies on.
+            for fname in sorted(os.listdir(p)):  # noqa: PTH208
                 if fname.startswith("."):
                     continue
                 if fname.lower().endswith(EXCEL_EXTENSIONS):
-                    queue.append(os.path.join(p, fname))
+                    queue.append(os.path.join(p, fname))  # noqa: PTH118
     seen = set()
     unique = []
     for f in queue:
@@ -196,22 +199,26 @@ class BOTExrateApp(ctk.CTk):
             # Resolve assets directory
             if getattr(sys, "frozen", False):
                 # Frozen (PyInstaller): assets bundled alongside exe
-                base_dir = os.path.dirname(sys.executable)
+                base_dir = Path(sys.executable).parent
             else:
-                # Source mode: project root
-                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                # Source mode: project root.
+                # noqa: PTH100,PTH120 — os.path.abspath avoids symlink
+                # resolution to keep the exact legacy base dir; wrap in Path
+                # for the joins below.
+                base_dir = Path(os.path.dirname(os.path.abspath(__file__))).parent  # noqa: PTH100, PTH120
 
-            ico_path = os.path.join(base_dir, "assets", "icon.ico")
-            png_path = os.path.join(base_dir, "assets", "icon.png")
+            ico_path = base_dir / "assets" / "icon.ico"
+            png_path = base_dir / "assets" / "icon.png"
 
             # Windows: use .ico for taskbar + title bar
-            if platform.system() == "Windows" and os.path.exists(ico_path):
-                self.iconbitmap(ico_path)
+            if platform.system() == "Windows" and ico_path.exists():
+                # Tk/Tcl expects a string path here.
+                self.iconbitmap(str(ico_path))
                 logger.info("Window icon set from: %s", ico_path)
             # All platforms: use .png via iconphoto for Tk title bar
-            elif os.path.exists(png_path):
+            elif png_path.exists():
                 try:
-                    icon_image = PhotoImage(file=png_path)
+                    icon_image = PhotoImage(file=str(png_path))
                 except tkinter.TclError:
                     # Fallback: use PIL to convert PNG → Tk-compatible format
                     try:
@@ -597,7 +604,7 @@ class BOTExrateApp(ctk.CTk):
         paths = parse_drop_data(event.data, tk_root=self)
         excel_files, rejected = resolve_excel_files(paths, collect_rejected=True)
         if rejected:
-            names = ", ".join(os.path.basename(f) for f in rejected)
+            names = ", ".join(Path(f).name for f in rejected)
             messagebox.showwarning(
                 "Format Warning",
                 f"These files use an unsupported format:\n{names}\n\n"
@@ -628,7 +635,7 @@ class BOTExrateApp(ctk.CTk):
         self.last_processed_path = None
         count = len(files)
         if count == 1:
-            self.dz_text.configure(text=os.path.basename(files[0]), text_color=_get_colors()["trust_blue"])
+            self.dz_text.configure(text=Path(files[0]).name, text_color=_get_colors()["trust_blue"])
         else:
             self.dz_text.configure(text=f"{count} ledgers loaded", text_color=_get_colors()["trust_blue"])
         self.dz_sub.configure(text="Click to change selection")
@@ -778,7 +785,7 @@ class BOTExrateApp(ctk.CTk):
         self.btn_revert.configure(state="disabled")
         self.btn_process.configure(state="disabled")
         self.lbl_status.configure(
-            text=f"Restoring:  {os.path.basename(path)}...",
+            text=f"Restoring:  {Path(path).name}...",
             text_color=_get_colors()["warning"]
         )
         self.progressbar.configure(mode="indeterminate")
@@ -813,11 +820,12 @@ class BOTExrateApp(ctk.CTk):
     # ================================================================== #
     def _reveal_file(self):
         fp = self.last_processed_path
-        if not fp or not os.path.exists(fp):
+        if not fp or not Path(fp).exists():
             return
-        # SEC-04: Validate path before passing to subprocess
+        # SEC-04: Validate path before passing to subprocess. os.path.realpath
+        # is kept deliberately (resolves symlinks for the security check).
         fp = os.path.realpath(fp)
-        if not os.path.isfile(fp):
+        if not Path(fp).is_file():
             logger.warning("Reveal target is not a file: %s", fp)
             return
         try:
@@ -825,10 +833,12 @@ class BOTExrateApp(ctk.CTk):
             if system == "Darwin":
                 subprocess.Popen(["open", "-R", fp])
             elif system == "Windows":
+                # os.path.normpath kept: shell needs the native path string.
                 subprocess.Popen(["explorer", "/select,", os.path.normpath(fp)])
             else:
-                parent = os.path.dirname(fp)
-                if os.path.isdir(parent):
+                # Keep parent as str: handed to the xdg-open subprocess.
+                parent = str(Path(fp).parent)
+                if Path(parent).is_dir():
                     subprocess.Popen(["xdg-open", parent])
         except OSError as e:
             logger.debug("File manager open failed: %s", e)

@@ -11,8 +11,8 @@ Now pushes structured events to the EventBus for LiveConsole rendering.
 
 import asyncio
 import logging
-import os
 import threading
+from pathlib import Path
 
 import httpx
 
@@ -167,7 +167,7 @@ class BatchHandler:
 
     def start_revert(self, filepath: str):
         """Launch the revert operation in a background thread."""
-        self.bus.push({"type": "log", "msg": f"Reverting: {os.path.basename(filepath)}..."})
+        self.bus.push({"type": "log", "msg": f"Reverting: {Path(filepath).name}..."})
         thread = threading.Thread(
             target=self._revert_thread,
             args=(filepath,),
@@ -184,7 +184,7 @@ class BatchHandler:
         try:
             backup_mgr = BackupManager()
             backup_used = backup_mgr.restore_latest(filepath)
-            backup_name = os.path.basename(backup_used)
+            backup_name = Path(backup_used).name
             self.bus.push({"type": "success", "msg": f"Reverted from: {backup_name}"})
             try:
                 self.app.after(

@@ -12,9 +12,9 @@ v3.2.2: In-memory caching to avoid re-reading disk on every get() call.
 
 import json
 import logging
-import os
 import tempfile
 import threading
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -45,9 +45,10 @@ class SettingsManager:
         if config_dir is None:
             from core.paths import get_project_root
             project_root = get_project_root()
-            config_dir = os.path.join(project_root, "data")
+            config_dir = str(Path(project_root) / "data")
         self._config_dir = config_dir
-        self._filepath = os.path.join(config_dir, SETTINGS_FILENAME)
+        # Keep _filepath as str: consumed by open()/json and os.replace below.
+        self._filepath = str(Path(config_dir) / SETTINGS_FILENAME)
         self._cache: dict[str, Any] | None = None
         self._lock = threading.Lock()
 
@@ -67,11 +68,11 @@ class SettingsManager:
         with self._lock:
             if not force and self._cache is not None:
                 return dict(self._cache)
-            if not os.path.exists(self._filepath):
+            if not Path(self._filepath).exists():
                 self._cache = dict(DEFAULT_SETTINGS)
                 return dict(DEFAULT_SETTINGS)
             try:
-                with open(self._filepath, encoding="utf-8") as f:
+                with Path(self._filepath).open(encoding="utf-8") as f:
                     data = json.load(f)
                 # Merge with defaults to fill any missing keys
                 merged = dict(DEFAULT_SETTINGS)
@@ -99,7 +100,7 @@ class SettingsManager:
 
     def _save_locked(self, settings: dict[str, Any]) -> None:
         """Persist settings to disk and update cache. Caller holds the lock."""
-        os.makedirs(self._config_dir, exist_ok=True)
+        Path(self._config_dir).mkdir(parents=True, exist_ok=True)
         merged = dict(DEFAULT_SETTINGS)
         merged.update(settings)
         tmp_path: str | None = None
@@ -114,18 +115,19 @@ class SettingsManager:
             ) as tmp:
                 json.dump(merged, tmp, indent=2, ensure_ascii=False)
                 tmp_path = tmp.name
-            os.replace(tmp_path, self._filepath)
+            # Path.replace is os.replace under the hood — atomic same-FS rename.
+            Path(tmp_path).replace(self._filepath)
         except OSError:
             try:
-                if tmp_path and os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                if tmp_path and Path(tmp_path).exists():
+                    Path(tmp_path).unlink()
             except OSError:
                 pass
             raise
         finally:
             try:
-                if tmp_path and os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                if tmp_path and Path(tmp_path).exists():
+                    Path(tmp_path).unlink()
             except OSError:
                 pass
         self._cache = merged

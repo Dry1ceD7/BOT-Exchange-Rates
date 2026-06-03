@@ -22,6 +22,7 @@ import tempfile
 import threading
 from collections.abc import Callable
 from multiprocessing.connection import Client, Listener
+from pathlib import Path
 
 from core.constants import IPC_NONCE_LENGTH
 
@@ -38,10 +39,13 @@ def _ipc_runtime_dir() -> str:
         uid = os.getuid()  # POSIX only
     except AttributeError:  # pragma: no cover - non-POSIX
         uid = 0
-    d = os.path.join(tempfile.gettempdir(), f"bot_exrate_{uid}")
+    # Keep d as str: it is joined into the IPC socket address, which
+    # multiprocessing.connection requires to be a plain string.
+    d = str(Path(tempfile.gettempdir()) / f"bot_exrate_{uid}")
     try:
-        os.makedirs(d, exist_ok=True)
-        os.chmod(d, 0o700)
+        dir_path = Path(d)
+        dir_path.mkdir(parents=True, exist_ok=True)
+        dir_path.chmod(0o700)
     except OSError:
         pass
     return d
@@ -58,31 +62,32 @@ def _get_ipc_address() -> str:
         safe_user = "".join(c for c in user if c.isalnum()) or "default"
         return rf"\\.\pipe\bot_exrate_ipc_{safe_user}"
     # Per-user private dir, socket created 0700-protected.
-    return os.path.join(_ipc_runtime_dir(), "ipc.sock")
+    # multiprocessing.connection requires a str address on Unix.
+    return str(Path(_ipc_runtime_dir()) / "ipc.sock")
 
 def _lockfile_path() -> str:
     """Return the path to the IPC nonce lockfile."""
     from core.paths import get_project_root
-    return os.path.join(get_project_root(), "data", ".ipc_nonce")
+    return str(Path(get_project_root()) / "data" / ".ipc_nonce")
 
 
 def _generate_nonce() -> str:
     """Generate and persist a random nonce for IPC authentication."""
     nonce = secrets.token_hex(IPC_NONCE_LENGTH)
-    path = _lockfile_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    path = Path(_lockfile_path())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
         f.write(nonce)
     # Ensure only the owner can read/write this file
-    os.chmod(path, 0o600)
+    path.chmod(0o600)
     return nonce
 
 
 def _read_nonce() -> str | None:
     """Read the nonce from the lockfile, or None if missing."""
-    path = _lockfile_path()
+    path = Path(_lockfile_path())
     try:
-        with open(path, encoding="utf-8") as f:
+        with path.open(encoding="utf-8") as f:
             return f.read().strip()
     except (FileNotFoundError, OSError):
         return None
@@ -91,7 +96,7 @@ def _read_nonce() -> str | None:
 def _cleanup_nonce():
     """Remove the nonce lockfile on shutdown."""
     with contextlib.suppress(FileNotFoundError, OSError):
-        os.remove(_lockfile_path())
+        Path(_lockfile_path()).unlink()
 
 
 def ping_running_instance() -> bool:
@@ -137,13 +142,13 @@ class SingleInstanceServer:
         address = _get_ipc_address()
         try:
             # On Unix, if the socket wasn't cleaned up, remove it first
-            if sys.platform != "win32" and os.path.exists(address):
+            if sys.platform != "win32" and Path(address).exists():
                 try:
                     # Test if it's dead
                     with Client(address):
                         return False # Someone is still listening
                 except ConnectionRefusedError:
-                    os.remove(address) # It's a dead socket, safe to bind
+                    Path(address).unlink() # It's a dead socket, safe to bind
 
             # SECURITY: set a restrictive umask around bind so the socket is
             # never world-accessible in the window before chmod runs.
@@ -161,7 +166,7 @@ class SingleInstanceServer:
             # so other local users cannot connect and attempt RESTORE.
             if sys.platform != "win32":
                 with contextlib.suppress(OSError):
-                    os.chmod(address, 0o600)
+                    Path(address).chmod(0o600)
 
             # Generate authentication nonce for this session
             self._nonce = _generate_nonce()
@@ -243,7 +248,7 @@ class SingleInstanceServer:
         if sys.platform != "win32":
             try:
                 address = _get_ipc_address()
-                if os.path.exists(address):
-                    os.remove(address)
+                if Path(address).exists():
+                    Path(address).unlink()
             except OSError:
                 pass

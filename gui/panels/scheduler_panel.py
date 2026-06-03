@@ -17,6 +17,7 @@ Persists all configuration via core/config_manager.SettingsManager.
 import logging
 import os
 from collections.abc import Callable
+from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
@@ -201,7 +202,7 @@ class SchedulerPanel(ctk.CTkFrame):
             self._minute_var.set(parts[1])
 
         # Load paths
-        self._paths = [p for p in paths if os.path.isdir(p)]
+        self._paths = [p for p in paths if Path(p).is_dir()]
         self._refresh_path_list()
 
         # Set toggle (triggers _on_toggle which shows/hides content)
@@ -278,8 +279,11 @@ class SchedulerPanel(ctk.CTkFrame):
         self._path_list.configure(state="normal")
         self._path_list.delete("1.0", "end")
         for p in self._paths:
-            # Show abbreviated path for readability
-            display = os.path.basename(p) or p
+            # Show abbreviated path for readability.
+            # noqa: PTH119 — os.path.basename returns "" for a trailing-sep
+            # dir so the `or p` fallback shows the full path; Path.name would
+            # return the last segment instead. Keep exact display behavior.
+            display = os.path.basename(p) or p  # noqa: PTH119
             self._path_list.insert("end", f"📁 {display}\n")
         self._path_list.configure(state="disabled")
 
@@ -327,6 +331,5 @@ class SchedulerPanel(ctk.CTkFrame):
         )
         if hasattr(self, "_lbl_title"):
             self._lbl_title.configure(text_color=t["text_primary"])
-        if hasattr(self, "_lbl_status"):
-            # Don't override status color (success/warning) — only update if idle
-            pass
+        # _lbl_status color is intentionally left as-is so success/warning
+        # states survive a theme re-apply.

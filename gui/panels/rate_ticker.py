@@ -22,7 +22,6 @@ from gui.theme import MONO_FONT, get_theme
 logger = logging.getLogger(__name__)
 
 
-
 class RateTicker(SafePanel, ctk.CTkFrame):
     """
     Compact live rate display for the header bar.

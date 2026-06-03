@@ -46,7 +46,10 @@ def choose_path_to_remove(parent, paths: list[str]) -> int | None:
 
     selected = ctk.IntVar(value=0)
     for i, path in enumerate(paths):
-        label = os.path.basename(path) or path
+        # noqa: PTH119 — os.path.basename returns "" for a trailing-separator
+        # dir path so the `or path` fallback shows the full path; Path.name
+        # would return the last segment instead. Keep exact display behavior.
+        label = os.path.basename(path) or path  # noqa: PTH119
         ctk.CTkRadioButton(
             dialog, text=f"📁 {label}",
             variable=selected, value=i,

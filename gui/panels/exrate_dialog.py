@@ -10,9 +10,9 @@ Extracted from gui/app.py to reduce God Object line count.
 import asyncio
 import contextlib
 import logging
-import os
 import threading
 from datetime import date
+from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
@@ -385,7 +385,7 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
                 loop.run_until_complete(_run())
                 with contextlib.suppress(RuntimeError):
                     app.after(0, _done, True,
-                              f"✓ ExRate created: {os.path.basename(dest)}")
+                              f"✓ ExRate created: {Path(dest).name}")
             except (httpx.RequestError, httpx.HTTPStatusError,
                     OSError, ValueError) as e:
                 logger.error("ExRate standalone failed: %s", e)

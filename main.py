@@ -16,9 +16,12 @@ import os
 import sys
 import traceback
 import types
+from pathlib import Path
 
-# Explicitly insert current directory to Python Path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Explicitly insert current directory to Python Path.
+# noqa: PTH100,PTH120 — keep os.path's exact (no-symlink) string so the
+# sys.path entry matches the legacy bootstrap behavior on the frozen target.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # noqa: PTH100, PTH120
 
 import contextlib
 import tkinter as tk
@@ -28,8 +31,9 @@ from dotenv import load_dotenv
 
 from core.paths import get_project_root, harden_data_dirs
 
-# Securely load API Keys to os.environ BEFORE anything else
-ENV_PATH = os.path.join(get_project_root(), ".env")
+# Securely load API Keys to os.environ BEFORE anything else.
+# Keep ENV_PATH as str: passed to load_dotenv and TokenRegistrationDialog.
+ENV_PATH = str(Path(get_project_root()) / ".env")
 load_dotenv(dotenv_path=ENV_PATH)
 
 # ── Sentry Telemetry (v3.2.4) ───────────────────────────────────────────
@@ -85,15 +89,15 @@ if _SENTRY_DSN:
         pass  # Sentry is optional — never block app startup
 
 # ── Configure root logger — routes ALL log output to file + console ──────
-_LOG_DIR = os.path.join(get_project_root(), "data")
-os.makedirs(_LOG_DIR, exist_ok=True)
+_LOG_DIR = Path(get_project_root()) / "data"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(name)-24s  %(levelname)-7s  %(message)s",
     handlers=[
         logging.handlers.RotatingFileHandler(
-            os.path.join(_LOG_DIR, "app.log"),
+            _LOG_DIR / "app.log",
             maxBytes=5_000_000,   # 5 MB per file
             backupCount=3,        # keep app.log.1, .2, .3
             encoding="utf-8",
@@ -121,7 +125,7 @@ def _ensure_directories():
     """
     project_root = get_project_root()
     for subdir in ["data", "data/input", "data/backups", "data/logs"]:
-        os.makedirs(os.path.join(project_root, subdir), exist_ok=True)
+        (Path(project_root) / subdir).mkdir(parents=True, exist_ok=True)
     # Restrict data dir perms (0700) so cached rates, backups, and audit
     # logs are not world-readable on shared/server-share installs.
     harden_data_dirs(project_root)
@@ -221,19 +225,23 @@ def _run_headless(args: argparse.Namespace) -> None:
     # Collect files
     input_path = args.input
     if input_path is None:
-        input_path = os.path.join(get_project_root(), "data", "input")
+        # Keep input_path as str: compared with .lower()/.endswith below and
+        # used to build the sorted full-path processing list.
+        input_path = str(Path(get_project_root()) / "data" / "input")
 
-    if not os.path.exists(input_path):
+    if not Path(input_path).exists():
         print(f"ERROR: Input path not found: {input_path}")
         sys.exit(1)
 
     excel_exts = (".xlsx", ".xlsm")
-    if os.path.isfile(input_path):
+    if Path(input_path).is_file():
         files = [input_path] if input_path.lower().endswith(excel_exts) else []
     else:
+        # Keep os.listdir + os.path.join: `files` are full-path strings fed to
+        # the engine, and sorting the joined paths is the exact prior behavior.
         files = sorted([
-            os.path.join(input_path, f)
-            for f in os.listdir(input_path)
+            os.path.join(input_path, f)  # noqa: PTH118
+            for f in os.listdir(input_path)  # noqa: PTH208
             if f.lower().endswith(excel_exts) and not f.startswith(".")
         ])
 
@@ -329,11 +337,11 @@ def global_exception_handler(
         pass
 
     # Layer 2: Write to local error.log
-    log_dir = os.path.join(get_project_root(), "data", "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, "error.log")
+    log_dir = Path(get_project_root()) / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "error.log"
     try:
-        with open(log_path, "a", encoding="utf-8") as f:
+        with log_path.open("a", encoding="utf-8") as f:
             f.write(f"\n--- FATAL ERROR ---\n{error_msg}\n")
     except Exception:
         pass

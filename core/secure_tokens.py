@@ -13,6 +13,7 @@ v3.2.2: Replaces plaintext .env token storage with OS-native secure storage.
 import contextlib
 import logging
 import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -36,25 +37,26 @@ def _purge_env_file_token(env_key: str, env_path: str | None = None) -> None:
     if env_path is None:
         try:
             from core.paths import get_project_root
-            env_path = os.path.join(get_project_root(), ".env")
+            env_path = str(Path(get_project_root()) / ".env")
         except Exception:
             return
-    if not os.path.exists(env_path):
+    env_file = Path(env_path)
+    if not env_file.exists():
         return
     try:
-        with open(env_path, encoding="utf-8") as f:
+        with env_file.open(encoding="utf-8") as f:
             lines = f.readlines()
         kept = [
             ln for ln in lines
             if not ln.strip().startswith(f"{env_key}=")
         ]
         if kept != lines:
-            with open(env_path, "w", encoding="utf-8") as f:
+            with env_file.open("w", encoding="utf-8") as f:
                 f.writelines(kept)
             logger.debug("Purged '%s' from .env after keychain migration.", env_key)
         # Lock down the .env in case any other secrets remain
         with contextlib.suppress(OSError):
-            os.chmod(env_path, 0o600)
+            env_file.chmod(0o600)
     except OSError as e:
         logger.debug("Could not purge '%s' from .env: %s", env_key, e)
 

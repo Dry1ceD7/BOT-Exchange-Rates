@@ -13,8 +13,8 @@ Output: data/logs/Audit_Log_YYYYMMDD_HHMMSS.csv
 import atexit
 import csv
 import logging
-import os
 from datetime import datetime
+from pathlib import Path
 
 from core.constants import csv_safe
 from core.paths import get_project_root
@@ -52,18 +52,18 @@ class AuditLogger:
 
     def __init__(self, log_dir: str | None = None):
         if log_dir is None:
-            log_dir = os.path.join(get_project_root(), "data", "logs")
-        os.makedirs(log_dir, exist_ok=True)
+            log_dir = str(Path(get_project_root()) / "data" / "logs")
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._filepath = os.path.join(
-            log_dir, f"Audit_Log_{timestamp}.csv"
-        )
+        # Keep _filepath as str: returned via the .filepath property and
+        # finalize(); callers treat it as a string path.
+        self._filepath = str(Path(log_dir) / f"Audit_Log_{timestamp}.csv")
         # Long-lived handle held for the object's lifetime; released via
         # __exit__/close()/atexit. A context manager here would close it
         # prematurely, so SIM115 does not apply.
-        self._file = open(  # noqa: SIM115
-            self._filepath, "w", newline="", encoding="utf-8-sig"
+        self._file = Path(self._filepath).open(  # noqa: SIM115
+            "w", newline="", encoding="utf-8-sig"
         )
         self._writer = csv.writer(self._file)
         self._writer.writerow(self.HEADERS)

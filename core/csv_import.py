@@ -16,9 +16,9 @@ export -> import -> export cycle is data-identical.
 
 import csv
 import logging
-import os
 import re
 from decimal import Decimal
+from pathlib import Path
 
 from core.constants import parse_date, parse_decimal_safe, to_float
 
@@ -59,10 +59,11 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
         ValueError: If the file is oversized, the format is unrecognizable,
             or a non-empty file imported zero rows (silent mis-parse guard).
     """
-    if not os.path.exists(csv_path):
+    csv_file = Path(csv_path)
+    if not csv_file.exists():
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
-    size = os.path.getsize(csv_path)
+    size = csv_file.stat().st_size
     if size > MAX_CSV_BYTES:
         raise ValueError(
             f"CSV file too large: {size} bytes exceeds limit of {MAX_CSV_BYTES}."
@@ -76,7 +77,7 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
             cache_db.insert_multi_rates_bulk(multi_entries)
             multi_entries.clear()
 
-    with open(csv_path, encoding="utf-8-sig") as f:
+    with csv_file.open(encoding="utf-8-sig") as f:
         sample = f.read(4096)
         f.seek(0)
 

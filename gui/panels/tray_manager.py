@@ -24,6 +24,7 @@ import os
 import platform
 import sys
 import threading
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +45,16 @@ def _load_tray_icon() -> "Image.Image | None":
         return None
     try:
         if getattr(sys, "frozen", False):
-            base = os.path.dirname(sys.executable)
+            base = Path(sys.executable).parent
         else:
-            base = os.path.dirname(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            )
+            # os.path.abspath avoids symlink resolution to keep the exact
+            # legacy base dir; wrap in Path for the joins below.
+            base_str = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # noqa: PTH100, PTH120
+            base = Path(base_str)
         # Try .ico first (best for Windows tray), then .png
         for name in ("icon.ico", "icon.png"):
-            path = os.path.join(base, "assets", name)
-            if os.path.exists(path):
+            path = base / "assets" / name
+            if path.exists():
                 return Image.open(path)
         # Fallback: generate a tiny coloured square
         img = Image.new("RGB", (64, 64), color=(59, 130, 246))

@@ -14,8 +14,8 @@ SFFB: Strict < 200 lines.
 """
 
 import logging
-import os
 from collections.abc import Callable
+from pathlib import Path
 
 import customtkinter as ctk
 
@@ -125,7 +125,7 @@ class ControlPanel(ctk.CTkFrame):
         count = len(files)
         if count == 1:
             self._dz_text.configure(
-                text=os.path.basename(files[0]),
+                text=Path(files[0]).name,
                 text_color=t["trust_blue"],
             )
         else:

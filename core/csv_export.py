@@ -23,7 +23,7 @@ wide BOT format).
 
 import csv
 import logging
-import os
+from pathlib import Path
 
 from core.constants import csv_safe, format_rate_value
 
@@ -51,9 +51,10 @@ def export_rates_csv(csv_path: str, cache_db) -> int:
 
     rows = cache_db.get_all_multi_rates()
 
-    os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+    # Path.parent is "." for a bare filename, matching the old `or "."`.
+    Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
 
-    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+    with Path(csv_path).open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerow(MULTI_HEADERS)
 

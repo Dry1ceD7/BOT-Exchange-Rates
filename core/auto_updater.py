@@ -23,6 +23,7 @@ import logging
 import os
 import platform
 import tempfile
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -97,7 +98,7 @@ def get_install_dir() -> str | None:
                         install_loc, _ = winreg.QueryValueEx(
                             key, "InstallLocation"
                         )
-                        if install_loc and os.path.isdir(install_loc):
+                        if install_loc and Path(install_loc).is_dir():
                             logger.info(
                                 "Install dir from registry: %s", install_loc
                             )
@@ -112,12 +113,16 @@ def get_install_dir() -> str | None:
 
     # ── Strategy 2: sys.executable parent (frozen apps) ──────────────
     if getattr(sys, "frozen", False):
-        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        # noqa: PTH100,PTH120 — this install-dir string is later interpolated
+        # into the installer /DIR= flag; keep os.path's exact (no-symlink)
+        # normalization rather than Path.resolve()'s symlink resolution.
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))  # noqa: PTH100, PTH120
         logger.info("Install dir from sys.executable: %s", exe_dir)
         return exe_dir
 
     # ── Strategy 3: Development mode — project root ──────────────────
-    dev_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # noqa: PTH100,PTH120 — same exact-string requirement as above.
+    dev_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # noqa: PTH100, PTH120
     logger.info("Install dir from dev root: %s", dev_root)
     return dev_root
 
@@ -287,7 +292,7 @@ def fetch_expected_checksum(sha256_url: str) -> str | None:
 def _verify_file_sha256(filepath: str, expected_hash: str) -> bool:
     """Verify that a file's SHA-256 matches the expected hash."""
     sha256 = hashlib.sha256()
-    with open(filepath, "rb") as f:
+    with Path(filepath).open("rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             sha256.update(chunk)
     actual = sha256.hexdigest().lower()
@@ -364,15 +369,16 @@ def download_update(
     if dest_dir is None:
         dest_dir = tempfile.mkdtemp(prefix="bot_exrate_dl_")
         with contextlib.suppress(OSError):
-            os.chmod(dest_dir, 0o700)
+            Path(dest_dir).chmod(0o700)
 
     if filename is None:
         filename = url.rsplit("/", 1)[-1] if "/" in url else "update.exe"
 
-    # Download with a .tmp suffix to avoid partial overwrites
+    # Download with a .tmp suffix to avoid partial overwrites.
+    # Keep tmp_path/final_path as str: final_path is returned to callers.
     tmp_filename = filename + ".downloading"
-    tmp_path = os.path.join(dest_dir, tmp_filename)
-    final_path = os.path.join(dest_dir, filename)
+    tmp_path = str(Path(dest_dir) / tmp_filename)
+    final_path = str(Path(dest_dir) / filename)
 
     try:
         # SECURITY: follow_redirects=False; validate each hop against the
@@ -399,7 +405,7 @@ def download_update(
                 total = int(resp.headers.get("content-length", 0))
                 downloaded = 0
 
-                with open(tmp_path, "wb") as f:
+                with Path(tmp_path).open("wb") as f:
                     for chunk in resp.iter_bytes(chunk_size=65536):
                         f.write(chunk)
                         downloaded += len(chunk)
@@ -414,7 +420,7 @@ def download_update(
 
         # SECURITY: integrity is mandatory — verify or reject.
         if not _verify_file_sha256(tmp_path, expected_sha256):
-            os.remove(tmp_path)
+            Path(tmp_path).unlink()
             result["error"] = (
                 "Download integrity check failed (SHA-256 mismatch). "
                 "The file may be corrupted or tampered with."
@@ -422,9 +428,9 @@ def download_update(
             return result
 
         # Rename from .downloading to final filename
-        if os.path.exists(final_path):
-            os.remove(final_path)
-        os.rename(tmp_path, final_path)
+        if Path(final_path).exists():
+            Path(final_path).unlink()
+        Path(tmp_path).rename(final_path)
 
         result["path"] = final_path
         logger.info("Update downloaded to: %s", final_path)
@@ -432,9 +438,9 @@ def download_update(
         logger.error("Download failed: %s", e)
         result["error"] = str(e)
         # Cleanup partial download
-        if os.path.exists(tmp_path):
+        if Path(tmp_path).exists():
             with contextlib.suppress(OSError):
-                os.remove(tmp_path)
+                Path(tmp_path).unlink()
     return result
 
 
@@ -494,7 +500,7 @@ def apply_update(
         )
         logger.error("apply_update blocked: missing expected_sha256")
         return result
-    if not os.path.isfile(new_exe_path):
+    if not Path(new_exe_path).is_file():
         result["error"] = (
             f"Refusing to apply update: installer not found at {new_exe_path}"
         )
@@ -517,8 +523,11 @@ def apply_update(
         return result
 
     result["install_dir"] = install_dir
-    current_exe = os.path.join(install_dir, "BOT-ExRate.exe")
-    filename = os.path.basename(new_exe_path).lower()
+    # noqa: PTH118 — current_exe is interpolated verbatim into the Windows
+    # .bat updater script and validated against shell metacharacters; keep
+    # os.path.join's exact separator/string behavior for the frozen target.
+    current_exe = os.path.join(install_dir, "BOT-ExRate.exe")  # noqa: PTH118
+    filename = Path(new_exe_path).name.lower()
 
     try:
         if "setup" in filename:
@@ -537,9 +546,9 @@ def apply_update(
             # directory is owned by us before using it.
             work_dir = tempfile.mkdtemp(prefix="bot_exrate_upd_")
             with contextlib.suppress(OSError):
-                os.chmod(work_dir, 0o700)
+                Path(work_dir).chmod(0o700)
             try:
-                st = os.stat(work_dir)
+                st = Path(work_dir).stat()
                 if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
                     result["error"] = "Update workspace ownership check failed"
                     logger.error("apply_update: temp dir not owned by current user")
@@ -548,7 +557,8 @@ def apply_update(
                 result["error"] = f"Could not stat update workspace: {e}"
                 return result
 
-            bat_path = os.path.join(work_dir, "bot_exrate_updater.bat")
+            # Keep bat_path as str: passed to subprocess and the .bat writer.
+            bat_path = str(Path(work_dir) / "bot_exrate_updater.bat")
 
             # H-02: Validate paths — reject shell metacharacters
             _UNSAFE_CHARS = set('&|<>^%!')
@@ -559,7 +569,7 @@ def apply_update(
                     )
                     return result
 
-            with open(bat_path, "w") as f:
+            with Path(bat_path).open("w") as f:
                 f.write("@echo off\n")
                 # Wait 3s for app to exit fully
                 f.write("timeout /t 3 /nobreak > NUL\n")
@@ -577,7 +587,7 @@ def apply_update(
 
             # SECURITY: restrict the helper script to the owner only.
             with contextlib.suppress(OSError):
-                os.chmod(bat_path, 0o600)
+                Path(bat_path).chmod(0o600)
 
             if sys.platform == "win32":
                 flags = 0x00000008  # DETACHED_PROCESS
@@ -603,10 +613,10 @@ def apply_update(
         else:
             # Portable exe — atomic swap
             backup_path = current_exe + ".bak"
-            if os.path.exists(backup_path):
-                os.remove(backup_path)
-            os.rename(current_exe, backup_path)
-            os.rename(new_exe_path, current_exe)
+            if Path(backup_path).exists():
+                Path(backup_path).unlink()
+            Path(current_exe).rename(backup_path)
+            Path(new_exe_path).rename(current_exe)
             result["success"] = True
             logger.info("Atomic exe swap completed")
     except PermissionError:

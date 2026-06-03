@@ -21,6 +21,7 @@ import traceback
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import openpyxl
 
@@ -44,6 +45,10 @@ from core.excel_io import (
     write_custom_exrate_data,
 )
 from core.exrate_sheet import update_master_exrate_sheet
+from core.ledger_processing import (
+    prescan_target_dates,
+    run_anomaly_check,
+)
 from core.logic import (
     BOTLogicEngine,
     build_holiday_lookup,
@@ -160,9 +165,10 @@ class LedgerEngine:
         return self._last_batch_anomaly_count
 
     def _check_memory_guardrail(self, filepath: str):
-        if not os.path.exists(filepath):
+        fp = Path(filepath)
+        if not fp.exists():
             raise FileNotFoundError(f"Cannot find: {filepath}")
-        file_size = os.path.getsize(filepath)
+        file_size = fp.stat().st_size
         if file_size > self.MAX_FILE_BYTES:
             raise FileSizeLimitError(
                 f"File too large (> {self.MAX_FILE_SIZE_MB}MB)."
@@ -341,31 +347,16 @@ class LedgerEngine:
         eur_buying: dict[date, Decimal],
         eur_selling: dict[date, Decimal],
     ) -> int:
+        """Delegate to core.ledger_processing.run_anomaly_check (v3.1.0).
+
+        Injects this engine's anomaly guard and emit callback; returns the
+        number of anomalies found.
         """
-        v3.1.0: Run anomaly detection across all loaded rates.
-        Returns the number of anomalies found.
-        """
-        rates_bundle = {
-            "USD_buying_transfer": usd_buying,
-            "USD_selling": usd_selling,
-            "EUR_buying_transfer": eur_buying,
-            "EUR_selling": eur_selling,
-        }
-        anomalies = self._anomaly_guard.check_rates_bulk(rates_bundle)
-        for a in anomalies:
-            self._emit(
-                f"⚠ ANOMALY: {a.currency} {a.rate_type} on "
-                f"{a.check_date.strftime('%d %b %Y')}: "
-                f"{a.pct_change:.2f}% change "
-                f"({a.prev_value} → {a.new_value})",
-                etype="warning",
-            )
-        if anomalies:
-            logger.warning(
-                "Anomaly guard: %d suspicious rate(s) detected",
-                len(anomalies),
-            )
-        return len(anomalies)
+        return run_anomaly_check(
+            self._anomaly_guard,
+            lambda msg, etype="log": self._emit(msg, etype),
+            usd_buying, usd_selling, eur_buying, eur_selling,
+        )
 
     # ================================================================== #
     #  PRIVATE HELPERS — Extracted from process_ledger for readability
@@ -417,68 +408,24 @@ class LedgerEngine:
         # Reject unsupported formats
         if not filepath.lower().endswith((".xlsx", ".xlsm")):
             raise ValueError(
-                f"Unsupported format: {os.path.basename(filepath)}. "
+                f"Unsupported format: {Path(filepath).name}. "
                 "Only .xlsx and .xlsm files are supported."
             )
 
         return None  # Not standalone — proceed with normal processing
 
     def _prescan_target_dates(self, filepath: str) -> set[date]:
-        """Scan the workbook in read-only mode to extract all target dates.
+        """Delegate to core.ledger_processing.prescan_target_dates.
 
-        Opens the workbook in read-only mode, scans all non-skipped sheets
-        for the source date column, and returns a set of all parsed dates.
-        The workbook is properly closed and garbage-collected after scanning.
+        Injects this engine's column map, parser, and emit callback so the
+        read-only date scan keeps identical behavior.
         """
-        self._emit("Scanning dates from workbook")
-        all_target_dates: set[date] = set()
-
-        wb_scan = None
-        try:
-            wb_scan = openpyxl.load_workbook(
-                filepath, read_only=True, data_only=True,
-            )
-            for sheet_name in wb_scan.sheetnames:
-                if sheet_name in SKIP_SHEET_NAMES:
-                    continue
-                ws = wb_scan[sheet_name]
-                header_row_idx = None
-                col_indices: dict[str, int] = {}
-                for row_idx, row in enumerate(
-                    ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
-                ):
-                    row_strs = [
-                        str(c).strip() if c is not None else "" for c in row
-                    ]
-                    if self.target_cols["source_date"] in row_strs:
-                        header_row_idx = row_idx
-                        for ci, val in enumerate(row_strs):
-                            if val == self.target_cols["source_date"]:
-                                col_indices["source"] = ci
-                        break
-
-                if header_row_idx is None or "source" not in col_indices:
-                    continue
-
-                src_idx = col_indices["source"] + 1
-                for row_idx in range(header_row_idx + 1, (ws.max_row or 0) + 1):
-                    parsed_date = self._parse_date(
-                        ws.cell(row=row_idx, column=src_idx).value
-                    )
-                    if parsed_date:
-                        all_target_dates.add(parsed_date)
-        except (ValueError, TypeError, KeyError,
-                openpyxl.utils.exceptions.InvalidFileException):
-            raise
-        finally:
-            if wb_scan is not None:
-                with contextlib.suppress(OSError):
-                    wb_scan.close()
-                del wb_scan
-                wb_scan = None
-            gc.collect()
-
-        return all_target_dates
+        return prescan_target_dates(
+            filepath,
+            self.target_cols,
+            parse_date_fn=self._parse_date,
+            emit_fn=self._emit,
+        )
 
     def _build_holiday_lookup(
         self,
@@ -506,7 +453,10 @@ class LedgerEngine:
     ) -> str:
         """Process a single ledger file end-to-end."""
 
-        filepath = os.path.abspath(filepath)
+        # noqa: PTH100 — os.path.abspath normalizes WITHOUT resolving symlinks;
+        # Path.resolve() would resolve symlinks and could change the in-place
+        # save target string. Keep exact legacy behavior.
+        filepath = os.path.abspath(filepath)  # noqa: PTH100
         self._last_anomaly_count = 0
 
         self._check_memory_guardrail(filepath)
@@ -608,11 +558,11 @@ class LedgerEngine:
             if dry_run:
                 self._emit(
                     "[SIM] File NOT saved (dry run) "
-                    f"— {os.path.basename(filepath)}"
+                    f"— {Path(filepath).name}"
                 )
             else:
                 # ERR-03: Check disk space before saving
-                drive_stat = shutil.disk_usage(os.path.dirname(filepath))
+                drive_stat = shutil.disk_usage(Path(filepath).parent)
                 free_mb = drive_stat.free // (1024 * 1024)
                 if free_mb < MIN_DISK_SPACE_MB:
                     raise OSError(
@@ -622,7 +572,7 @@ class LedgerEngine:
                 wb.save(filepath)
                 logger.info(
                     "Overwritten in-place: %s",
-                    os.path.basename(filepath),
+                    Path(filepath).name,
                 )
             wb.close()
             del wb  # release file handle immediately
@@ -661,7 +611,7 @@ class LedgerEngine:
         errors: list[str] = []
 
         for idx, fp in enumerate(filepaths):
-            fname = os.path.basename(fp)
+            fname = Path(fp).name
             try:
                 await self.process_ledger(
                     fp, start_date=start_date, dry_run=dry_run,
@@ -759,10 +709,12 @@ class LedgerEngine:
         # create a pre-edit backup BEFORE load_workbook. If the file does not
         # yet exist this is a creation path — skip backup, but the loaded
         # save below would fail anyway, so a missing file is still an error.
-        filepath = os.path.abspath(filepath)
+        # noqa: PTH100 — keep os.path.abspath (no symlink resolution) so the
+        # in-place save target string stays identical to the legacy behavior.
+        filepath = os.path.abspath(filepath)  # noqa: PTH100
         self._check_memory_guardrail(filepath)
         _status("Size check passed")
-        if os.path.exists(filepath):
+        if Path(filepath).exists():
             self.backup.create_backup(filepath)
             _status("Backup created")
 
@@ -826,7 +778,7 @@ class LedgerEngine:
                     computed_start,
                 )
                 # ERR-03: Check disk space before saving
-                drive_stat = shutil.disk_usage(os.path.dirname(filepath))
+                drive_stat = shutil.disk_usage(Path(filepath).parent)
                 free_mb = drive_stat.free // (1024 * 1024)
                 if free_mb < MIN_DISK_SPACE_MB:
                     raise OSError(
@@ -834,7 +786,7 @@ class LedgerEngine:
                         f"need {MIN_DISK_SPACE_MB}MB). File NOT saved."
                     )
                 wb.save(filepath)
-                _status(f"✓ ExRate updated: {os.path.basename(filepath)}")
+                _status(f"✓ ExRate updated: {Path(filepath).name}")
                 return filepath
             finally:
                 try:
@@ -924,7 +876,7 @@ class LedgerEngine:
             )
 
             # ERR-03: Check disk space before saving
-            drive_stat = shutil.disk_usage(os.path.dirname(filepath))
+            drive_stat = shutil.disk_usage(Path(filepath).parent)
             free_mb = drive_stat.free // (1024 * 1024)
             if free_mb < MIN_DISK_SPACE_MB:
                 raise OSError(
@@ -932,7 +884,7 @@ class LedgerEngine:
                     f"need {MIN_DISK_SPACE_MB}MB). File NOT saved."
                 )
             wb.save(filepath)
-            _status(f"✓ ExRate created: {os.path.basename(filepath)}")
+            _status(f"✓ ExRate created: {Path(filepath).name}")
             return filepath
         finally:
             try:

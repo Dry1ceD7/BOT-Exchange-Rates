@@ -14,6 +14,7 @@ import contextlib
 import logging
 import os
 import webbrowser
+from pathlib import Path
 
 import customtkinter as ctk
 
@@ -49,7 +50,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         super().__init__(master, **kwargs)
 
         self.activated = False
-        self._env_path = env_path or os.path.join(get_project_root(), ".env")
+        self._env_path = env_path or str(Path(get_project_root()) / ".env")
 
         t = get_theme()
         self.title("BOT Exchange Rate — API Registration")
@@ -229,8 +230,9 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
     def _write_env(self, exg: str, hol: str):
         """Write or update the .env file with the provided tokens."""
         lines = []
-        if os.path.exists(self._env_path):
-            with open(self._env_path, encoding="utf-8") as f:
+        env_file = Path(self._env_path)
+        if env_file.exists():
+            with env_file.open(encoding="utf-8") as f:
                 lines = f.readlines()
 
         # Update existing keys or prepare to append
@@ -252,12 +254,12 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         if not keys_written["BOT_TOKEN_HOL"]:
             new_lines.append(f"BOT_TOKEN_HOL={hol}\n")
 
-        with open(self._env_path, "w", encoding="utf-8") as f:
+        with env_file.open("w", encoding="utf-8") as f:
             f.writelines(new_lines)
 
         # SECURITY: restrict the plaintext .env to the owner only.
         with contextlib.suppress(OSError):
-            os.chmod(self._env_path, 0o600)
+            env_file.chmod(0o600)
 
     def _on_close(self):
         self.activated = False

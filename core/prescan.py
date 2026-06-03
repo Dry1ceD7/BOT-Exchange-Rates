@@ -11,8 +11,8 @@ source column. Uses openpyxl for all modern Excel formats.
 
 import contextlib
 import logging
-import os
 from datetime import date
+from pathlib import Path
 
 import openpyxl
 
@@ -39,7 +39,7 @@ def prescan_oldest_date(
     oldest: date | None = None
 
     for fp in filepaths:
-        if not os.path.exists(fp):
+        if not Path(fp).exists():
             continue
 
         found = _scan_xlsx(fp, target_col_name)
@@ -64,7 +64,7 @@ def _scan_xlsx(filepath: str, target_col_name: str) -> date | None:
     oldest: date | None = None
     wb = None
     try:
-        with open(filepath, "rb") as f:
+        with Path(filepath).open("rb") as f:
             wb = openpyxl.load_workbook(f, read_only=True, data_only=True)
             for ws in wb.worksheets:
                 target_col_idx = None

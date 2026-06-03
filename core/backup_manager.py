@@ -9,10 +9,9 @@ Protects against file corruption during in-place editing with automatic
 garbage collection for legacy hardware.
 """
 
-import glob
-import os
 import shutil
 from datetime import datetime, timedelta
+from pathlib import Path
 
 
 class BackupError(Exception):
@@ -35,10 +34,12 @@ class BackupManager:
         if backup_dir is None:
             from core.paths import get_project_root
             project_root = get_project_root()
-            backup_dir = os.path.join(project_root, "data", "backups")
+            # Keep backup_dir as a str: it is used downstream both as a
+            # filesystem path and as a glob-pattern prefix (string ops).
+            backup_dir = str(Path(project_root) / "data" / "backups")
 
         self.backup_dir = backup_dir
-        os.makedirs(self.backup_dir, exist_ok=True)
+        Path(self.backup_dir).mkdir(parents=True, exist_ok=True)
 
     # Timestamp embedded in backup filenames. Microsecond precision avoids
     # same-second collisions that would overwrite a pristine copy.
@@ -46,7 +47,7 @@ class BackupManager:
 
     def _generate_backup_name(self, filepath: str) -> str:
         """Generates a timestamped backup filename with unique separator."""
-        basename = os.path.splitext(os.path.basename(filepath))[0]
+        basename = Path(filepath).stem
         timestamp = datetime.now().strftime(self._TS_FORMAT)
         return f"{basename}__bak__{timestamp}.xlsx"
 
@@ -56,7 +57,7 @@ class BackupManager:
         Returns None if the filename does not match the backup pattern
         (so non-backup *.xlsx files are safely ignored).
         """
-        name = os.path.splitext(os.path.basename(fpath))[0]
+        name = Path(fpath).stem
         marker = "__bak__"
         idx = name.rfind(marker)
         if idx == -1:
@@ -69,7 +70,7 @@ class BackupManager:
 
     def _get_backup_key(self, filepath: str) -> str:
         """Extracts the base name (without extension) used as a lookup key."""
-        return os.path.splitext(os.path.basename(filepath))[0]
+        return Path(filepath).stem
 
     def create_backup(self, filepath: str) -> str:
         """
@@ -84,16 +85,18 @@ class BackupManager:
         Raises:
             BackupError: If the copy operation fails.
         """
-        if not os.path.exists(filepath):
+        if not Path(filepath).exists():
             raise BackupError(f"Source file not found: {filepath}")
 
         backup_name = self._generate_backup_name(filepath)
-        backup_path = os.path.join(self.backup_dir, backup_name)
+        # Keep backup_path as str: returned to callers (engine) and matched
+        # later by glob patterns built via string concatenation.
+        backup_path = str(Path(self.backup_dir) / backup_name)
 
         try:
             shutil.copy2(filepath, backup_path)
         except OSError as e:
-            raise BackupError(f"Backup failed for {os.path.basename(filepath)}: {e}") from e
+            raise BackupError(f"Backup failed for {Path(filepath).name}: {e}") from e
 
         return backup_path
 
@@ -112,12 +115,16 @@ class BackupManager:
             BackupError: If no matching backup is found.
         """
         key = self._get_backup_key(filepath)
-        pattern = os.path.join(self.backup_dir, f"{key}__bak__*.xlsx")
-        matches = sorted(glob.glob(pattern), reverse=True)
+        # Sort the matched paths as strings (reverse) to preserve the exact
+        # lexicographic ordering the old glob.glob + sorted produced.
+        matches = sorted(
+            (str(p) for p in Path(self.backup_dir).glob(f"{key}__bak__*.xlsx")),
+            reverse=True,
+        )
 
         if not matches:
             raise BackupError(
-                f"No backup found for '{os.path.basename(filepath)}'.\n"
+                f"No backup found for '{Path(filepath).name}'.\n"
                 f"The file must have been processed at least once to have a backup."
             )
 
@@ -125,7 +132,7 @@ class BackupManager:
 
         # Integrity check: backup must be a readable, non-empty .xlsx.
         try:
-            if os.path.getsize(latest_backup) <= 0:
+            if Path(latest_backup).stat().st_size <= 0:
                 raise BackupError(
                     f"Backup is empty, refusing to restore: {latest_backup}"
                 )
@@ -134,7 +141,7 @@ class BackupManager:
 
         # Snapshot the current live file before overwriting so a bad revert
         # is recoverable.
-        if os.path.exists(filepath):
+        if Path(filepath).exists():
             try:
                 shutil.copy2(filepath, filepath + ".pre-revert")
             except OSError as e:
@@ -161,9 +168,9 @@ class BackupManager:
         cutoff = datetime.now() - timedelta(days=max_age_days)
         deleted = 0
 
-        for fpath in glob.glob(os.path.join(self.backup_dir, "*.xlsx")):
+        for fpath in Path(self.backup_dir).glob("*.xlsx"):
             # Derive age from the timestamp embedded in the filename, NOT
-            # os.path.getmtime: copy2 preserves the SOURCE mtime, so a fresh
+            # st_mtime: copy2 preserves the SOURCE mtime, so a fresh
             # backup of an old file would otherwise be deleted immediately.
             ts = self._parse_backup_timestamp(fpath)
             if ts is None:
@@ -171,7 +178,7 @@ class BackupManager:
                 continue
             if ts < cutoff:
                 try:
-                    os.remove(fpath)
+                    fpath.unlink()
                     deleted += 1
                 except OSError:
                     continue
@@ -190,8 +197,13 @@ class BackupManager:
         """
         if filepath:
             key = self._get_backup_key(filepath)
-            pattern = os.path.join(self.backup_dir, f"{key}__bak__*.xlsx")
+            glob_pattern = f"{key}__bak__*.xlsx"
         else:
-            pattern = os.path.join(self.backup_dir, "*.xlsx")
+            glob_pattern = "*.xlsx"
 
-        return sorted(glob.glob(pattern), reverse=True)
+        # Return str paths (newest first) to match the previous glob.glob
+        # contract: callers display/compare these as strings.
+        return sorted(
+            (str(p) for p in Path(self.backup_dir).glob(glob_pattern)),
+            reverse=True,
+        )

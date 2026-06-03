@@ -22,6 +22,7 @@ Frozen-mode writability (v3.2.8):
 
 import os
 import sys
+from pathlib import Path
 
 _APP_DIR_NAME = "BOT_Exrate"
 
@@ -33,15 +34,16 @@ def _is_writable(directory: str) -> bool:
     (permission denied, read-only FS, UAC virtualization quirks) means we
     treat the location as not writable.
     """
+    dir_path = Path(directory)
     try:
-        os.makedirs(directory, exist_ok=True)
+        dir_path.mkdir(parents=True, exist_ok=True)
     except OSError:
         return False
-    probe = os.path.join(directory, ".write_probe")
+    probe = dir_path / ".write_probe"
     try:
-        with open(probe, "w", encoding="utf-8") as f:
+        with probe.open("w", encoding="utf-8") as f:
             f.write("ok")
-        os.remove(probe)
+        probe.unlink()
         return True
     except OSError:
         return False
@@ -50,11 +52,11 @@ def _is_writable(directory: str) -> bool:
 def _user_data_root() -> str:
     """Per-user writable app-data directory (used as a frozen-mode fallback)."""
     if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or os.path.join(
-            os.path.expanduser("~"), "AppData", "Local"
+        base = os.environ.get("LOCALAPPDATA") or str(
+            Path.home() / "AppData" / "Local"
         )
-        return os.path.join(base, _APP_DIR_NAME)
-    return os.path.join(os.path.expanduser("~"), ".local", "share", _APP_DIR_NAME)
+        return str(Path(base) / _APP_DIR_NAME)
+    return str(Path.home() / ".local" / "share" / _APP_DIR_NAME)
 
 
 def get_project_root() -> str:
@@ -67,15 +69,20 @@ def get_project_root() -> str:
       app never orphans its cache/backups/logs in a read-only Program Files.
     """
     if getattr(sys, "frozen", False):
-        # PyInstaller sets sys.executable to the .exe path
-        exe_dir = os.path.dirname(sys.executable)
+        # PyInstaller sets sys.executable to the .exe path.
+        # noqa: PTH120 — os.path.dirname preserves the exact exe-dir string
+        # returned as the frozen project root (no symlink resolution).
+        exe_dir = os.path.dirname(sys.executable)  # noqa: PTH120
         # Conservative: keep exe-dir data/ as default for existing installs.
-        if _is_writable(os.path.join(exe_dir, "data")):
+        if _is_writable(str(Path(exe_dir) / "data")):
             return exe_dir
         # Read-only / UAC-virtualized install — fall back to per-user dir.
         return _user_data_root()
-    # Source mode — main.py lives at project root (never changed)
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Source mode — main.py lives at project root (never changed).
+    # noqa: PTH100,PTH120 — os.path.abspath does NOT resolve symlinks while
+    # Path.resolve() does; this two-level-up string is the canonical project
+    # root the whole app builds on, so keep the exact legacy computation.
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # noqa: PTH100, PTH120
 
 
 def harden_data_dirs(project_root: str) -> None:
@@ -84,10 +91,10 @@ def harden_data_dirs(project_root: str) -> None:
     Restricts cache, backups and logs to the owner only where the OS supports
     POSIX permissions. Silently ignores OSError (e.g. Windows / network FS).
     """
-    for sub in ("data", os.path.join("data", "logs"), os.path.join("data", "backups")):
-        target = os.path.join(project_root, sub)
+    root = Path(project_root)
+    for target in (root / "data", root / "data" / "logs", root / "data" / "backups"):
         try:
-            os.makedirs(target, exist_ok=True)
-            os.chmod(target, 0o700)
+            target.mkdir(parents=True, exist_ok=True)
+            target.chmod(0o700)
         except OSError:
             pass

@@ -16,12 +16,12 @@ for both USD and EUR (4 rate columns total).
 
 import atexit
 import contextlib
-import os
 import sqlite3
 import threading
 import weakref
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 
 class CacheDB:
@@ -40,9 +40,11 @@ class CacheDB:
         if db_path is None:
             from core.paths import get_project_root
             project_root = get_project_root()
-            db_dir = os.path.join(project_root, "data")
-            os.makedirs(db_dir, exist_ok=True)
-            db_path = os.path.join(db_dir, "cache.db")
+            db_dir = Path(project_root) / "data"
+            db_dir.mkdir(parents=True, exist_ok=True)
+            # Keep db_path as a str: sqlite3.connect and os.path consumers
+            # below expect the same str behavior as before.
+            db_path = str(db_dir / "cache.db")
 
         self.db_path = db_path
         # Connection-per-thread: each thread gets its own sqlite3 connection
@@ -411,7 +413,8 @@ class CacheDB:
             ).fetchone()[0]
         except sqlite3.OperationalError:
             multi_count = 0
-        size_bytes = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
+        db_file = Path(self.db_path)
+        size_bytes = db_file.stat().st_size if db_file.exists() else 0
         return {
             "rates": rates_count,
             "rates_multi": multi_count,
