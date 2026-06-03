@@ -11,6 +11,7 @@ fallback on startup. Auto-refreshes every 60 seconds.
 
 import logging
 import threading
+import tkinter
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, Optional
@@ -139,7 +140,9 @@ class RateTicker(ctk.CTkFrame):
             return
         try:
             self.after(ms, fn, *args)
-        except RuntimeError:
+        except (RuntimeError, tkinter.TclError):
+            # TclError "application has been destroyed" is NOT a RuntimeError
+            # subclass and would otherwise crash the worker thread.
             self._destroyed = True
 
     def _worker_loop(self) -> None:
@@ -233,12 +236,12 @@ class RateTicker(ctk.CTkFrame):
 
     def _update_display(self, rates: Dict) -> None:
         """Update the labels with fresh rate data."""
-        # Store previous for delta coloring
-        self._prev_rates = dict(self._rates)
-
-        # Update current rates
+        # Update only the keys actually present in this fetch. Snapshot prev
+        # for each key against the value present BEFORE this key's update, so
+        # a partial dict can't reset trend arrows for untouched currencies.
         for key in self._rates:
             if key in rates and rates[key] is not None:
+                self._prev_rates[key] = self._rates[key]
                 self._rates[key] = rates[key]
 
         # Format USD

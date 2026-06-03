@@ -89,7 +89,7 @@ class CacheDB:
                 date       TEXT NOT NULL,
                 currency   TEXT NOT NULL,
                 rate_type  TEXT NOT NULL,
-                value      REAL,
+                value      TEXT,
                 PRIMARY KEY (date, currency, rate_type)
             );
         """)
@@ -131,6 +131,37 @@ class CacheDB:
                 WHERE usd_buying IS NULL OR eur_buying IS NULL
             """)
             conn.commit()
+
+        self._migrate_rates_multi_value_text(conn)
+
+    def _migrate_rates_multi_value_text(self, conn: sqlite3.Connection) -> None:
+        """
+        Ensure rates_multi.value uses TEXT affinity so Decimal strings round-trip
+        exactly. Older DBs created the column as REAL, which silently coerces
+        Decimal strings back to lossy floats on insert. Recreate the table
+        preserving existing rows when a legacy REAL column is detected.
+        """
+        info = conn.execute("PRAGMA table_info(rates_multi)").fetchall()
+        value_decl = next(
+            (row[2] for row in info if row[1] == "value"), None
+        )
+        if value_decl is None or value_decl.upper() == "TEXT":
+            return
+
+        conn.executescript("""
+            CREATE TABLE rates_multi_new (
+                date       TEXT NOT NULL,
+                currency   TEXT NOT NULL,
+                rate_type  TEXT NOT NULL,
+                value      TEXT,
+                PRIMARY KEY (date, currency, rate_type)
+            );
+            INSERT INTO rates_multi_new (date, currency, rate_type, value)
+                SELECT date, currency, rate_type, value FROM rates_multi;
+            DROP TABLE rates_multi;
+            ALTER TABLE rates_multi_new RENAME TO rates_multi;
+        """)
+        conn.commit()
 
     # ================================================================== #
     #  RATES
@@ -284,12 +315,24 @@ class CacheDB:
         """
         if not entries:
             return
+        # Store value as TEXT (str of Decimal) so 4dp digits round-trip exactly.
+        # The rates_multi.value column has TEXT affinity; passing a string keeps
+        # it verbatim instead of coercing through a lossy float.
+        normalized = [
+            (
+                d,
+                c,
+                rt,
+                None if v is None else str(v),
+            )
+            for (d, c, rt, v) in entries
+        ]
         conn = self._conn()
         conn.executemany(
             "INSERT OR REPLACE INTO rates_multi "
             "(date, currency, rate_type, value) "
             "VALUES (?, ?, ?, ?)",
-            entries,
+            normalized,
         )
         conn.commit()
 
@@ -307,6 +350,27 @@ class CacheDB:
             "SELECT date, usd_buying, usd_selling, eur_buying, eur_selling "
             "FROM rates ORDER BY date ASC"
         ).fetchall()
+
+    def get_all_multi_rates(self) -> List[Tuple[str, str, str, Optional[Decimal]]]:
+        """
+        Returns every multi-currency rate as a list of tuples:
+        [(date_str, currency, rate_type, value), ...]
+        where value is an exact Decimal (or None). Ordered by
+        date, currency, rate_type. Used by csv_export for lossless export.
+        """
+        rows = self._conn().execute(
+            "SELECT date, currency, rate_type, value "
+            "FROM rates_multi ORDER BY date ASC, currency ASC, rate_type ASC"
+        ).fetchall()
+        return [
+            (
+                r[0],
+                r[1],
+                r[2],
+                Decimal(str(r[3])) if r[3] is not None else None,
+            )
+            for r in rows
+        ]
 
     # ================================================================== #
     #  CLEANUP

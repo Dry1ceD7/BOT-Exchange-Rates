@@ -42,7 +42,6 @@ from core.excel_io import (
     inject_xlookup_formulas,
     scan_sheet_headers,
     write_custom_exrate_data,
-    zero_touch_write,
 )
 from core.exrate_sheet import update_master_exrate_sheet
 from core.logic import BOTLogicEngine, safe_to_decimal
@@ -193,12 +192,6 @@ class LedgerEngine:
         )
 
 
-
-    # ── Zero-Touch Write (delegates to excel_io) ──────────────────
-    @staticmethod
-    def _zero_touch_write(ws, row: int, col: int, value) -> None:
-        """Write a value without touching formatting. Delegates to excel_io."""
-        zero_touch_write(ws, row, col, value)
 
     # ================================================================== #
     #  CACHE-FIRST DATA LOADING (v2.6.1)

@@ -51,3 +51,47 @@ class TestEventBus:
         # More than one overflow warning proves the flag did not latch.
         overflow_warnings = [w for w in warnings if "overflow" in w]
         assert len(overflow_warnings) >= 2
+
+
+class TestPriorityRetain:
+    """Fix #9: audit-critical error/success events must not be silently lost."""
+
+    def test_error_events_survive_overflow(self):
+        """Non-priority log events get evicted before error/success."""
+        bus = EventBus(maxlen=3)
+        bus.push({"type": "error", "msg": "E0"})
+        bus.push({"type": "success", "msg": "S0"})
+        # Flood with low-priority logs that should be evicted, not the above.
+        for i in range(10):
+            bus.push({"type": "log", "msg": f"L{i}"})
+        events = bus.drain()
+        types = [e["type"] for e in events]
+        # The priority events must still be present.
+        assert "error" in types
+        assert "success" in types
+        assert len(events) == 3
+
+    def test_all_priority_full_emits_drop_marker(self):
+        """When the queue is full of priority events, a visible marker is left
+        instead of silently dropping audit lines."""
+        bus = EventBus(maxlen=2)
+        bus.push({"type": "error", "msg": "E0"})
+        bus.push({"type": "error", "msg": "E1"})
+        # No room and everything is priority -> oldest dropped + marker.
+        bus.push({"type": "error", "msg": "E2"})
+        events = bus.drain()
+        msgs = [e.get("msg", "") for e in events]
+        assert any("dropped" in m for m in msgs), msgs
+        # Newest priority event is still retained.
+        assert any(m == "E2" for m in msgs)
+
+    def test_drop_marker_counts_accumulate(self):
+        bus = EventBus(maxlen=2)
+        bus.push({"type": "error", "msg": "E0"})
+        bus.push({"type": "error", "msg": "E1"})
+        bus.push({"type": "error", "msg": "E2"})
+        bus.push({"type": "error", "msg": "E3"})
+        events = bus.drain()
+        markers = [e for e in events if "dropped" in e.get("msg", "")]
+        assert markers, "expected a drop marker"
+        assert markers[0].get("_dropped", 0) >= 2

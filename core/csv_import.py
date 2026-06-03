@@ -5,51 +5,85 @@ core/csv_import.py
 BOT Exchange Rate Processor — Offline CSV Fallback Importer
 ---------------------------------------------------------------------------
 Imports exchange rate data from the Bank of Thailand's official
-downloadable CSV format into the local SQLite cache.
+downloadable CSV format (wide) AND from this app's own lossless export
+format (long: Period, Currency_ID, Rate_Type, Value) into the local
+SQLite cache.
 
 This allows the application to function during BOT API outages
-or when internet connectivity is unavailable.
+or when internet connectivity is unavailable, and guarantees that an
+export -> import -> export cycle is data-identical.
 """
 
 import csv
 import logging
 import os
+import re
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Featherweight constraint: reject oversized CSVs before opening them.
+MAX_CSV_BYTES = 15 * 1024 * 1024  # 15 MB
+
+# Flush accumulated multi-currency rows to SQLite in batches so a huge CSV
+# never balloons memory on a 4GB legacy PC.
+_FLUSH_EVERY = 5000
+
+# Valid ISO-4217-style currency code: exactly three uppercase letters.
+_CURRENCY_RE = re.compile(r"[A-Z]{3}")
+
 
 def import_bot_csv(csv_path: str, cache_db) -> int:
     """
-    Parse a BOT-format CSV and import all rates into CacheDB.
+    Parse a rate CSV and import all rates into CacheDB.
 
-    The BOT CSV typically has columns like:
-      Period, Currency, Buying Sight, Buying Transfer, Selling, Mid Rate
+    Two formats are auto-detected:
+
+    Long (this app's lossless export):
+        Period, Currency_ID, Rate_Type, Value
+
+    Wide (BOT download):
+        Period, Currency, Buying Sight, Buying Transfer, Selling, Mid Rate
 
     Args:
-        csv_path: Absolute path to the downloaded CSV file.
+        csv_path: Absolute path to the CSV file.
         cache_db: A CacheDB instance.
 
     Returns:
-        Number of rate entries imported.
+        Number of rate entries imported (rows that yielded >=1 stored rate).
 
     Raises:
         FileNotFoundError: If csv_path does not exist.
-        ValueError: If the CSV format is unrecognizable.
+        ValueError: If the file is oversized, the format is unrecognizable,
+            or a non-empty file imported zero rows (silent mis-parse guard).
     """
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
+    size = os.path.getsize(csv_path)
+    if size > MAX_CSV_BYTES:
+        raise ValueError(
+            f"CSV file too large: {size} bytes exceeds limit of {MAX_CSV_BYTES}."
+        )
+
     imported = 0
+    multi_entries = []
+
+    def _flush():
+        if multi_entries:
+            cache_db.insert_multi_rates_bulk(multi_entries)
+            multi_entries.clear()
 
     with open(csv_path, "r", encoding="utf-8-sig") as f:
-        # Try to detect the CSV dialect
         sample = f.read(4096)
         f.seek(0)
 
+        # Restrict candidate delimiters so the sniffer can't pick something
+        # exotic (e.g. a digit) out of financial data and mis-parse silently.
         try:
-            dialect = csv.Sniffer().sniff(sample)
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
         except csv.Error:
             dialect = csv.excel
 
@@ -58,49 +92,58 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
         if reader.fieldnames is None:
             raise ValueError("CSV file has no header row.")
 
-        # Normalize headers (case-insensitive, strip whitespace)
-        field_map = {
-            h.strip().lower(): h for h in reader.fieldnames
-        }
+        field_map = {h.strip().lower(): h for h in reader.fieldnames}
 
-        # Identify the key columns (BOT format flexibility)
-        date_key = _find_column(field_map, [
-            "period", "date", "วันที่",
-        ])
-        currency_key = _find_column(field_map, [
-            "currency_id", "currency", "สกุลเงิน",
-        ])
-        buying_tt_key = _find_column(field_map, [
-            "buying transfer", "buying_transfer", "buying tt",
-            "อัตราซื้อ (โอน)",
-        ])
-        selling_key = _find_column(field_map, [
-            "selling", "selling rate", "อัตราขาย",
-        ])
-        buying_sight_key = _find_column(field_map, [
-            "buying sight", "buying_sight", "อัตราซื้อ (ตั๋วเงิน)",
-        ])
-        mid_rate_key = _find_column(field_map, [
-            "mid rate", "mid_rate", "อัตรากลาง",
-        ])
+        date_key = _find_column(field_map, ["period", "date", "วันที่"])
+        currency_key = _find_column(
+            field_map, ["currency_id", "currency", "สกุลเงิน"]
+        )
+        rate_type_key = _find_column(
+            field_map, ["rate_type", "rate type"]
+        )
+        value_key = _find_column(field_map, ["value"])
 
         if date_key is None or currency_key is None:
             raise ValueError(
-                "CSV must have 'Period'/'Date' and 'Currency'/'Currency_ID' columns. "
-                f"Found columns: {list(reader.fieldnames)}"
+                "CSV must have 'Period'/'Date' and 'Currency'/'Currency_ID' "
+                f"columns. Found columns: {list(reader.fieldnames)}"
             )
 
-        # Accumulate rates for bulk insert
-        multi_entries = []
+        is_long_format = rate_type_key is not None and value_key is not None
+
+        if not is_long_format:
+            buying_tt_key = _find_column(field_map, [
+                "buying transfer", "buying_transfer", "buying tt",
+                "อัตราซื้อ (โอน)",
+            ])
+            selling_key = _find_column(field_map, [
+                "selling", "selling rate", "อัตราขาย",
+            ])
+            buying_sight_key = _find_column(field_map, [
+                "buying sight", "buying_sight", "อัตราซื้อ (ตั๋วเงิน)",
+            ])
+            mid_rate_key = _find_column(field_map, [
+                "mid rate", "mid_rate", "อัตรากลาง",
+            ])
+
+        data_rows = 0
 
         for row in reader:
-            raw_date = row.get(date_key, "").strip()
-            currency = row.get(currency_key, "").strip().upper()
+            # Count any row that carries content (so an all-blank trailing
+            # line doesn't trip the silent-mis-parse guard).
+            if any((v or "").strip() for v in row.values()):
+                data_rows += 1
+
+            raw_date = (row.get(date_key) or "").strip()
+            currency = (row.get(currency_key) or "").strip().upper()
 
             if not raw_date or not currency:
                 continue
 
-            # Parse date (BOT uses YYYY-MM-DD typically)
+            if not _CURRENCY_RE.fullmatch(currency):
+                logger.debug("Skipped invalid currency code: %r", currency)
+                continue
+
             parsed_date = _parse_csv_date(raw_date)
             if parsed_date is None:
                 logger.debug("Skipped unparseable date: %s", raw_date)
@@ -108,47 +151,64 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
 
             date_str = parsed_date.strftime("%Y-%m-%d")
 
-            # Extract rate values
-            rates = {}
-            for key, rate_type in [
-                (buying_tt_key, "buying_transfer"),
-                (selling_key, "selling"),
-                (buying_sight_key, "buying_sight"),
-                (mid_rate_key, "mid_rate"),
-            ]:
-                if key:
-                    raw_val = row.get(key, "").strip()
-                    if raw_val:
-                        try:
-                            rates[rate_type] = float(raw_val)
-                        except ValueError:
-                            pass
+            # Collect (rate_type -> Decimal) for this row.
+            rates: dict[str, Decimal] = {}
 
-            # Insert into multi-currency cache
+            if is_long_format:
+                rate_type = (row.get(rate_type_key) or "").strip()
+                dec = _parse_decimal(row.get(value_key))
+                if rate_type and dec is not None:
+                    rates[rate_type] = dec
+            else:
+                for key, rate_type in [
+                    (buying_tt_key, "buying_transfer"),
+                    (selling_key, "selling"),
+                    (buying_sight_key, "buying_sight"),
+                    (mid_rate_key, "mid_rate"),
+                ]:
+                    if key:
+                        dec = _parse_decimal(row.get(key))
+                        if dec is not None:
+                            rates[rate_type] = dec
+
+            if not rates:
+                # Nothing captured for this row — do not count it as imported.
+                continue
+
             for rate_type, value in rates.items():
-                multi_entries.append(
-                    (date_str, currency, rate_type, value)
-                )
+                multi_entries.append((date_str, currency, rate_type, value))
 
-            # Also insert into legacy USD/EUR table for backward compat
+            # Mirror into the legacy USD/EUR table for backward compatibility.
+            # That table's columns are REAL; sqlite3 cannot bind Decimal, so
+            # coerce to float here. The lossless source of truth stays in
+            # rates_multi (stored as exact Decimal text above).
+            buy_tt = _to_float(rates.get("buying_transfer"))
+            sell = _to_float(rates.get("selling"))
             if currency == "USD":
                 cache_db.insert_rate(
-                    parsed_date,
-                    usd_buying=rates.get("buying_transfer"),
-                    usd_selling=rates.get("selling"),
+                    parsed_date, usd_buying=buy_tt, usd_selling=sell,
                 )
             elif currency == "EUR":
                 cache_db.insert_rate(
-                    parsed_date,
-                    eur_buying=rates.get("buying_transfer"),
-                    eur_selling=rates.get("selling"),
+                    parsed_date, eur_buying=buy_tt, eur_selling=sell,
                 )
 
             imported += 1
 
-        # Bulk insert into multi-currency table
-        if multi_entries:
-            cache_db.insert_multi_rates_bulk(multi_entries)
+            if len(multi_entries) >= _FLUSH_EVERY:
+                _flush()
+
+        _flush()
+
+    if imported == 0 and data_rows > 0:
+        logger.warning(
+            "CSV import parsed 0 rows from a file with %d data row(s): %s "
+            "(possible delimiter/format mismatch)", data_rows, csv_path,
+        )
+        raise ValueError(
+            f"No rates imported from non-empty CSV: {csv_path}. "
+            "Check the delimiter and column headers."
+        )
 
     logger.info("CSV import complete: %d entries from %s", imported, csv_path)
     return imported
@@ -166,6 +226,28 @@ def _find_column(
         if norm in field_map:
             return field_map[norm]
     return None
+
+
+def _parse_decimal(raw) -> Optional[Decimal]:
+    """
+    Parse a rate cell into an exact Decimal, preserving the literal digits.
+
+    Returns None (and debug-logs) for empty/unparseable values instead of
+    silently swallowing them, so mis-formatted data is observable in logs.
+    """
+    s = "" if raw is None else str(raw).strip()
+    if not s:
+        return None
+    try:
+        return Decimal(s)
+    except InvalidOperation:
+        logger.debug("Skipped non-numeric rate value: %r", s)
+        return None
+
+
+def _to_float(value: Optional[Decimal]) -> Optional[float]:
+    """Coerce an optional Decimal to float for the legacy REAL-column table."""
+    return None if value is None else float(value)
 
 
 def _parse_csv_date(raw: str) -> Optional[date]:

@@ -11,11 +11,13 @@ Security: Uses a random nonce stored in a lockfile to authenticate IPC
 commands, preventing arbitrary local processes from triggering RESTORE.
 """
 
+import getpass
 import hmac
 import logging
 import os
 import secrets
 import sys
+import tempfile
 import threading
 from multiprocessing.connection import Client, Listener
 from typing import Callable, Optional
@@ -24,14 +26,38 @@ from core.constants import IPC_NONCE_LENGTH
 
 logger = logging.getLogger(__name__)
 
-# Fallback path logic to ensure safe OS-specific binding
+
+def _ipc_runtime_dir() -> str:
+    """Return a per-user private directory for the IPC socket (POSIX).
+
+    Placing the socket under a 0700 dir owned by the current user prevents
+    other local users from connecting (or pre-creating the socket path).
+    """
+    try:
+        uid = os.getuid()  # POSIX only
+    except AttributeError:  # pragma: no cover - non-POSIX
+        uid = 0
+    d = os.path.join(tempfile.gettempdir(), f"bot_exrate_{uid}")
+    try:
+        os.makedirs(d, exist_ok=True)
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    return d
+
+
 def _get_ipc_address() -> str:
     """Return the native OS IPC address (Named Pipe or Domain Socket)."""
     if sys.platform == "win32":
-        return r"\\.\pipe\bot_exrate_ipc"
-    else:
-        # Use robust tmp directory
-        return "/tmp/bot_exrate_ipc.sock"
+        # Suffix the pipe name with the username so it is per-user.
+        try:
+            user = getpass.getuser()
+        except Exception:  # pragma: no cover - getuser env edge cases
+            user = "default"
+        safe_user = "".join(c for c in user if c.isalnum()) or "default"
+        return rf"\\.\pipe\bot_exrate_ipc_{safe_user}"
+    # Per-user private dir, socket created 0700-protected.
+    return os.path.join(_ipc_runtime_dir(), "ipc.sock")
 
 def _lockfile_path() -> str:
     """Return the path to the IPC nonce lockfile."""
@@ -120,7 +146,16 @@ class SingleInstanceServer:
                 except ConnectionRefusedError:
                     os.remove(address) # It's a dead socket, safe to bind
 
-            self._listener = Listener(address)
+            # SECURITY: set a restrictive umask around bind so the socket is
+            # never world-accessible in the window before chmod runs.
+            if sys.platform != "win32":
+                old_umask = os.umask(0o077)
+                try:
+                    self._listener = Listener(address)
+                finally:
+                    os.umask(old_umask)
+            else:
+                self._listener = Listener(address)
             self._running = True
 
             # SECURITY: restrict the unix socket to the owner only (0o600)

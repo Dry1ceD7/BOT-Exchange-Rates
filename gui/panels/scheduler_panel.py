@@ -260,13 +260,18 @@ class SchedulerPanel(ctk.CTkFrame):
             self._refresh_path_list()
             self._on_config_change()
             return
-        # Show a selection dialog for multiple paths
+        # Show a selection dialog for multiple paths. Snapshot the list so the
+        # chosen index maps to a stable value, then remove BY VALUE (not by the
+        # possibly-stale index) in case the list changed during the dialog.
         from gui.panels._path_chooser import choose_path_to_remove
-        idx = choose_path_to_remove(self, self._paths)
-        if idx is not None and 0 <= idx < len(self._paths):
-            self._paths.pop(idx)
-            self._refresh_path_list()
-            self._on_config_change()
+        snapshot = list(self._paths)
+        idx = choose_path_to_remove(self, snapshot)
+        if idx is not None and 0 <= idx < len(snapshot):
+            target = snapshot[idx]
+            if target in self._paths:
+                self._paths.remove(target)
+                self._refresh_path_list()
+                self._on_config_change()
 
     def _refresh_path_list(self):
         """Refresh the path list textbox."""

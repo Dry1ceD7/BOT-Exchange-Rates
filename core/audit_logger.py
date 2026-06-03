@@ -17,6 +17,7 @@ import os
 from datetime import datetime
 from typing import Optional
 
+from core.csv_export import _csv_safe
 from core.paths import get_project_root
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,9 @@ class AuditLogger:
         self._filepath = os.path.join(
             log_dir, f"Audit_Log_{timestamp}.csv"
         )
-        self._file = open(self._filepath, "w", newline="", encoding="utf-8")
+        self._file = open(
+            self._filepath, "w", newline="", encoding="utf-8-sig"
+        )
         self._writer = csv.writer(self._file)
         self._writer.writerow(self.HEADERS)
         self._row_count = 0
@@ -125,16 +128,18 @@ class AuditLogger:
             holiday_rollback: True if a holiday rollback was used.
             anomaly_flag: True if this rate was flagged by the guardian.
         """
+        if self._closed:
+            raise ValueError("Cannot log to a finalized audit log.")
         self._writer.writerow([
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            filename,
-            sheet,
+            _csv_safe(filename),
+            _csv_safe(sheet),
             row,
-            cell_date,
-            currency,
-            original_value,
-            new_value,
-            rate_source,
+            _csv_safe(cell_date),
+            _csv_safe(currency),
+            _csv_safe(original_value),
+            _csv_safe(new_value),
+            _csv_safe(rate_source),
             "Yes" if holiday_rollback else "No",
             "ANOMALY" if anomaly_flag else "",
         ])
@@ -150,15 +155,17 @@ class AuditLogger:
         """
         Write a summary row at the end of the batch.
         """
+        if self._closed:
+            raise ValueError("Cannot log to a finalized audit log.")
         self._writer.writerow([])
         self._writer.writerow([
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "=== BATCH SUMMARY ===",
-            f"Files: {total_files}",
-            f"Success: {success}",
-            f"Failed: {failed}",
-            f"Anomalies: {anomalies_detected}",
-            f"Total Rows Modified: {self._row_count}",
+            _csv_safe("=== BATCH SUMMARY ==="),
+            _csv_safe(f"Files: {total_files}"),
+            _csv_safe(f"Success: {success}"),
+            _csv_safe(f"Failed: {failed}"),
+            _csv_safe(f"Anomalies: {anomalies_detected}"),
+            _csv_safe(f"Total Rows Modified: {self._row_count}"),
             "", "", "", "",
         ])
 

@@ -29,6 +29,7 @@ class UpdateManager:
         self._banner = None
         self._dl_label = None
         self._pending_version = None
+        self._pending_sha256 = None
         self._destroyed = False
 
     # ── Thread-safe after() wrapper ─────────────────────────────────
@@ -217,6 +218,8 @@ class UpdateManager:
                 expected_sha256 = _fetch_expected_checksum(
                     asset["sha256_url"]
                 )
+            # Stash for the re-verify-before-exec step in _execute_installer.
+            self._pending_sha256 = expected_sha256
 
             def _progress(downloaded, total):
                 pct = int(downloaded / total * 100)
@@ -312,8 +315,14 @@ class UpdateManager:
                 text_color=t["banner_text_light"],
             ).place(relx=0.5, rely=0.5, anchor="center")
 
-        # Fire the detached process
-        apply_update(installer_path, install_dir=self._install_dir)
+        # Fire the detached process.
+        # SECURITY: pass the expected SHA-256 so apply_update re-verifies the
+        # file immediately before executing it (TOCTOU guard).
+        apply_update(
+            installer_path,
+            install_dir=self._install_dir,
+            expected_sha256=self._pending_sha256,
+        )
 
         # IMMEDIATELY kill this instance so the .bat file can overwrite BOT-ExRate.exe
         self._safe_after(500, self._exit_for_restart)

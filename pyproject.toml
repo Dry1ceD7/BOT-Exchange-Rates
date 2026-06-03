@@ -2,12 +2,15 @@
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.dynamic]
+version = {attr = "core.version.__version__"}
+
 [tool.setuptools.packages.find]
 include = ["core*", "gui*"]
 
 [project]
 name = "bot-exrate"
-version = "3.2.8"
+dynamic = ["version"]
 description = "BOT Exchange Rate Processor — Enterprise Desktop Application"
 requires-python = ">=3.12"
 readme = "README.md"

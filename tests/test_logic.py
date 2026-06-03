@@ -6,7 +6,7 @@ Unit tests for core/logic.py — V2.5 Standard Date Resolution Engine.
 ---------------------------------------------------------------------------
 """
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -314,3 +314,62 @@ class TestComputeYearStartDate:
         # Even with no holidays, Dec 31 shouldn't appear
         result = LedgerEngine.compute_year_start_date(2025, holidays=[])
         assert result.day != 31 or result.month != 12
+
+
+# =========================================================================
+#  BOUNDARY TESTS — production 10-day rollback limit & year boundary
+# =========================================================================
+
+class TestRollbackBoundary:
+    """Boundary behavior at the production max_rollback_days = 10."""
+
+    def _make_rates(self, entries: dict) -> dict:
+        return {d: Decimal(str(v)) for d, v in entries.items()}
+
+    def test_rate_exactly_at_10_day_limit_resolves(self):
+        """Data available exactly 10 days back resolves (inclusive limit)."""
+        # Production engine uses max_rollback_days=10.
+        engine = BOTLogicEngine(holidays=[], max_rollback_days=10)
+        target = date(2025, 1, 20)            # Monday
+        ten_back = target - timedelta(days=10)  # 2025-01-10, Friday
+        assert ten_back.weekday() < 5         # ensure it's a trading day
+        usd = self._make_rates({ten_back: 33.0})
+        eur = self._make_rates({ten_back: 36.0})
+        trade_date, usd_rate, eur_rate = engine.resolve_rate(
+            target, usd, eur,
+        )
+        assert trade_date == ten_back
+        assert usd_rate == Decimal("33.0")
+        assert eur_rate == Decimal("36.0")
+
+    def test_rate_11_days_back_raises(self):
+        """Data only 11 days back exceeds the limit → RateNotFoundError."""
+        engine = BOTLogicEngine(holidays=[], max_rollback_days=10)
+        target = date(2025, 1, 20)
+        eleven_back = target - timedelta(days=11)  # outside the window
+        usd = self._make_rates({eleven_back: 33.0})
+        eur = self._make_rates({eleven_back: 36.0})
+        with pytest.raises(RateNotFoundError):
+            engine.resolve_rate(target, usd, eur)
+
+
+class TestYearBoundaryNeverDec31:
+    """compute_year_start_date must never return Dec 31."""
+
+    def test_dec30_holiday_and_weekend_never_dec31(self):
+        from core.engine import LedgerEngine
+        # 2022-12-31 is a Saturday and 2022-12-30 a Friday. Mark Dec 30 a
+        # holiday so the only adjacent candidates are the weekend (31st) and
+        # earlier trading days. Result must roll BACK, never forward to 31.
+        result = LedgerEngine.compute_year_start_date(
+            2023, holidays=[date(2022, 12, 30)],
+        )
+        assert not (result.month == 12 and result.day == 31)
+        assert result == date(2022, 12, 29)  # Thursday before the holiday
+
+    def test_dec30_weekend_rolls_back_not_to_31(self):
+        from core.engine import LedgerEngine
+        # 2023-12-30 is a Saturday → must roll back to Fri 12/29, not 12/31.
+        result = LedgerEngine.compute_year_start_date(2024, holidays=[])
+        assert not (result.month == 12 and result.day == 31)
+        assert result == date(2023, 12, 29)

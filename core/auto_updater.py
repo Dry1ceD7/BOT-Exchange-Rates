@@ -358,9 +358,15 @@ def download_update(
         logger.error("download_update blocked non-allowlisted URL: %s", url)
         return result
 
-    # v3.1.2: Always download to temp directory
+    # SECURITY (TOCTOU): download into a PRIVATE per-run directory created
+    # 0700 instead of the shared temp root, so another local user cannot
+    # pre-create / race / read the downloaded installer before it runs.
     if dest_dir is None:
-        dest_dir = tempfile.gettempdir()
+        dest_dir = tempfile.mkdtemp(prefix="bot_exrate_dl_")
+        try:
+            os.chmod(dest_dir, 0o700)
+        except OSError:
+            pass
 
     if filename is None:
         filename = url.rsplit("/", 1)[-1] if "/" in url else "update.exe"
@@ -439,6 +445,7 @@ def download_update(
 def apply_update(
     new_exe_path: str,
     install_dir: Optional[str] = None,
+    expected_sha256: Optional[str] = None,
 ) -> dict:
     """
     Install the downloaded update silently.
@@ -454,9 +461,18 @@ def apply_update(
     For portable single-file builds:
       Falls back to atomic exe swap.
 
+    SECURITY (integrity TOCTOU, HIGH): the file is RE-VERIFIED against
+    expected_sha256 immediately before it is executed. download_update may
+    have verified the file earlier, but the file could be swapped between
+    download and launch (time-of-check / time-of-use). expected_sha256 is
+    MANDATORY: a missing hash, a missing file, or a mismatch refuses the
+    update and NEVER runs the binary. There is no verification-skipping path.
+
     Args:
         new_exe_path: Absolute path to the downloaded installer/exe.
         install_dir: Override install directory. If None, auto-resolved.
+        expected_sha256: REQUIRED hex SHA-256 of the installer. Re-checked
+            here right before execution.
 
     Returns:
         {"success": bool, "error": str | None,
@@ -471,6 +487,29 @@ def apply_update(
         result["error"] = (
             "In-place update only works for frozen (packaged) apps"
         )
+        return result
+
+    # SECURITY (integrity, MANDATORY): re-verify the file hash right before
+    # we execute it. No fallback that skips verification.
+    if not expected_sha256:
+        result["error"] = (
+            "Refusing to apply update: no SHA-256 checksum supplied for "
+            "pre-execution integrity verification."
+        )
+        logger.error("apply_update blocked: missing expected_sha256")
+        return result
+    if not os.path.isfile(new_exe_path):
+        result["error"] = (
+            f"Refusing to apply update: installer not found at {new_exe_path}"
+        )
+        logger.error("apply_update blocked: installer missing before exec")
+        return result
+    if not _verify_file_sha256(new_exe_path, expected_sha256):
+        result["error"] = (
+            "Refusing to apply update: installer SHA-256 mismatch immediately "
+            "before execution. The file may have been tampered with."
+        )
+        logger.error("apply_update blocked: re-hash mismatch before exec")
         return result
 
     # v3.1.2: Resolve install directory from registry first

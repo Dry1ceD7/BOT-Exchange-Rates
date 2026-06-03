@@ -10,21 +10,84 @@ Provides a single get_project_root() that works correctly in both:
 
 PyInstaller's __file__ resolves to the _MEI* temp extraction directory,
 which breaks all relative data/ lookups. This module fixes that.
+
+Frozen-mode writability (v3.2.8):
+  The exe-dir data/ folder is the default in frozen mode (preserves existing
+  installs). But Program Files is frequently read-only / UAC-virtualized, so
+  if the exe dir is NOT writable we fall back to a per-user app-data dir:
+    - Windows: %LOCALAPPDATA%/BOT_Exrate
+    - else:    ~/.local/share/BOT_Exrate
+  The dev-mode path is never changed.
 """
 
 import os
 import sys
 
+_APP_DIR_NAME = "BOT_Exrate"
+
+
+def _is_writable(directory: str) -> bool:
+    """Return True if we can create/write a file under ``directory``.
+
+    Creates the directory if needed, then probes with a temp file. Any OSError
+    (permission denied, read-only FS, UAC virtualization quirks) means we
+    treat the location as not writable.
+    """
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError:
+        return False
+    probe = os.path.join(directory, ".write_probe")
+    try:
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+
+def _user_data_root() -> str:
+    """Per-user writable app-data directory (used as a frozen-mode fallback)."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Local"
+        )
+        return os.path.join(base, _APP_DIR_NAME)
+    return os.path.join(os.path.expanduser("~"), ".local", "share", _APP_DIR_NAME)
+
 
 def get_project_root() -> str:
     """
-    Return the project root directory.
+    Return the project root directory used as the base for data/.
 
-    - Frozen (.exe / .app): the directory containing the executable.
-    - Source (python main.py): the directory containing main.py.
+    - Source (python main.py): the directory containing main.py. UNCHANGED.
+    - Frozen (.exe / .app): the directory containing the executable IF it is
+      writable; otherwise a per-user app-data dir (writable fallback) so the
+      app never orphans its cache/backups/logs in a read-only Program Files.
     """
     if getattr(sys, "frozen", False):
         # PyInstaller sets sys.executable to the .exe path
-        return os.path.dirname(sys.executable)
-    # Source mode — main.py lives at project root
+        exe_dir = os.path.dirname(sys.executable)
+        # Conservative: keep exe-dir data/ as default for existing installs.
+        if _is_writable(os.path.join(exe_dir, "data")):
+            return exe_dir
+        # Read-only / UAC-virtualized install — fall back to per-user dir.
+        return _user_data_root()
+    # Source mode — main.py lives at project root (never changed)
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def harden_data_dirs(project_root: str) -> None:
+    """Best-effort chmod 0o700 on the data/ root and its sensitive subdirs.
+
+    Restricts cache, backups and logs to the owner only where the OS supports
+    POSIX permissions. Silently ignores OSError (e.g. Windows / network FS).
+    """
+    for sub in ("data", os.path.join("data", "logs"), os.path.join("data", "backups")):
+        target = os.path.join(project_root, sub)
+        try:
+            os.makedirs(target, exist_ok=True)
+            os.chmod(target, 0o700)
+        except OSError:
+            pass

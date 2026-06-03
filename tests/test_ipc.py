@@ -9,7 +9,10 @@ verify the bytes-only protocol: a correct nonce triggers on_restore, while
 a wrong / raw payload is rejected.
 """
 
+import os
+import stat
 import sys
+import tempfile
 import threading
 import time
 
@@ -79,5 +82,44 @@ def test_raw_garbage_payload_rejected(isolated_ipc):
             conn.send_bytes(b"\x80\x04\x95\x00garbage")
         time.sleep(0.5)
         assert restored.is_set() is False
+    finally:
+        server.stop()
+
+
+# ───────────────────────────────────────────────────────────────────────
+#  Per-user private socket path
+# ───────────────────────────────────────────────────────────────────────
+def test_address_is_under_per_user_private_dir():
+    """The POSIX socket must live under tempdir/bot_exrate_<uid>/ipc.sock."""
+    addr = ipc._get_ipc_address()
+    expected_dir = os.path.join(tempfile.gettempdir(), f"bot_exrate_{os.getuid()}")
+    assert addr == os.path.join(expected_dir, "ipc.sock")
+    # The private runtime dir must exist and be owner-only (0700).
+    assert os.path.isdir(expected_dir)
+    mode = stat.S_IMODE(os.stat(expected_dir).st_mode)
+    assert mode == 0o700
+
+
+def test_real_per_user_path_authenticates(tmp_path, monkeypatch):
+    """A full RESTORE round-trip works against the real per-user path resolver.
+
+    Only the runtime dir is redirected (into tmp); the address-building logic
+    in _get_ipc_address is exercised unchanged so the new path still binds and
+    authenticates.
+    """
+    monkeypatch.setattr(ipc, "_ipc_runtime_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(ipc, "_lockfile_path", lambda: str(tmp_path / ".ipc_nonce"))
+
+    restored = threading.Event()
+    server = ipc.SingleInstanceServer(on_restore=restored.set)
+    assert server.start() is True
+    try:
+        # Socket should be the real default name under the redirected dir.
+        assert ipc._get_ipc_address() == str(tmp_path / "ipc.sock")
+        assert ipc.ping_running_instance() is True
+        assert restored.wait(timeout=3.0) is True
+        # Socket file must be owner-only.
+        mode = stat.S_IMODE(os.stat(tmp_path / "ipc.sock").st_mode)
+        assert mode == 0o600
     finally:
         server.stop()

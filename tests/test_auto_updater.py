@@ -587,12 +587,21 @@ class TestApplyUpdateSanitization:
         unsafe_path = str(tmp_path / "bad&path")
         os.makedirs(unsafe_path, exist_ok=True)
 
+        # A real installer file with a matching hash so we get PAST the
+        # mandatory re-verify step and actually reach the path check.
+        installer = tmp_path / "BOT-ExRate-Setup.exe"
+        installer.write_bytes(b"setup")
+        good_hash = hashlib.sha256(b"setup").hexdigest()
+
         with patch("core.auto_updater._get_install_dir", return_value=unsafe_path):
             with patch("sys.frozen", True, create=True):
-                result = apply_update(str(tmp_path / "BOT-ExRate-Setup.exe"))
+                result = apply_update(
+                    str(installer), expected_sha256=good_hash
+                )
 
         # Should fail because the install dir has '&'
         assert result["success"] is False
+        assert "Unsafe characters" in result["error"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -627,3 +636,121 @@ class TestGetInstallDir:
                     result = _get_install_dir()
 
         assert result == str(tmp_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  apply_update — mandatory re-hash before execution (TOCTOU)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestApplyUpdateReverify:
+    """The installer hash MUST be re-verified immediately before execution."""
+
+    def test_refuses_when_no_hash_supplied(self, tmp_path):
+        from core.auto_updater import apply_update
+
+        installer = tmp_path / "BOT-ExRate-Setup.exe"
+        installer.write_bytes(b"setup")
+
+        with patch("sys.frozen", True, create=True):
+            result = apply_update(str(installer), expected_sha256=None)
+
+        assert result["success"] is False
+        assert "SHA-256" in result["error"]
+
+    def test_refuses_when_file_missing(self, tmp_path):
+        from core.auto_updater import apply_update
+
+        missing = str(tmp_path / "gone.exe")
+        with patch("sys.frozen", True, create=True):
+            result = apply_update(missing, expected_sha256="a" * 64)
+
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+    def test_refuses_tampered_file(self, tmp_path):
+        """File swapped after download (hash mismatch) must NOT be executed."""
+        from core.auto_updater import apply_update
+
+        installer = tmp_path / "BOT-ExRate-Setup.exe"
+        installer.write_bytes(b"original")
+        # Expected hash is for the ORIGINAL content...
+        good_hash = hashlib.sha256(b"original").hexdigest()
+        # ...but an attacker swapped the file before exec.
+        installer.write_bytes(b"MALICIOUS PAYLOAD")
+
+        with patch("sys.frozen", True, create=True):
+            with patch("core.auto_updater._get_install_dir",
+                       return_value=str(tmp_path)):
+                with patch("subprocess.Popen") as mock_popen:
+                    result = apply_update(
+                        str(installer), expected_sha256=good_hash
+                    )
+
+        assert result["success"] is False
+        assert "mismatch" in result["error"].lower()
+        # CRITICAL: the installer must never have been launched.
+        mock_popen.assert_not_called()
+
+    def test_runs_when_hash_matches(self, tmp_path):
+        """A valid, matching installer proceeds to launch."""
+        from core.auto_updater import apply_update
+
+        installer = tmp_path / "BOT-ExRate-Setup.exe"
+        installer.write_bytes(b"good setup")
+        good_hash = hashlib.sha256(b"good setup").hexdigest()
+
+        with patch("sys.frozen", True, create=True):
+            with patch("core.auto_updater._get_install_dir",
+                       return_value=str(tmp_path)):
+                with patch("subprocess.Popen") as mock_popen:
+                    result = apply_update(
+                        str(installer), expected_sha256=good_hash
+                    )
+
+        assert result["success"] is True
+        mock_popen.assert_called_once()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  download_update — private per-run directory
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestDownloadPrivateDir:
+    """When no dest_dir is given, a private 0700 dir is created (not shared)."""
+
+    def test_uses_private_mkdtemp_dir(self):
+        import tempfile as _tempfile
+
+        content = b"installer"
+        expected_hash = hashlib.sha256(content).hexdigest()
+
+        mock_resp = MagicMock()
+        mock_resp.is_redirect = False
+        mock_resp.headers = {"content-length": str(len(content))}
+        mock_resp.iter_bytes.return_value = [content]
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("core.auto_updater.httpx.stream", return_value=mock_resp):
+            result = download_update(
+                url="https://github.com/dl/setup.exe",
+                filename="setup.exe",
+                expected_sha256=expected_hash,
+            )
+
+        assert result["error"] is None
+        path = result["path"]
+        assert path is not None
+        parent = os.path.dirname(path)
+        # Landed under a bot_exrate_dl_* private dir, NOT the shared temp root.
+        assert os.path.basename(parent).startswith("bot_exrate_dl_")
+        assert os.path.dirname(parent) == _tempfile.gettempdir()
+        # Owner-only perms where supported.
+        import stat as _stat
+        import sys as _sys
+        if _sys.platform != "win32":
+            mode = _stat.S_IMODE(os.stat(parent).st_mode)
+            assert mode == 0o700

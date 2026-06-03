@@ -155,9 +155,11 @@ class TrayManager:
         logger.info("Exit requested from system tray")
         if self._icon:
             self._icon.stop()
-        # Schedule destroy on the Tk main thread
+        # Schedule the app-level close handler on the Tk main thread so workers
+        # are torn down cleanly before destroy (falls back to destroy).
+        close_handler = getattr(self._app, "_on_app_close", self._app.destroy)
         try:
-            self._app.after(0, self._app.destroy)
+            self._app.after(0, close_handler)
         except RuntimeError:
             pass  # app already destroyed
 

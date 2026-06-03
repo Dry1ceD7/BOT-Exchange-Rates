@@ -44,6 +44,7 @@ class VersionPanel(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent", **kwargs)
         self._t = t
         self._pending_installer = None
+        self._pending_sha256 = None
         self._destroyed = False
         self._busy_ping = False
         self._busy_update = False
@@ -379,7 +380,8 @@ class VersionPanel(ctk.CTkFrame):
                 installer_path = result.get("path", "")
                 self._safe_after(0, self._dl_done,
                            "✅ Downloaded — restart to install",
-                           t["modal_success"], True, installer_path)
+                           t["modal_success"], True, installer_path,
+                           expected_sha256)
             except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
                 self._safe_after(0, self._dl_done,
                            f"Error: {e}", t["error_text"], False)
@@ -387,13 +389,14 @@ class VersionPanel(ctk.CTkFrame):
         threading.Thread(target=_worker, daemon=True, name="UpdateDL").start()
 
     def _dl_done(self, text: str, color: str, success: bool,
-                 installer_path: str = None):
+                 installer_path: str = None, expected_sha256: str = None):
         self._busy_download = False
         self._lbl_update.configure(text=text, text_color=color)
         if success:
             self._btn_update.configure(state="disabled", text="Updated ✓")
             self._btn_dl_version.configure(state="disabled")
             self._pending_installer = installer_path
+            self._pending_sha256 = expected_sha256
             self._show_restart_dialog()
         else:
             self._btn_update.configure(state="normal")
@@ -464,9 +467,13 @@ class VersionPanel(ctk.CTkFrame):
             pass
         settings_modal.destroy()
 
-        # Run the installer silently if we have a downloaded file
+        # Run the installer silently if we have a downloaded file.
+        # SECURITY: pass the expected SHA-256 so apply_update re-verifies the
+        # file immediately before executing it (TOCTOU guard).
         if installer and os.path.isfile(installer):
-            result = apply_update(installer)
+            result = apply_update(
+                installer, expected_sha256=self._pending_sha256
+            )
             if not result.get("success"):
                 logger.error("Installer failed: %s", result.get("error"))
                 if self._on_error:

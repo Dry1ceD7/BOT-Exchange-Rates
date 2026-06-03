@@ -31,9 +31,13 @@ class BatchHandler:
     Pushes structured events to the EventBus for the LiveConsole.
     """
 
-    def __init__(self, app, event_bus: Optional[EventBus] = None):
+    def __init__(self, app, event_bus: Optional[EventBus] = None, registry=None):
         self.app = app
         self.bus = event_bus or EventBus()
+        self.registry = registry
+        # Single concurrency guard shared by manual + scheduler paths.
+        self._batch_lock = threading.Lock()
+        self._batch_active = False
 
     def start_batch(
         self,
@@ -41,19 +45,40 @@ class BatchHandler:
         start_date: str,
         dry_run: bool = False,
     ):
-        """Launch the batch processing thread."""
+        """Launch the batch processing thread.
+
+        Rejects a second concurrent start while a batch is already running
+        so the manual button and the scheduler callback can never spawn two
+        LedgerEngine.process_batch runs over the same files/cache.
+        """
+        with self._batch_lock:
+            if self._batch_active:
+                self.bus.push({
+                    "type": "warning",
+                    "msg": "Batch already running \u2014 new start request ignored.",
+                })
+                logger.warning("start_batch rejected: a batch is already active")
+                return
+            self._batch_active = True
+
+        # Snapshot the queue so a mid-flight selection change can't desync it.
+        files = list(file_queue)
         mode = "SIMULATION" if dry_run else "batch"
-        self.bus.push({"type": "log", "msg": f"Starting {mode}: {len(file_queue)} ledger(s)..."})
+        self.bus.push({"type": "log", "msg": f"Starting {mode}: {len(files)} ledger(s)..."})
         if dry_run:
             self.bus.push({
                 "type": "log",
                 "msg": "\u26a0 DRY RUN \u2014 files will NOT be modified.",
             })
-        threading.Thread(
+        thread = threading.Thread(
             target=self._batch_thread,
-            args=(file_queue, start_date, dry_run),
+            args=(files, start_date, dry_run),
             daemon=True,
-        ).start()
+            name="BatchWorker",
+        )
+        if self.registry is not None:
+            self.registry.register(thread, name="BatchWorker")
+        thread.start()
 
     def _batch_thread(
         self,
@@ -65,6 +90,7 @@ class BatchHandler:
         try:
             asyncio.run(self._run_batch(file_queue, start_date, dry_run))
         except (httpx.ConnectError, httpx.TimeoutException):
+            logger.exception("Network error during batch")
             self.bus.push({"type": "error", "msg": "Network error — check your internet connection."})
             try:
                 self.app.after(
@@ -74,11 +100,17 @@ class BatchHandler:
             except RuntimeError:
                 logger.debug("App already destroyed during network error callback")
         except Exception as e:
+            logger.exception("Unhandled error during batch")
             self.bus.push({"type": "error", "msg": str(e)})
             try:
                 self.app.after(100, self.app._show_error, str(e))
             except RuntimeError:
                 logger.debug("App already destroyed during error callback")
+        finally:
+            with self._batch_lock:
+                self._batch_active = False
+            if self.registry is not None:
+                self.registry.unregister("BatchWorker")
 
     async def _run_batch(
         self,
@@ -137,11 +169,15 @@ class BatchHandler:
     def start_revert(self, filepath: str):
         """Launch the revert operation in a background thread."""
         self.bus.push({"type": "log", "msg": f"Reverting: {os.path.basename(filepath)}..."})
-        threading.Thread(
+        thread = threading.Thread(
             target=self._revert_thread,
             args=(filepath,),
             daemon=True,
-        ).start()
+            name="RevertWorker",
+        )
+        if self.registry is not None:
+            self.registry.register(thread, name="RevertWorker")
+        thread.start()
 
     def _revert_thread(self, filepath: str):
         """Thread target for the revert operation."""
@@ -158,8 +194,12 @@ class BatchHandler:
             except RuntimeError:
                 logger.debug("App already destroyed during revert success callback")
         except (BackupError, OSError, ValueError) as e:
+            logger.exception("Revert failed for %s", filepath)
             self.bus.push({"type": "error", "msg": f"Revert failed: {e}"})
             try:
                 self.app.after(0, self.app._show_revert_error, str(e))
             except RuntimeError:
                 logger.debug("App already destroyed during revert error callback")
+        finally:
+            if self.registry is not None:
+                self.registry.unregister("RevertWorker")

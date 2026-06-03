@@ -12,6 +12,7 @@ SFFB: Strict < 100 lines.
 
 import logging
 import threading
+import tkinter
 
 import customtkinter as ctk
 
@@ -41,8 +42,9 @@ class CSVPanel(ctk.CTkFrame):
             return
         try:
             self.after(ms, func, *args)
-        except RuntimeError:
-            pass
+        except (RuntimeError, tkinter.TclError):
+            # TclError "application has been destroyed" is not a RuntimeError.
+            self._destroyed = True
 
     def _build_ui(self):
         t = self._t

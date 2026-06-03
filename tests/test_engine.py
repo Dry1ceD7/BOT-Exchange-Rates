@@ -324,3 +324,95 @@ class TestBatchAndHolidayLookup:
         )
         assert (success, failed, errors) == (2, 0, [])
         assert engine.last_batch_anomaly_count == 4
+
+
+# =========================================================================
+#  END-TO-END INTEGRATION (GAP2)
+# =========================================================================
+
+class TestProcessLedgerEndToEnd:
+    """Full process_ledger run on a real fixture with a mocked API."""
+
+    def _build_engine(self, tmp_cache, tmp_path):
+        """Engine wired to a mocked API + injected tmp backup/cache."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        def _rate(period, currency, buying_transfer, selling):
+            return SimpleNamespace(
+                period=period, currency=currency,
+                buying_transfer=buying_transfer, buying_sight=None,
+                selling=selling, mid_rate=None,
+            )
+
+        async def _rates(start, end, currency):
+            # Provide rates for the target dates (and surrounding range).
+            base_b = 33.0 if currency == "USD" else 36.0
+            base_s = 33.5 if currency == "USD" else 36.5
+            out = []
+            d = start
+            from datetime import timedelta as _td
+            while d <= end:
+                out.append(_rate(
+                    d.strftime("%Y-%m-%d"), currency, base_b, base_s,
+                ))
+                d += _td(days=1)
+            return out
+
+        async def _holidays(year):
+            return []
+
+        api = MagicMock()
+        api.get_exchange_rates = _rates
+        api.get_holidays = _holidays
+
+        backup = MagicMock()  # no-op backup, injected
+        return LedgerEngine(api, backup=backup, cache=tmp_cache)
+
+    def test_real_run_populates_exrate_and_formulas(
+        self, ledger_xlsx, tmp_cache, tmp_path,
+    ):
+        path = ledger_xlsx({"Jan": [
+            (date(2025, 1, 7), "USD"),    # Tuesday
+            ("10/03/2025", "EUR"),        # string date → normalized
+        ]})
+        engine = self._build_engine(tmp_cache, tmp_path)
+
+        result = asyncio.run(engine.process_ledger(path))
+        assert result == path
+
+        wb = openpyxl.load_workbook(path)
+        try:
+            # ExRate master sheet populated.
+            assert "ExRate" in wb.sheetnames
+            ws_ex = wb["ExRate"]
+            assert ws_ex.max_row >= 2
+
+            ws = wb["Jan"]
+            # EX Rate (col 3) holds the IFS formula.
+            usd_formula = ws.cell(row=2, column=3).value
+            assert isinstance(usd_formula, str)
+            assert usd_formula.startswith("=IF(OR(")
+            assert "_xlfn.IFS(" in usd_formula
+            assert "_xlfn.XLOOKUP(" in usd_formula
+
+            # Source date that was a string is now a real date.
+            normalized = ws.cell(row=3, column=1).value
+            as_date = normalized.date() if isinstance(normalized, datetime) \
+                else normalized
+            assert as_date == date(2025, 3, 10)
+        finally:
+            wb.close()
+
+    def test_dry_run_leaves_file_bytes_unchanged(
+        self, ledger_xlsx, tmp_cache, tmp_path,
+    ):
+        path = ledger_xlsx({"Jan": [(date(2025, 1, 7), "USD")]})
+        before = open(path, "rb").read()
+        engine = self._build_engine(tmp_cache, tmp_path)
+
+        result = asyncio.run(engine.process_ledger(path, dry_run=True))
+        assert result == path
+        assert open(path, "rb").read() == before
+        # Backup must be skipped on dry runs.
+        engine.backup.create_backup.assert_not_called()

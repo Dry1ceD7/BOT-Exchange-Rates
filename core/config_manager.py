@@ -94,6 +94,11 @@ class SettingsManager:
 
     def save(self, settings: Dict[str, Any]) -> None:
         """Persist settings to disk and update cache."""
+        with self._lock:
+            self._save_locked(settings)
+
+    def _save_locked(self, settings: Dict[str, Any]) -> None:
+        """Persist settings to disk and update cache. Caller holds the lock."""
         os.makedirs(self._config_dir, exist_ok=True)
         merged = dict(DEFAULT_SETTINGS)
         merged.update(settings)
@@ -123,15 +128,30 @@ class SettingsManager:
                     os.remove(tmp_path)
             except OSError:
                 pass
-        with self._lock:
-            self._cache = merged
+        self._cache = merged
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get a single setting value (from cache)."""
         return self.load().get(key, default)
 
     def set(self, key: str, value: Any) -> None:
-        """Set a single setting value and persist."""
-        settings = self.load()
-        settings[key] = value
-        self.save(settings)
+        """Set a single setting value and persist.
+
+        Holds the lock across the full load→modify→save cycle so two
+        concurrent set() calls cannot clobber each other (the scheduler
+        runs on a background thread, so concurrent sets are real).
+        """
+        with self._lock:
+            if self._cache is not None:
+                settings = dict(self._cache)
+                settings[key] = value
+                self._save_locked(settings)
+                return
+        # Cache was cold — populate it from disk (acquires the lock), then
+        # retry the locked read-modify-write.
+        self._load_from_disk()
+        with self._lock:
+            settings = dict(self._cache) if self._cache is not None \
+                else dict(DEFAULT_SETTINGS)
+            settings[key] = value
+            self._save_locked(settings)
