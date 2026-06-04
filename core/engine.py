@@ -11,6 +11,7 @@ Slim orchestrator. Heavy logic extracted to:
 """
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -51,14 +52,21 @@ from core.logic import (
     compute_year_start_date,
     safe_to_decimal,
 )
+from core.paths import get_project_root
 from core.prescan import prescan_oldest_date
 
 logger = logging.getLogger(__name__)
+
+# Schema version for the resume manifest. Bumped if the on-disk shape changes
+# so a stale manifest from an incompatible build is ignored rather than
+# misread. Only paths/dates/flags are ever persisted — NEVER rates or tokens.
+BATCH_MANIFEST_VERSION = 1
 
 # Backward-compat re-export: pure functions now live in core.logic but are
 # still importable from core.engine (e.g. `from core.engine import
 # compute_year_start_date`).
 __all__ = [
+    "BatchManifest",
     "FileSizeLimitError",
     "LedgerEngine",
     "build_holiday_lookup",
@@ -72,6 +80,151 @@ __all__ = [
 
 class FileSizeLimitError(Exception):
     """Raised when the input workbook exceeds the configured size limit."""
+
+
+# -------------------------------------------------------------------------
+# CRASH-RECOVERY / RESUME MANIFEST
+# -------------------------------------------------------------------------
+
+
+class BatchManifest:
+    """Featherweight crash-recovery manifest for an in-flight batch.
+
+    Persists ``data/batch_state.json`` so an interrupted run (app crash, power
+    loss, OS kill) can be resumed instead of forcing the operator to rebuild
+    the whole selection. Written ONCE at batch start, then updated per completed
+    file, and deleted on a clean finish AND on a user cancellation (a cancel is
+    intentional, not a crash — there is nothing to recover).
+
+    Privacy/featherweight contract: the manifest stores ONLY the file paths, the
+    resolved start date, and the run flags (dry_run). It never holds exchange
+    rates, holiday data, or API tokens — so a leftover file is harmless. Writes
+    are atomic (temp + ``os.replace`` in the same dir, the round-7 save idiom)
+    so a crash mid-write can never corrupt a previously-good manifest.
+    """
+
+    FILENAME = "batch_state.json"
+
+    def __init__(self, path: Path | str | None = None) -> None:
+        if path is None:
+            path = Path(get_project_root()) / "data" / self.FILENAME
+        self.path = Path(path)
+
+    # ── Write helpers ────────────────────────────────────────────────
+    def begin(
+        self,
+        filepaths: list[str],
+        start_date: str | None,
+        dry_run: bool,
+    ) -> None:
+        """Write the initial manifest at batch start (every file pending)."""
+        self._write({
+            "version": BATCH_MANIFEST_VERSION,
+            "start_date": start_date,
+            "dry_run": bool(dry_run),
+            "files": [{"path": fp, "done": False} for fp in filepaths],
+        })
+
+    def mark_done(self, filepath: str) -> None:
+        """Flag ``filepath`` complete and re-persist (best-effort).
+
+        A failure to update the manifest must NEVER abort the batch — at worst a
+        resume re-processes an already-done file, which is safe (a fresh backup
+        is taken and the same Decimal values are re-written). So persistence
+        errors are swallowed with a debug log.
+        """
+        data = self._read_raw()
+        if data is None:
+            return
+        for entry in data.get("files", []):
+            if entry.get("path") == filepath:
+                entry["done"] = True
+                break
+        try:
+            self._write(data)
+        except OSError as exc:
+            logger.debug("batch manifest update failed (non-fatal): %s", exc)
+
+    def clear(self) -> None:
+        """Delete the manifest (clean completion OR intentional cancel)."""
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.debug("batch manifest delete failed (non-fatal): %s", exc)
+
+    # ── Read helpers (used by GUI + CLI resume) ──────────────────────
+    def _read_raw(self) -> dict | None:
+        """Return the raw manifest dict, or None if absent/unreadable/stale."""
+        try:
+            with self.path.open(encoding="utf-8") as fh:
+                data = json.load(fh)
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            logger.debug("batch manifest read failed: %s", exc)
+            return None
+        if not isinstance(data, dict):
+            return None
+        if data.get("version") != BATCH_MANIFEST_VERSION:
+            logger.debug("ignoring batch manifest with unknown version")
+            return None
+        return data
+
+    def pending_files(self) -> list[str]:
+        """Return paths not yet marked done (the work a resume would pick up).
+
+        Only files that still EXIST on disk are returned — a path that was
+        moved/deleted since the crash is skipped so a resume never chokes on a
+        stale entry.
+        """
+        data = self._read_raw()
+        if data is None:
+            return []
+        out: list[str] = []
+        for entry in data.get("files", []):
+            if entry.get("done"):
+                continue
+            fp = entry.get("path")
+            if isinstance(fp, str) and Path(fp).is_file():
+                out.append(fp)
+        return out
+
+    def start_date(self) -> str | None:
+        """Return the persisted start date (None if absent/unreadable)."""
+        data = self._read_raw()
+        if data is None:
+            return None
+        sd = data.get("start_date")
+        return sd if isinstance(sd, str) else None
+
+    def has_pending(self) -> bool:
+        """True when a resumable manifest with unfinished files exists."""
+        return bool(self.pending_files())
+
+    # ── Atomic write (round-7 temp + os.replace idiom) ───────────────
+    def _write(self, data: dict) -> None:
+        """Atomically (over)write the manifest JSON.
+
+        Writes to a sibling temp file in the SAME directory then ``os.replace``
+        swaps it in, so the replace stays on one filesystem and a crash mid-
+        write leaves the previous good manifest untouched. Mirrors
+        ``core.workbook_io.atomic_save``: on any failure the partial temp file
+        is removed and never left behind.
+        """
+        import contextlib
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.path.with_name(f"{self.path.name}.tmp~")
+        try:
+            with tmp_path.open("w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=2)
+            tmp_path.replace(self.path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp_path.unlink()
+            raise
 
 
 # -------------------------------------------------------------------------
@@ -136,12 +289,21 @@ class LedgerEngine:
             "currency": "Cur",
             "out_rate": "EX Rate",
         }
-        # v3.1.0: Load anomaly threshold from settings
+        # ── Settings-snapshot contract (state-conflicts) ────────────────
+        # ALL engine settings are snapshotted ONCE here, at engine
+        # construction. A LedgerEngine is built fresh per batch (handlers.py,
+        # main.py, exrate_dialog.py), so "engine construction" == "batch
+        # start". This guarantees a mid-batch Settings "Save" can never change
+        # behavior for the in-flight run: every file in the batch sees the same
+        # rate_type AND the same anomaly threshold. Previously the threshold was
+        # snapshotted here but rate_type was re-read per file inside
+        # process_ledger, so the two settings behaved oppositely in one run.
         _settings = SettingsManager().load()
         threshold = _settings.get(
             "anomaly_threshold_pct", DEFAULT_ANOMALY_THRESHOLD_PCT
         )
         self._anomaly_guard = AnomalyGuard(threshold_pct=threshold)
+        self._rate_type = _settings.get("rate_type", "buying_transfer")
         self._last_anomaly_count = 0
         self._last_batch_anomaly_count = 0
         # Path to the audit CSV written by the most recent process_batch run
@@ -662,14 +824,15 @@ class LedgerEngine:
             self.backup.create_backup(filepath)
             self._emit("Backup created")
 
-        # ── Snapshot rate type ONCE at the start of this file's run ─────
-        # Re-reading SettingsManager later (inside the writer) let a mid-batch
-        # Settings "Save" silently switch the rate basis for the remaining
-        # files. Snapshotting here keeps one consistent rate type per file run
-        # regardless of concurrent settings edits.
-        rate_type = SettingsManager().load().get(
-            "rate_type", "buying_transfer"
-        )
+        # ── Use the batch-start rate-type snapshot ──────────────────────
+        # rate_type is snapshotted ONCE in __init__ (batch start), exactly like
+        # the anomaly threshold, so both settings honor the same contract: a
+        # mid-batch Settings "Save" affects neither the rate basis nor the
+        # anomaly threshold of the in-flight run. (Re-reading SettingsManager
+        # here would have let a mid-batch save flip the rate basis for the
+        # remaining files while the threshold stayed fixed — the two settings
+        # behaving oppositely in one run.)
+        rate_type = self._rate_type
 
         # ── Pre-scan dates + currencies for API data loading ──────────
         all_target_dates, ledger_currencies = (
@@ -758,6 +921,7 @@ class LedgerEngine:
         dry_run: bool = False,
         stop_event: threading.Event | None = None,
         audit: AuditLogger | None = None,
+        manifest: "BatchManifest | None" = None,
     ) -> tuple[int, int, list[str]]:
         """Batch processing with pre-edit backup, cache, audit trail, cleanup.
 
@@ -765,6 +929,20 @@ class LedgerEngine:
         a safe boundary after the previous file's wb.close()+gc — so a cancel
         never lands mid-save and risks truncating an in-place .xlsx. Remaining
         files are reported as unprocessed via errors + progress_cb.
+
+        Crash-recovery / resume (``manifest``):
+          * For a real (non-dry) run the engine writes a tiny JSON manifest
+            (``data/batch_state.json``) at batch start listing the file paths,
+            the resolved start date, and the dry-run flag — NO rates, NO tokens.
+            Each file is flagged done as it completes, so an app crash / power
+            loss leaves a manifest the GUI or ``--resume`` can pick up to finish
+            only the unprocessed files.
+          * The manifest is deleted on a CLEAN completion AND on a user
+            cancellation (a cancel via ``stop_event`` is intentional, not a
+            crash — nothing to recover).
+          * Dry runs never write a manifest (no files are modified). Callers can
+            inject their own ``BatchManifest`` (tests / a resume that wants a
+            specific path); otherwise a default one is created for real runs.
 
         Audit trail (compliance):
           * If a caller passes its own ``audit`` AuditLogger, the engine records
@@ -783,6 +961,22 @@ class LedgerEngine:
         anomaly_total = 0
         errors: list[str] = []
 
+        # ── Crash-recovery manifest ──────────────────────────────────────
+        # Real runs only: write the resume manifest now (every file pending) so
+        # an interruption before the first wb.close() is still recoverable. Dry
+        # runs modify nothing, so they never write one. A manifest write failure
+        # must never block processing — degrade to "no resume" rather than abort.
+        if dry_run:
+            manifest = None
+        elif manifest is None:
+            manifest = BatchManifest()
+        if manifest is not None:
+            try:
+                manifest.begin(filepaths, start_date, dry_run)
+            except OSError as exc:
+                logger.debug("batch manifest begin failed (non-fatal): %s", exc)
+                manifest = None
+
         # ── Audit-log lifecycle ──────────────────────────────────────────
         # Own the log only when the caller did not inject one AND this is a
         # real run; record cell changes into a thread-safe collector and drain
@@ -793,10 +987,19 @@ class LedgerEngine:
             audit = AuditLogger()
         collector = AuditCollector() if audit is not None else None
 
+        cancelled = False
         for idx, fp in enumerate(filepaths):
             fname = Path(fp).name
             # ── Cooperative cancellation (safe boundary: between files) ────
             if stop_event is not None and stop_event.is_set():
+                # A cancel is INTENTIONAL, not a crash — drop the resume manifest
+                # once, the first time we hit the cancel boundary, so the next
+                # launch does not offer to resume a batch the user deliberately
+                # stopped. Remaining files are still reported as unprocessed.
+                if not cancelled and manifest is not None:
+                    manifest.clear()
+                    manifest = None
+                cancelled = True
                 err_msg = f"{fname}: cancelled — not processed"
                 errors.append(err_msg)
                 logger.warning("Batch cancelled before file: %s", fname)
@@ -812,6 +1015,10 @@ class LedgerEngine:
                 file_ok = True
                 success += 1
                 anomaly_total += self.last_anomaly_count
+                # File is safely written + closed — flag it done in the manifest
+                # so a crash on a LATER file resumes from here, not the start.
+                if manifest is not None:
+                    manifest.mark_done(fp)
                 if progress_cb:
                     progress_cb(idx + 1, total, fname, None)
             except BackupError as e:
@@ -865,6 +1072,17 @@ class LedgerEngine:
                         audit.log_records(drained)
 
         self._last_batch_anomaly_count = anomaly_total
+
+        # ── Clear the resume manifest on a CLEAN completion ──────────────
+        # The loop ran to its natural end (not cancelled mid-way), so there is
+        # no crash to recover from — drop the manifest. Files that FAILED this
+        # run are intentionally not resumed: a real run already reported them as
+        # errors for the operator to fix and re-select, and silently re-running a
+        # no-rate / oversized file every launch would be a worse experience than
+        # a clean failure report. (Cancellation already cleared + nulled the
+        # manifest inside the loop, so this only fires on a non-cancelled run.)
+        if not cancelled and manifest is not None:
+            manifest.clear()
 
         # ── Finalize the engine-owned audit log ─────────────────────────
         # A caller-supplied audit log is left open for the caller to summarize

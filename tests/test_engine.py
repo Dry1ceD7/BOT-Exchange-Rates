@@ -1291,3 +1291,278 @@ class TestAuditTrailWiredIntoBatch:
         assert "fileA.xlsx" not in filenames, cells
         # Only the file that was actually written is audited.
         assert filenames == {"fileB.xlsx"}, cells
+
+
+# =========================================================================
+#  SETTINGS-SNAPSHOT CONTRACT (state-conflicts)
+#  Finding: "Anomaly threshold is snapshotted at batch start but rate_type
+#  is read live, so the two settings behave oppositely in one run."
+#  Contract: every relevant setting (rate_type, anomaly threshold) is
+#  snapshotted ONCE at engine construction (== batch start, since a fresh
+#  LedgerEngine is built per batch), so a mid-batch Settings "Save" never
+#  affects the in-flight run.
+# =========================================================================
+
+class TestSettingsSnapshotContract:
+    """rate_type and anomaly threshold are BOTH snapshotted at construction."""
+
+    def test_rate_type_snapshotted_at_construction(
+        self, mock_api, tmp_cache, monkeypatch
+    ):
+        """The engine reads rate_type once, in __init__, not per file."""
+        loads: list[None] = []
+
+        class _FakeSettings:
+            def load(self):
+                loads.append(None)
+                return {"rate_type": "selling", "anomaly_threshold_pct": 7.5}
+
+        monkeypatch.setattr(engine_mod, "SettingsManager", _FakeSettings)
+        eng = LedgerEngine(mock_api, cache=tmp_cache, backup=MagicMock())
+
+        assert eng._rate_type == "selling"
+        assert eng._anomaly_guard.threshold_pct == 7.5
+        # Exactly one settings read happened at construction time.
+        assert len(loads) == 1
+
+    def test_process_ledger_uses_snapshot_not_live_settings(
+        self, mock_api, tmp_cache, sample_xlsx, monkeypatch
+    ):
+        """A mid-batch Settings change must NOT flip rate_type for this run.
+
+        Construct the engine while settings say 'buying_transfer', then mutate
+        the live settings to 'selling' and run process_ledger. The rate_type
+        threaded into WorkbookWriter.write must still be the snapshot
+        ('buying_transfer') — proving the file run ignores the live change,
+        consistent with the threshold which is also fixed at construction.
+        """
+        live = {"rate_type": "buying_transfer", "anomaly_threshold_pct": 5.0}
+
+        class _MutableSettings:
+            def load(self):
+                # Return a copy so callers can't mutate our backing store, but
+                # reflect whatever 'live' currently holds.
+                return dict(live)
+
+        monkeypatch.setattr(engine_mod, "SettingsManager", _MutableSettings)
+        eng = LedgerEngine(mock_api, cache=tmp_cache, backup=MagicMock())
+
+        # Simulate the user hitting "Save" in Settings mid-batch.
+        live["rate_type"] = "selling"
+
+        # Capture the rate_type that reaches the writer.
+        captured: dict[str, str] = {}
+
+        async def _fake_write(self_writer, filepath, dry_run, *args, **kwargs):
+            captured["rate_type"] = kwargs.get("rate_type")
+            return filepath
+
+        monkeypatch.setattr(
+            engine_mod.WorkbookWriter, "write", _fake_write
+        )
+        # Keep the run cheap: no real API/holiday work, no standalone branch.
+        monkeypatch.setattr(
+            eng, "_detect_standalone_exrate",
+            AsyncMock(return_value=None),
+        )
+
+        async def _fake_preload(dates, start_date):
+            return (
+                SimpleNamespace(holidays=[]), {}, {}, {}, {}, [], [],
+            )
+
+        monkeypatch.setattr(eng, "_preload_api_data", _fake_preload)
+        monkeypatch.setattr(eng, "_run_anomaly_check", lambda *a, **k: 0)
+        monkeypatch.setattr(
+            engine_mod, "build_holiday_lookup",
+            lambda *a, **k: (set(), {}),
+        )
+        monkeypatch.setattr(
+            engine_mod, "compute_year_start_date",
+            lambda *a, **k: date(2024, 12, 30),
+        )
+
+        asyncio.run(eng.process_ledger(sample_xlsx, dry_run=True))
+
+        # The snapshot wins — the mid-batch "selling" change is ignored.
+        assert captured["rate_type"] == "buying_transfer"
+
+
+# =========================================================================
+#  CRASH-RECOVERY / RESUME MANIFEST  (round-9 upgrade)
+# =========================================================================
+class TestBatchManifest:
+    """Unit tests for the BatchManifest persistence helper.
+
+    The manifest is the on-disk seam a GUI / `--resume` run reads to finish an
+    interrupted batch. It must persist ONLY paths/dates/flags, write atomically,
+    and survive partial completion without corruption.
+    """
+
+    def test_begin_writes_paths_dates_flags_only(self, tmp_path):
+        from core.engine import BatchManifest
+
+        mpath = tmp_path / "batch_state.json"
+        m = BatchManifest(mpath)
+        m.begin(["/a/jan.xlsx", "/a/feb.xlsx"], "2025-01-02", dry_run=False)
+
+        import json
+        data = json.loads(mpath.read_text(encoding="utf-8"))
+        # Privacy contract: no rates, no tokens — only paths/date/flag/version.
+        assert set(data.keys()) == {"version", "start_date", "dry_run", "files"}
+        assert data["start_date"] == "2025-01-02"
+        assert data["dry_run"] is False
+        assert [f["path"] for f in data["files"]] == ["/a/jan.xlsx", "/a/feb.xlsx"]
+        assert all(f["done"] is False for f in data["files"])
+
+    def test_mark_done_flags_only_that_file(self, tmp_path):
+        from core.engine import BatchManifest
+
+        m = BatchManifest(tmp_path / "batch_state.json")
+        m.begin(["/a/jan.xlsx", "/a/feb.xlsx"], "2025-01-02", dry_run=False)
+        m.mark_done("/a/jan.xlsx")
+
+        import json
+        data = json.loads((tmp_path / "batch_state.json").read_text("utf-8"))
+        done = {f["path"]: f["done"] for f in data["files"]}
+        assert done == {"/a/jan.xlsx": True, "/a/feb.xlsx": False}
+
+    def test_pending_files_skips_done_and_missing(self, tmp_path):
+        from core.engine import BatchManifest
+
+        present = tmp_path / "feb.xlsx"
+        present.write_bytes(b"x")
+        m = BatchManifest(tmp_path / "batch_state.json")
+        # jan is done; gone.xlsx no longer exists on disk; feb is the only resume.
+        m.begin([str(present), "/a/jan.xlsx", "/a/gone.xlsx"], "2025-01-02", False)
+        m.mark_done("/a/jan.xlsx")
+
+        assert m.pending_files() == [str(present)]
+        assert m.has_pending() is True
+        assert m.start_date() == "2025-01-02"
+
+    def test_clear_removes_manifest(self, tmp_path):
+        from core.engine import BatchManifest
+
+        mpath = tmp_path / "batch_state.json"
+        m = BatchManifest(mpath)
+        m.begin(["/a/jan.xlsx"], None, dry_run=False)
+        assert mpath.exists()
+        m.clear()
+        assert not mpath.exists()
+        # Idempotent — clearing an absent manifest is a no-op, never raises.
+        m.clear()
+
+    def test_read_ignores_stale_version(self, tmp_path):
+        from core.engine import BatchManifest
+
+        mpath = tmp_path / "batch_state.json"
+        mpath.write_text('{"version": 999, "files": [{"path": "x", "done": false}]}')
+        m = BatchManifest(mpath)
+        # A manifest from an incompatible build is ignored, not misread.
+        assert m.pending_files() == []
+        assert m.has_pending() is False
+
+    def test_read_handles_corrupt_json(self, tmp_path):
+        from core.engine import BatchManifest
+
+        mpath = tmp_path / "batch_state.json"
+        mpath.write_text("{ not valid json")
+        m = BatchManifest(mpath)
+        assert m.pending_files() == []
+
+    def test_write_is_atomic_no_temp_left(self, tmp_path):
+        from core.engine import BatchManifest
+
+        m = BatchManifest(tmp_path / "batch_state.json")
+        m.begin(["/a/jan.xlsx"], "2025-01-02", dry_run=False)
+        m.mark_done("/a/jan.xlsx")
+        # No sibling temp file may survive a successful write.
+        leftovers = list(tmp_path.glob("*.tmp~"))
+        assert leftovers == []
+
+
+class TestProcessBatchManifestLifecycle:
+    """process_batch must write/update/delete the resume manifest correctly."""
+
+    def test_clean_run_deletes_manifest(self, engine, monkeypatch, tmp_path):
+        from core.engine import BatchManifest
+
+        async def _ok(fp, *a, **k):
+            return fp
+
+        monkeypatch.setattr(engine, "process_ledger", _ok)
+        mpath = tmp_path / "batch_state.json"
+        m = BatchManifest(mpath)
+        # Inject a MagicMock audit logger so the engine does NOT create + write
+        # its own real audit CSV into data/logs as a test side effect.
+        asyncio.run(engine.process_batch(
+            ["a.xlsx", "b.xlsx"], dry_run=False, manifest=m,
+            audit=MagicMock(),
+        ))
+        # A clean completion leaves nothing to recover.
+        assert not mpath.exists()
+
+    def test_crash_after_first_file_leaves_manifest_with_remainder(
+        self, engine, monkeypatch, tmp_path,
+    ):
+        """Simulate a crash: file 1 completes, file 2 raises an UNHANDLED error
+        that propagates out of process_batch (not one of the caught branches).
+        The manifest must survive with file 1 done and file 2 still pending."""
+        from core.engine import BatchManifest
+
+        async def _ledger(fp, *a, **k):
+            if fp == "b.xlsx":
+                raise RuntimeError("simulated crash mid-batch")
+            return fp
+
+        monkeypatch.setattr(engine, "process_ledger", _ledger)
+        mpath = tmp_path / "batch_state.json"
+        m = BatchManifest(mpath)
+        with pytest.raises(RuntimeError):
+            asyncio.run(engine.process_batch(
+                ["a.xlsx", "b.xlsx"], dry_run=False, manifest=m,
+                audit=MagicMock(),
+            ))
+        # Manifest survived the crash; file 1 is done, file 2 still pending.
+        assert mpath.exists()
+        done = {
+            f["path"]: f["done"]
+            for f in BatchManifest(mpath)._read_raw()["files"]
+        }
+        assert done == {"a.xlsx": True, "b.xlsx": False}
+
+    def test_cancellation_deletes_manifest(self, engine, monkeypatch, tmp_path):
+        """A cancel is intentional, not a crash — the manifest is dropped so the
+        next launch does not offer to resume a deliberately-stopped batch."""
+        from core.engine import BatchManifest
+
+        stop_event = threading.Event()
+        stop_event.set()  # cancel before any file runs
+
+        async def _ledger(fp, *a, **k):
+            return fp
+
+        monkeypatch.setattr(engine, "process_ledger", _ledger)
+        mpath = tmp_path / "batch_state.json"
+        m = BatchManifest(mpath)
+        asyncio.run(engine.process_batch(
+            ["a.xlsx", "b.xlsx"], dry_run=False, manifest=m,
+            stop_event=stop_event, audit=MagicMock(),
+        ))
+        assert not mpath.exists()
+
+    def test_dry_run_writes_no_manifest(self, engine, monkeypatch, tmp_path):
+        from core.engine import BatchManifest
+
+        async def _ok(fp, *a, **k):
+            return fp
+
+        monkeypatch.setattr(engine, "process_ledger", _ok)
+        mpath = tmp_path / "batch_state.json"
+        m = BatchManifest(mpath)
+        # dry_run forces manifest=None internally; the injected one is untouched.
+        asyncio.run(engine.process_batch(
+            ["a.xlsx"], dry_run=True, manifest=m,
+        ))
+        assert not mpath.exists()
