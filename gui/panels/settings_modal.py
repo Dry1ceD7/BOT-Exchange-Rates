@@ -80,8 +80,15 @@ class SettingsModal(ctk.CTkToplevel):
         t = get_theme()
 
         self.title(tr("settings.title"))
-        self.geometry("420x720")
-        self.resizable(False, False)
+        # The content now lives in a scrollable body (see _build_ui), so a short
+        # window on a small legacy screen never clips the bottom Save button —
+        # the body scrolls instead. Height is capped to the available screen so
+        # the window itself always fits; width stays fixed for a tidy layout.
+        self._width = 420
+        self._height = min(720, max(480, self.winfo_screenheight() - 120))
+        self.geometry(f"{self._width}x{self._height}")
+        self.resizable(False, True)
+        self.minsize(self._width, 460)
         self.configure(fg_color=t["modal_bg"])
 
         self._mgr = SettingsManager(config_dir=config_dir)
@@ -99,7 +106,7 @@ class SettingsModal(ctk.CTkToplevel):
 
     def _center(self):
         self.update_idletasks()
-        w, h = 420, 720
+        w, h = self._width, self._height
         sx = (self.winfo_screenwidth() - w) // 2
         sy = (self.winfo_screenheight() - h) // 2
         self.geometry(f"{w}x{h}+{sx}+{sy}")
@@ -107,26 +114,56 @@ class SettingsModal(ctk.CTkToplevel):
     def _build_ui(self):
         t = self._t
 
-        # Title
+        # Title (stays pinned at the top, outside the scroll region).
         ctk.CTkLabel(
             self, text=tr("settings.heading"),
             font=ctk.CTkFont(size=18, weight="bold"),
             text_color=t["modal_text"],
-        ).pack(pady=(20, 16))
+        ).pack(pady=(20, 12))
+
+        # ── Save & Close (pinned to the bottom, OUTSIDE the scroll body) ──
+        # Packed before the body so the body's expand never pushes it off the
+        # window on a short legacy screen (the audit's clipped-controls bug).
+        ctk.CTkButton(
+            self, text=tr("settings.btn_save"),
+            fg_color=t["modal_success"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+            corner_radius=8, height=42,
+            command=self._save_and_close,
+        ).pack(padx=30, fill="x", pady=(8, 16), side="bottom")
+
+        # ── Scrollable content body ──────────────────────────────────
+        # All controls live here so they scroll instead of clipping when the
+        # window is shorter than the content (small screens / many options).
+        self.body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.body.pack(fill="both", expand=True, padx=0, pady=0)
 
         # ── Appearance ───────────────────────────────────────────────
         ctk.CTkLabel(
-            self, text=tr("settings.section_appearance"),
+            self.body, text=tr("settings.section_appearance"),
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=t["modal_muted"],
         ).pack(anchor="w", padx=30)
 
+        # Show Title-Case labels (consistent with the Rate Type buttons below)
+        # while persisting the lowercase CustomTkinter mode codes. The
+        # label<->code maps mirror the rate-type pattern so casing is uniform
+        # across every segmented button in the modal.
+        self._appearance_map = {
+            "System": "system",
+            "Dark": "dark",
+            "Light": "light",
+        }
+        self._appearance_reverse = {
+            v: k for k, v in self._appearance_map.items()
+        }
+        current_mode = self._settings.get("appearance", "system")
         self._appearance_var = ctk.StringVar(
-            value=self._settings.get("appearance", "system")
+            value=self._appearance_reverse.get(current_mode, "System")
         )
         ctk.CTkSegmentedButton(
-            self,
-            values=["system", "dark", "light"],
+            self.body,
+            values=["System", "Dark", "Light"],
             variable=self._appearance_var,
             command=self._on_appearance_change,
             font=ctk.CTkFont(size=13),
@@ -138,7 +175,7 @@ class SettingsModal(ctk.CTkToplevel):
         # code ('en'/'th'). Most surfaces re-read tr() when rebuilt, so a
         # restart-style note tells the user the change applies on reopen.
         ctk.CTkLabel(
-            self, text=tr("settings.section_language"),
+            self.body, text=tr("settings.section_language"),
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=t["modal_muted"],
         ).pack(anchor="w", padx=30)
@@ -157,13 +194,13 @@ class SettingsModal(ctk.CTkToplevel):
             value=self._lang_code_to_label[current_lang]
         )
         ctk.CTkSegmentedButton(
-            self,
+            self.body,
             values=[LANGUAGE_LABELS[c] for c in SUPPORTED_LANGUAGES],
             variable=self._language_var,
             font=ctk.CTkFont(size=13),
         ).pack(padx=30, pady=(4, 2), fill="x")
         ctk.CTkLabel(
-            self, text=tr("settings.language_restart_note"),
+            self.body, text=tr("settings.language_restart_note"),
             font=ctk.CTkFont(size=10),
             text_color=t["modal_muted"],
             anchor="w", justify="left", wraplength=340,
@@ -171,7 +208,7 @@ class SettingsModal(ctk.CTkToplevel):
 
         # ── Rate Type ─────────────────────────────────────────────────
         ctk.CTkLabel(
-            self, text=tr("settings.section_rate_type"),
+            self.body, text=tr("settings.section_rate_type"),
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=t["modal_muted"],
         ).pack(anchor="w", padx=30)
@@ -190,7 +227,7 @@ class SettingsModal(ctk.CTkToplevel):
         )
         self._rate_type_var = ctk.StringVar(value=current_label)
         ctk.CTkSegmentedButton(
-            self,
+            self.body,
             values=["Buying TT", "Selling", "Buying Sight", "Mid Rate"],
             variable=self._rate_type_var,
             font=ctk.CTkFont(size=12),
@@ -198,7 +235,7 @@ class SettingsModal(ctk.CTkToplevel):
 
         # ── Anomaly Threshold ─────────────────────────────────────────
         ctk.CTkLabel(
-            self, text=tr("settings.section_anomaly"),
+            self.body, text=tr("settings.section_anomaly"),
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=t["modal_muted"],
         ).pack(anchor="w", padx=30)
@@ -207,7 +244,7 @@ class SettingsModal(ctk.CTkToplevel):
             value=str(self._settings.get("anomaly_threshold_pct", 5.0))
         )
         self._anomaly_entry = ctk.CTkEntry(
-            self,
+            self.body,
             textvariable=self._anomaly_threshold_var,
             font=ctk.CTkFont(size=13),
         )
@@ -215,7 +252,7 @@ class SettingsModal(ctk.CTkToplevel):
 
         # Inline validation error (hidden until a bad threshold is entered).
         self._anomaly_error = ctk.CTkLabel(
-            self, text="",
+            self.body, text="",
             font=ctk.CTkFont(size=11),
             text_color=t["error_text"],
             anchor="w",
@@ -227,7 +264,7 @@ class SettingsModal(ctk.CTkToplevel):
             value="on" if self._settings.get("auto_update", True) else "off"
         )
         ctk.CTkSwitch(
-            self,
+            self.body,
             text=tr("settings.auto_update_toggle"),
             variable=self._auto_update_var,
             onvalue="on", offvalue="off",
@@ -238,7 +275,7 @@ class SettingsModal(ctk.CTkToplevel):
 
         # ── Manage API Keys ──────────────────────────────────────────
         ctk.CTkButton(
-            self, text=tr("settings.btn_manage_keys"),
+            self.body, text=tr("settings.btn_manage_keys"),
             fg_color=t["btn_secondary"],
             hover_color=t["btn_secondary_hover"],
             font=ctk.CTkFont(size=13, weight="bold"),
@@ -248,7 +285,7 @@ class SettingsModal(ctk.CTkToplevel):
 
         # ── Open Logs / Audit Folder ─────────────────────────────────
         ctk.CTkButton(
-            self, text=tr("settings.btn_open_logs"),
+            self.body, text=tr("settings.btn_open_logs"),
             fg_color=t["btn_secondary"],
             hover_color=t["btn_secondary_hover"],
             font=ctk.CTkFont(size=13, weight="bold"),
@@ -256,32 +293,64 @@ class SettingsModal(ctk.CTkToplevel):
             command=self._on_open_logs,
         ).pack(padx=30, fill="x", pady=(0, 8))
 
+        # ── Export / Import Settings (multi-PC deployment) ───────────
+        # An admin can export this PC's preferences (rate type, anomaly
+        # threshold, language, appearance, scheduler config) and import them on
+        # another machine. Secrets are NEVER included — API keys live in the OS
+        # keyring, and config_manager strips any sensitive-looking key as a
+        # belt-and-suspenders guard.
+        ctk.CTkButton(
+            self.body, text=tr("settings.btn_export_settings"),
+            fg_color=t["btn_secondary"],
+            hover_color=t["btn_secondary_hover"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            corner_radius=8, height=38,
+            command=self._on_export_settings,
+        ).pack(padx=30, fill="x", pady=(0, 8))
+
+        ctk.CTkButton(
+            self.body, text=tr("settings.btn_import_settings"),
+            fg_color=t["btn_secondary"],
+            hover_color=t["btn_secondary_hover"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            corner_radius=8, height=38,
+            command=self._on_import_settings,
+        ).pack(padx=30, fill="x", pady=(0, 4))
+
+        # Inline status surface for the export/import buttons (success or
+        # humanized failure — never a raw errno/traceback).
+        self._settings_io_status = ctk.CTkLabel(
+            self.body, text="",
+            font=ctk.CTkFont(size=11),
+            text_color=t["modal_muted"],
+            anchor="w", justify="left", wraplength=340,
+        )
+        self._settings_io_status.pack(anchor="w", padx=30, pady=(0, 8))
+
         # ── CSV Panel (extracted) ─────────────────────────────────────
         from gui.panels.csv_panel import CSVPanel
-        CSVPanel(self).pack(padx=30, fill="x")
+        CSVPanel(self.body).pack(padx=30, fill="x")
 
         # ── Version Panel (extracted) ─────────────────────────────────
+        # on_restart: the previous wiring probed the app for a phantom
+        # restart method that never existed, so the parameter was always None
+        # and the "Restart Now" promise leaned on the panel's silent fallback.
+        # Wire it honestly to the real relaunch entry point instead.
+        from core.auto_updater import restart_app
         from gui.panels.version_panel import VersionPanel
 
-        # Provide callbacks so the panel doesn't traverse the widget tree
         app = self.master  # settings modal → main app
         VersionPanel(
-            self,
-            on_restart=getattr(app, "_restart_app", None),
+            self.body,
+            on_restart=restart_app,
             on_error=getattr(app, "_show_download_error", None),
         ).pack(padx=30, fill="x")
 
-        # ── Save & Close ─────────────────────────────────────────────
-        ctk.CTkButton(
-            self, text=tr("settings.btn_save"),
-            fg_color=t["modal_success"],
-            font=ctk.CTkFont(size=14, weight="bold"),
-            corner_radius=8, height=42,
-            command=self._save_and_close,
-        ).pack(padx=30, fill="x", pady=(12, 20), side="bottom")
-
     def _on_appearance_change(self, value: str):
-        ctk.set_appearance_mode(value)
+        # The segmented button now hands back a Title-Case label ("Dark"); map
+        # it to the lowercase mode code CustomTkinter expects.
+        mode = self._appearance_map.get(value, value.lower())
+        ctk.set_appearance_mode(mode)
         parent = self.master
         if hasattr(parent, "_apply_theme"):
             self.after(150, parent._apply_theme)
@@ -316,6 +385,99 @@ class SettingsModal(ctk.CTkToplevel):
         )
         self.wait_window(dialog)
 
+    def _on_export_settings(self):
+        """Write this PC's settings (no secrets) to a chosen JSON file.
+
+        A tiny, bounded synchronous write (the settings dict is a handful of
+        keys), so no worker thread is needed. Failures are humanized — the raw
+        errno stays in the log only.
+        """
+        from tkinter import filedialog as fd
+
+        dest = fd.asksaveasfilename(
+            title=tr("settings.export_dialog_title"),
+            defaultextension=".json",
+            initialfile="bot_exrate_settings.json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not dest:
+            return
+        try:
+            self._mgr.export_settings(dest)
+        except OSError as e:
+            logger.error("Settings export failed for %s: %r", dest, e)
+            self._settings_io_status.configure(
+                text=tr("settings.export_failed"),
+                text_color=self._t["error_text"],
+            )
+            return
+        self._settings_io_status.configure(
+            text=tr("settings.export_ok"),
+            text_color=self._t["modal_success"],
+        )
+
+    def _on_import_settings(self):
+        """Load settings from a chosen JSON file and apply them in this modal.
+
+        Only known keys are accepted and secrets are stripped (config_manager
+        enforces both). After a successful import the modal's controls are
+        refreshed from disk so the user immediately sees the imported values,
+        and the active language/appearance are applied live.
+        """
+        from tkinter import filedialog as fd
+
+        src = fd.askopenfilename(
+            title=tr("settings.import_dialog_title"),
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not src:
+            return
+        try:
+            self._settings = self._mgr.import_settings(src)
+        except (OSError, ValueError) as e:
+            logger.error("Settings import failed for %s: %r", src, e)
+            self._settings_io_status.configure(
+                text=tr("settings.import_failed"),
+                text_color=self._t["error_text"],
+            )
+            return
+        self._apply_imported_settings()
+        self._settings_io_status.configure(
+            text=tr("settings.import_ok"),
+            text_color=self._t["modal_success"],
+        )
+
+    def _apply_imported_settings(self):
+        """Refresh the modal's controls from the freshly-imported settings.
+
+        Updates the on-screen Vars so the user sees the imported values without
+        reopening the window, and applies appearance + language live.
+        """
+        appearance = self._settings.get("appearance", "system")
+        self._appearance_var.set(
+            self._appearance_reverse.get(appearance, "System")
+        )
+        ctk.set_appearance_mode(appearance)
+        parent = self.master
+        if hasattr(parent, "_apply_theme"):
+            self.after(150, parent._apply_theme)
+
+        rate_field = self._settings.get("rate_type", "buying_transfer")
+        self._rate_type_var.set(
+            self._rate_type_reverse.get(rate_field, "Buying TT")
+        )
+        self._anomaly_threshold_var.set(
+            str(self._settings.get("anomaly_threshold_pct", 5.0))
+        )
+        self._auto_update_var.set(
+            "on" if self._settings.get("auto_update", True) else "off"
+        )
+        lang_code = self._settings.get("language", DEFAULT_LANGUAGE)
+        if lang_code not in SUPPORTED_LANGUAGES:
+            lang_code = DEFAULT_LANGUAGE
+        self._language_var.set(self._lang_code_to_label[lang_code])
+        set_language(lang_code)
+
     def _validate_anomaly_threshold(self) -> float | None:
         """Return a positive float threshold, or None if the entry is invalid.
 
@@ -347,7 +509,10 @@ class SettingsModal(ctk.CTkToplevel):
         threshold = self._validate_anomaly_threshold()
         if threshold is None:
             return
-        self._settings["appearance"] = self._appearance_var.get()
+        # Map the Title-Case appearance label back to the lowercase mode code.
+        self._settings["appearance"] = self._appearance_map.get(
+            self._appearance_var.get(), "system"
+        )
         self._settings["auto_update"] = self._auto_update_var.get() == "on"
         selected_label = self._rate_type_var.get()
         self._settings["rate_type"] = self._rate_type_map.get(

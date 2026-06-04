@@ -8,6 +8,7 @@ Extracted from gui/app.py to reduce God Object line count.
 """
 
 import asyncio
+import calendar
 import contextlib
 import logging
 import os
@@ -42,6 +43,18 @@ EXRATE_RATE_TYPES = {
     "Selling":      "selling",
     "Mid Rate":     "mid_rate",
 }
+
+
+class _ExRateCancelled(Exception):
+    """Raised inside the progress callback to abort an in-flight fetch (#2).
+
+    The standalone updater calls ``progress_cb`` at every step — before each
+    currency fetch and the holiday fetch — and does not swallow its exceptions,
+    so raising from the callback cooperatively unwinds the worker's asyncio
+    loop between network calls (the same between-step granularity the batch
+    engine uses for its stop_event). This lets the dialog offer a Cancel
+    affordance without the worker busy-waiting on a 4GB PC.
+    """
 
 
 def show_exrate_dialog(app) -> None:
@@ -169,7 +182,27 @@ def show_exrate_dialog(app) -> None:
     manual_frame = ctk.CTkFrame(date_range_frame, fg_color="transparent")
     years = [str(y) for y in range(today.year - 5, today.year + 2)]
     months = [f"{m:02d}" for m in range(1, 13)]
-    days = [f"{d:02d}" for d in range(1, 32)]
+
+    def _refresh_day_options(year_box, month_box, day_box):
+        """Constrain a day combobox to the days valid for its month/year (#1).
+
+        Uses calendar.monthrange so February shows 28/29 and 30-day months
+        show 30 — no more offering 31 everywhere and failing only at Create
+        time. The currently selected day is clamped down if it now exceeds the
+        month length (e.g. 31 → 30 when switching to April, or → 28/29 for Feb).
+        """
+        try:
+            yr = int(year_box.get())
+            mo = int(month_box.get())
+        except (ValueError, TypeError):
+            return
+        if not 1 <= mo <= 12:
+            return
+        _, last_day = calendar.monthrange(yr, mo)
+        day_box.configure(values=[f"{d:02d}" for d in range(1, last_day + 1)])
+        with contextlib.suppress(ValueError, TypeError):
+            if int(day_box.get()) > last_day:
+                day_box.set(f"{last_day:02d}")
 
     # Start date row
     start_row = ctk.CTkFrame(manual_frame, fg_color="transparent")
@@ -182,6 +215,7 @@ def show_exrate_dialog(app) -> None:
         font=ctk.CTkFont(size=12),
         fg_color=t["combo_bg"], border_color=t["combo_border"],
         text_color=t["text_primary"],
+        command=lambda _v: _refresh_day_options(start_year, start_month, start_day),
     )
     start_year.set(str(today.year))
     start_year.pack(side="left", padx=2)
@@ -190,11 +224,12 @@ def show_exrate_dialog(app) -> None:
         font=ctk.CTkFont(size=12),
         fg_color=t["combo_bg"], border_color=t["combo_border"],
         text_color=t["text_primary"],
+        command=lambda _v: _refresh_day_options(start_year, start_month, start_day),
     )
     start_month.set("01")
     start_month.pack(side="left", padx=2)
     start_day = ctk.CTkComboBox(
-        start_row, values=days, width=60,
+        start_row, values=[f"{d:02d}" for d in range(1, 32)], width=60,
         font=ctk.CTkFont(size=12),
         fg_color=t["combo_bg"], border_color=t["combo_border"],
         text_color=t["text_primary"],
@@ -213,6 +248,7 @@ def show_exrate_dialog(app) -> None:
         font=ctk.CTkFont(size=12),
         fg_color=t["combo_bg"], border_color=t["combo_border"],
         text_color=t["text_primary"],
+        command=lambda _v: _refresh_day_options(end_year, end_month, end_day),
     )
     end_year.set(str(today.year))
     end_year.pack(side="left", padx=2)
@@ -221,17 +257,23 @@ def show_exrate_dialog(app) -> None:
         font=ctk.CTkFont(size=12),
         fg_color=t["combo_bg"], border_color=t["combo_border"],
         text_color=t["text_primary"],
+        command=lambda _v: _refresh_day_options(end_year, end_month, end_day),
     )
     end_month.set(f"{today.month:02d}")
     end_month.pack(side="left", padx=2)
     end_day = ctk.CTkComboBox(
-        end_row, values=days, width=60,
+        end_row, values=[f"{d:02d}" for d in range(1, 32)], width=60,
         font=ctk.CTkFont(size=12),
         fg_color=t["combo_bg"], border_color=t["combo_border"],
         text_color=t["text_primary"],
     )
     end_day.set(f"{today.day:02d}")
     end_day.pack(side="left", padx=2)
+
+    # Constrain both day lists to the initial month/year on build so the very
+    # first manual selection already reflects the real month length (#1).
+    _refresh_day_options(start_year, start_month, start_day)
+    _refresh_day_options(end_year, end_month, end_day)
 
     def _toggle_date_mode():
         if date_mode_var.get() == "manual":
@@ -410,25 +452,66 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
         if hasattr(app, "btn_reveal"):
             app.btn_reveal.pack(pady=(12, 14))
 
+    # ── Busy/Cancel affordance (#2) ──────────────────────────────────
+    # The dialog is already gone by the time the fetch runs; without this the
+    # only sign of life is the indeterminate bar on the main card. A multi-
+    # currency span fetch can take many seconds on a 4GB PC with no way out.
+    # We surface a transient Cancel button on the main card (app.card) that
+    # sets cancel_event; the worker's status callback checks it between network
+    # steps and unwinds cooperatively.
+    cancel_event = threading.Event()
+    cancel_btn: ctk.CTkButton | None = None
+
+    def _show_cancel_button():
+        nonlocal cancel_btn
+        card = getattr(app, "card", None)
+        if card is None or cancel_btn is not None:
+            return
+        with contextlib.suppress(Exception):
+            cancel_btn = ctk.CTkButton(
+                card, text=tr("exrate.btn_cancel"),
+                height=32, width=160,
+                fg_color=t["warning"], hover_color=t["warning_hover"],
+                font=ctk.CTkFont(size=12, weight="bold"),
+                corner_radius=8,
+                command=lambda: (cancel_event.set(), _set_status(
+                    tr("exrate.cancelling"), t["warning"])),
+            )
+            cancel_btn.pack(pady=(6, 0))
+
+    def _destroy_cancel_button():
+        nonlocal cancel_btn
+        if cancel_btn is not None:
+            with contextlib.suppress(Exception):
+                cancel_btn.destroy()
+            cancel_btn = None
+
     # ── Start: disable button + indeterminate progress ───────────────
     _set_export_button("disabled")
     _set_status(tr("exrate.creating"), t["text_secondary"])
     _set_progress("indeterminate", running=True)
+    _show_cancel_button()
     app.update_idletasks()
 
     def _status_cb(msg: str):
+        # Cooperative cancellation: the standalone updater calls this at every
+        # step and propagates the exception, so raising here aborts the fetch
+        # between currency/holiday network calls (#2).
+        if cancel_event.is_set():
+            raise _ExRateCancelled
         # app destroyed during ExRate generation
         with contextlib.suppress(RuntimeError):
             app.after(0, _set_status, msg, t["text_secondary"])
 
-    def _done(success: bool, message: str):
+    def _done(success: bool, message: str, *, color: str | None = None):
         """Main-thread callback to restore UI state."""
+        _destroy_cancel_button()
         _set_progress("determinate", value=1.0 if success else 0.0)
         if success:
             _set_status(message, t["success"])
             _on_complete(dest)
         else:
-            _set_status(message, t["error_text"])
+            _set_status(message, color or t["error_text"])
         _set_export_button("normal")
 
     def _fail_message(exc: BaseException) -> str:
@@ -493,6 +576,13 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
                 with contextlib.suppress(RuntimeError):
                     app.after(0, _done, True,
                               f"✓ ExRate created: {Path(dest).name} — {summary}")
+            except _ExRateCancelled:
+                # User pressed Cancel — the temp is discarded in the outer
+                # finally and `dest` was never touched, so no data is lost (#2).
+                logger.info("ExRate standalone cancelled by user")
+                with contextlib.suppress(RuntimeError):
+                    app.after(0, lambda: _done(
+                        False, tr("exrate.cancelled"), color=t["warning"]))
             except (httpx.RequestError, httpx.HTTPStatusError,
                     OSError, ValueError) as e:
                 logger.error("ExRate standalone failed: %s", e)

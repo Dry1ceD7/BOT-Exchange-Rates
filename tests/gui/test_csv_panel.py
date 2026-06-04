@@ -173,8 +173,14 @@ class TestCSVPanelBusyLock:
             seen["export_state"] = panel._btn_export.cget("state")
             return 5
 
+        class _StubCache:
+            # The success path summarizes the cache; return empty so the
+            # plain-count fallback runs (this test only asserts button state).
+            def get_all_multi_rates(self):
+                return []
+
         monkeypatch.setattr(csv_import_mod, "import_bot_csv", _fake_import)
-        monkeypatch.setattr(db_mod, "get_cache", lambda: object())
+        monkeypatch.setattr(db_mod, "get_cache", lambda: _StubCache())
 
         # Run the worker target inline on the main thread.
         def _inline_thread(target=None, daemon=None, name=None):
@@ -306,4 +312,227 @@ class TestCSVPanelHumanizedErrors:
         # Buttons re-enabled after failure.
         assert panel._btn_import.cget("state") == "normal"
         assert panel._btn_export.cget("state") == "normal"
+        panel.destroy()
+
+
+# ── Finding: Export of an empty cache shows success-green '0 rows' ──
+class TestCSVPanelExportEmptyCache:
+    """count==0 export uses warning styling + an 'empty cache' message,
+    not the success-green '✓ Exported 0 rate rows'."""
+
+    def _inline_thread_factory(self):
+        def _inline_thread(target=None, daemon=None, name=None):
+            class _T:
+                def start(self_):
+                    target()
+            return _T()
+        return _inline_thread
+
+    def test_export_zero_rows_uses_warning_not_success(
+        self, tk_root, monkeypatch
+    ):
+        import core.csv_export as csv_export_mod
+        import core.database as db_mod
+        from gui.panels.csv_panel import CSVPanel
+        from gui.theme import get_theme
+
+        panel = CSVPanel(tk_root)
+        monkeypatch.setattr(
+            "tkinter.filedialog.asksaveasfilename",
+            lambda **kw: "/tmp/fake_export.csv",
+        )
+        # Empty cache => exporter reports 0 rows written.
+        monkeypatch.setattr(
+            csv_export_mod, "export_rates_csv", lambda path, cache: 0
+        )
+        monkeypatch.setattr(db_mod, "get_cache", lambda: object())
+        monkeypatch.setattr(
+            threading, "Thread", self._inline_thread_factory()
+        )
+
+        panel._on_export_csv()
+        for _ in range(20):
+            panel.update_idletasks()
+            panel.update()
+
+        t = get_theme()
+        label = panel._lbl_csv_export
+        # Not the success-green color; uses the warning token instead.
+        assert label.cget("text_color") == t["warning"]
+        assert label.cget("text_color") != t["modal_success"]
+        # The message no longer reads as a successful "✓ Exported 0 rows".
+        text = label.cget("text")
+        assert "0 rate rows" not in text
+        panel.destroy()
+
+    def test_export_nonzero_rows_keeps_success_styling(
+        self, tk_root, monkeypatch
+    ):
+        import core.csv_export as csv_export_mod
+        import core.database as db_mod
+        from gui.panels.csv_panel import CSVPanel
+        from gui.theme import get_theme
+
+        panel = CSVPanel(tk_root)
+        monkeypatch.setattr(
+            "tkinter.filedialog.asksaveasfilename",
+            lambda **kw: "/tmp/fake_export.csv",
+        )
+        monkeypatch.setattr(
+            csv_export_mod, "export_rates_csv", lambda path, cache: 42
+        )
+        monkeypatch.setattr(db_mod, "get_cache", lambda: object())
+        monkeypatch.setattr(
+            threading, "Thread", self._inline_thread_factory()
+        )
+
+        panel._on_export_csv()
+        for _ in range(20):
+            panel.update_idletasks()
+            panel.update()
+
+        t = get_theme()
+        label = panel._lbl_csv_export
+        assert label.cget("text_color") == t["modal_success"]
+        assert "42" in label.cget("text")
+        panel.destroy()
+
+
+# ── Finding: Import success gives no date span / currencies / next step ──
+class TestCSVPanelImportSummary:
+    """A successful import reports the date span and currencies now cached
+    (so the offline-fallback user knows the right data loaded)."""
+
+    def _inline_thread_factory(self):
+        def _inline_thread(target=None, daemon=None, name=None):
+            class _T:
+                def start(self_):
+                    target()
+            return _T()
+        return _inline_thread
+
+    def test_summarize_cache_returns_span_and_currencies(self):
+        from decimal import Decimal
+
+        from gui.panels.csv_panel import _summarize_cache
+
+        class _FakeCache:
+            def get_all_multi_rates(self):
+                # Out-of-order on purpose is not needed: exporter orders by
+                # date ASC, so first/last bound the span.
+                return [
+                    ("2026-01-01", "USD", "buying_transfer", Decimal("35.1")),
+                    ("2026-03-15", "EUR", "selling", Decimal("38.0")),
+                    ("2026-06-04", "USD", "selling", Decimal("36.2")),
+                ]
+
+        result = _summarize_cache(_FakeCache())
+        assert result is not None
+        lo, hi, currencies = result
+        assert lo == "2026-01-01"
+        assert hi == "2026-06-04"
+        # Distinct + sorted.
+        assert currencies == "EUR, USD"
+
+    def test_summarize_cache_empty_returns_none(self):
+        from gui.panels.csv_panel import _summarize_cache
+
+        class _EmptyCache:
+            def get_all_multi_rates(self):
+                return []
+
+        assert _summarize_cache(_EmptyCache()) is None
+
+    def test_import_success_label_includes_span_and_currencies(
+        self, tk_root, monkeypatch
+    ):
+        from decimal import Decimal
+
+        import core.csv_import as csv_import_mod
+        import core.database as db_mod
+        import core.i18n as i18n_mod
+        from gui.panels.csv_panel import CSVPanel
+
+        # Register the wave-2-owned detail key locally so this test is
+        # deterministic regardless of whether the i18n catalog has been
+        # populated yet (tr() falls back to the bare key otherwise, which
+        # carries no {placeholders} and would drop the substituted values).
+        patched_catalog = dict(i18n_mod.CATALOG)
+        patched_catalog["csv.import_ok_detail"] = {
+            "en": (
+                "✓ Imported {count} entries: {currencies} — {start} to {end}. "
+                "These rates are now used automatically by Process Batch."
+            ),
+        }
+        monkeypatch.setattr(i18n_mod, "CATALOG", patched_catalog)
+
+        panel = CSVPanel(tk_root)
+        monkeypatch.setattr(
+            "tkinter.filedialog.askopenfilename", lambda **kw: "/tmp/fake.csv"
+        )
+
+        class _FakeCache:
+            def get_all_multi_rates(self):
+                return [
+                    ("2026-01-01", "USD", "buying_transfer", Decimal("35.1")),
+                    ("2026-06-04", "EUR", "selling", Decimal("38.0")),
+                ]
+
+        monkeypatch.setattr(
+            csv_import_mod, "import_bot_csv", lambda path, cache: 124
+        )
+        monkeypatch.setattr(db_mod, "get_cache", lambda: _FakeCache())
+        monkeypatch.setattr(
+            threading, "Thread", self._inline_thread_factory()
+        )
+
+        panel._on_import_csv()
+        for _ in range(20):
+            panel.update_idletasks()
+            panel.update()
+
+        text = panel._lbl_csv.cget("text")
+        # The detail key carries the span, the distinct currencies, the count
+        # and the next-step hint.
+        assert "2026-01-01" in text
+        assert "2026-06-04" in text
+        assert "USD" in text
+        assert "EUR" in text
+        assert "124" in text
+        assert "Process Batch" in text
+        panel.destroy()
+
+    def test_import_success_with_empty_cache_falls_back_to_count_only(
+        self, tk_root, monkeypatch
+    ):
+        """If the cache somehow reports empty (e.g. a no-op CSV), the label
+        falls back to the plain count message rather than crashing."""
+        import core.csv_import as csv_import_mod
+        import core.database as db_mod
+        from gui.panels.csv_panel import CSVPanel
+
+        panel = CSVPanel(tk_root)
+        monkeypatch.setattr(
+            "tkinter.filedialog.askopenfilename", lambda **kw: "/tmp/fake.csv"
+        )
+
+        class _EmptyCache:
+            def get_all_multi_rates(self):
+                return []
+
+        monkeypatch.setattr(
+            csv_import_mod, "import_bot_csv", lambda path, cache: 0
+        )
+        monkeypatch.setattr(db_mod, "get_cache", lambda: _EmptyCache())
+        monkeypatch.setattr(
+            threading, "Thread", self._inline_thread_factory()
+        )
+
+        panel._on_import_csv()
+        for _ in range(20):
+            panel.update_idletasks()
+            panel.update()
+
+        # Must not raise; label shows the plain count fallback.
+        assert "0" in panel._lbl_csv.cget("text")
         panel.destroy()

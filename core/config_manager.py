@@ -39,6 +39,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 
 SETTINGS_FILENAME = "settings.json"
 
+# Keys that must NEVER be written to an exported settings file or accepted from
+# an imported one. Secrets live in the OS keyring (core/secure_tokens.py), not
+# here — but this denylist is a belt-and-suspenders guard so that if a token-ish
+# key is ever added to the settings dict by mistake it can never leak through the
+# multi-PC export/import path. Matching is case-insensitive substring on the key.
+_SENSITIVE_KEY_MARKERS = ("token", "secret", "password", "passwd", "apikey", "api_key", "key")
+
 
 class SettingsManager:
     """Load, save, and manage persistent user settings with in-memory cache."""
@@ -159,3 +166,66 @@ class SettingsManager:
                 else dict(DEFAULT_SETTINGS)
             settings[key] = value
             self._save_locked(settings)
+
+    # ------------------------------------------------------------------ #
+    #  Multi-PC deployment: export / import the settings JSON
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _strip_sensitive(settings: dict[str, Any]) -> dict[str, Any]:
+        """Return a copy of ``settings`` with any sensitive-looking key removed.
+
+        Secrets are stored in the OS keyring, not in settings.json, so this is a
+        defensive guard: an admin can copy an exported file to another PC without
+        any chance of leaking a token even if one were ever (mistakenly) parked
+        in the settings dict.
+        """
+        return {
+            k: v
+            for k, v in settings.items()
+            if not any(m in k.lower() for m in _SENSITIVE_KEY_MARKERS)
+        }
+
+    def export_settings(self, dest_path: str) -> str:
+        """Write the current settings (minus secrets) to ``dest_path`` as JSON.
+
+        The exported file is a portable, human-readable snapshot intended for
+        copying to another PC. Returns the destination path on success. Raises
+        OSError on a write failure (callers humanize it for the user).
+        """
+        # load() returns a defaults-merged copy, so every known key is present
+        # and the file is self-describing on the target machine.
+        exportable = self._strip_sensitive(self.load())
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with dest.open("w", encoding="utf-8") as f:
+            json.dump(exportable, f, indent=2, ensure_ascii=False)
+        return str(dest)
+
+    def import_settings(self, src_path: str) -> dict[str, Any]:
+        """Load settings from ``src_path``, merge them in, persist, and return.
+
+        Only keys recognised in DEFAULT_SETTINGS are accepted (unknown keys are
+        dropped so a hand-edited or foreign file can't inject junk), and any
+        sensitive-looking key is stripped. The merged result is persisted via the
+        normal locked save path and the in-memory cache is refreshed.
+
+        Raises ValueError if the file is not valid JSON or not a JSON object, and
+        OSError if it cannot be read (callers humanize these for the user).
+        """
+        with Path(src_path).open(encoding="utf-8") as f:
+            try:
+                incoming = json.load(f)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Not a valid settings file: {e}") from e
+        if not isinstance(incoming, dict):
+            raise ValueError("Settings file must contain a JSON object.")
+        # Accept only known keys, then strip any sensitive ones.
+        accepted = self._strip_sensitive(
+            {k: v for k, v in incoming.items() if k in DEFAULT_SETTINGS}
+        )
+        with self._lock:
+            base = dict(self._cache) if self._cache is not None \
+                else dict(DEFAULT_SETTINGS)
+            base.update(accepted)
+            self._save_locked(base)
+            return dict(self._cache) if self._cache is not None else base

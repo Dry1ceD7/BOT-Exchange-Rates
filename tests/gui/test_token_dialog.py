@@ -24,6 +24,7 @@ grab_set / grab_release are patched to avoid grab errors in test sessions
 is never the case for a withdrawn test session window).
 """
 
+import contextlib
 import stat
 import sys
 from unittest.mock import MagicMock, patch
@@ -82,10 +83,10 @@ class TestTokenDialogConstruction:
         assert "API Registration" in dialog.title()
         dialog.destroy()
 
-    def test_geometry_is_520x560(self, tk_root, tmp_path):
+    def test_geometry_is_520x660(self, tk_root, tmp_path):
         dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
         geom = dialog.geometry()
-        assert geom.startswith("520x560"), f"Expected 520x560 geometry, got: {geom}"
+        assert geom.startswith("520x660"), f"Expected 520x660 geometry, got: {geom}"
         dialog.destroy()
 
     def test_entry_exg_exists(self, tk_root, tmp_path):
@@ -394,6 +395,75 @@ class TestCancelAndClose:
         # Simply must not raise
         dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
         dialog._on_close()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Two-product guidance copy
+# ---------------------------------------------------------------------------
+
+def _all_label_texts(widget):
+    """Recursively collect the text of every CTkLabel under ``widget``."""
+    import customtkinter as ctk
+
+    texts = []
+    for child in widget.winfo_children():
+        if isinstance(child, ctk.CTkLabel):
+            with contextlib.suppress(Exception):
+                texts.append(child.cget("text"))
+        texts.extend(_all_label_texts(child))
+    return texts
+
+
+class TestTwoProductGuidance:
+    """The dialog explains that TWO separate BOT API products are needed.
+
+    tr() falls back to the bare key until the i18n catalog (owned by a
+    separate agent) gains the new entries, so these tests assert the dialog
+    *requests* the guidance keys rather than hard-coding final English text.
+    """
+
+    def test_products_guide_key_is_rendered(self, tk_root, tmp_path):
+        # Spy on tr to record every key the dialog resolves during build.
+        from gui.panels import token_dialog
+
+        requested = []
+        orig_tr = token_dialog.tr
+
+        def _spy_tr(key, **fmt):
+            requested.append(key)
+            return orig_tr(key, **fmt)
+
+        with patch.object(token_dialog, "tr", _spy_tr):
+            dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        assert "token.products_guide" in requested
+        dialog.destroy()
+
+    def test_per_field_product_hint_keys_rendered(self, tk_root, tmp_path):
+        from gui.panels import token_dialog
+
+        requested = []
+        orig_tr = token_dialog.tr
+
+        def _spy_tr(key, **fmt):
+            requested.append(key)
+            return orig_tr(key, **fmt)
+
+        with patch.object(token_dialog, "tr", _spy_tr):
+            dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        assert "token.hint_exg" in requested
+        assert "token.hint_hol" in requested
+        dialog.destroy()
+
+    def test_guidance_labels_present_in_widget_tree(self, tk_root, tmp_path):
+        # Three new guidance labels render text (key-string fallback is fine).
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        texts = _all_label_texts(dialog)
+        # The products-guide and both per-field hints resolve to non-empty text
+        # (either translated copy or the key-string fallback).
+        assert any("products_guide" in tx or "TWO" in tx.upper() for tx in texts)
+        assert any("hint_exg" in tx or "exchange" in tx.lower() for tx in texts)
+        assert any("hint_hol" in tx or "holiday" in tx.lower() for tx in texts)
+        dialog.destroy()
 
 
 # ---------------------------------------------------------------------------

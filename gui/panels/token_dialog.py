@@ -81,7 +81,9 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
 
         t = get_theme()
         self.title(tr("token.window_title"))
-        self.geometry("520x560")
+        # Height raised from 560 to fit the products-guidance copy and the
+        # per-field product hints without pushing the portal link off-screen.
+        self.geometry("520x660")
         self.resizable(False, False)
         self.configure(fg_color=t["modal_bg"])
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -107,7 +109,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
 
     def _center(self):
         self.update_idletasks()
-        w, h = 520, 560
+        w, h = 520, 660
         sx = (self.winfo_screenwidth() - w) // 2
         sy = (self.winfo_screenheight() - h) // 2
         self.geometry(f"{w}x{h}+{sx}+{sy}")
@@ -126,7 +128,18 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
             self, text=tr("token.subheading"),
             font=ctk.CTkFont(size=13),
             text_color=t["modal_muted"],
-        ).pack(pady=(0, 20))
+        ).pack(pady=(0, 8))
+
+        # Products guidance: first-run users must subscribe to TWO separate BOT
+        # API products and copy a distinct key from each. Without this the two
+        # fields read as one credential split in two. wraplength keeps the two
+        # lines inside the fixed 520px-wide dialog.
+        ctk.CTkLabel(
+            self, text=tr("token.products_guide"),
+            font=ctk.CTkFont(size=12),
+            text_color=t["modal_muted"],
+            wraplength=460, justify="left",
+        ).pack(padx=30, pady=(0, 16), fill="x")
 
         # Card frame
         card = ctk.CTkFrame(self, fg_color=t["card_bg"], corner_radius=12)
@@ -137,7 +150,16 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
             card, text=tr("token.label_exg"),
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=t["modal_muted"],
-        ).pack(anchor="w", padx=20, pady=(18, 4))
+        ).pack(anchor="w", padx=20, pady=(18, 0))
+
+        # Name the exact BOT portal product this key comes from so a first-run
+        # user subscribes to the right one (there are two near-identical APIs).
+        ctk.CTkLabel(
+            card, text=tr("token.hint_exg"),
+            font=ctk.CTkFont(size=10),
+            text_color=t["modal_muted"],
+            wraplength=420, justify="left",
+        ).pack(anchor="w", padx=20, pady=(0, 4))
 
         self._entry_exg = ctk.CTkEntry(
             card, height=40, corner_radius=8,
@@ -155,7 +177,16 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
             card, text=tr("token.label_hol"),
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=t["modal_muted"],
-        ).pack(anchor="w", padx=20, pady=(14, 4))
+        ).pack(anchor="w", padx=20, pady=(14, 0))
+
+        # Name the second BOT portal product so the holiday key is not confused
+        # with the exchange-rate key — they are separate subscriptions.
+        ctk.CTkLabel(
+            card, text=tr("token.hint_hol"),
+            font=ctk.CTkFont(size=10),
+            text_color=t["modal_muted"],
+            wraplength=420, justify="left",
+        ).pack(anchor="w", padx=20, pady=(0, 4))
 
         self._entry_hol = ctk.CTkEntry(
             card, height=40, corner_radius=8,

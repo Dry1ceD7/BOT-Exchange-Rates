@@ -23,6 +23,25 @@ from gui.theme import get_theme
 logger = logging.getLogger(__name__)
 
 
+def _summarize_cache(cache_db) -> tuple[str, str, str] | None:
+    """Derive a (min_date, max_date, currencies) summary from the cache.
+
+    Reads the lossless multi-currency table (already ordered date ASC) so the
+    first/last rows give the span and a small set yields the distinct
+    currencies. Returns ``None`` when the cache holds no rates (so the caller
+    can fall back to a plain message). Bounded work: a single ordered read the
+    importer just populated — no extra disk walk on the Tk thread, and only
+    the first/last date plus a tiny currency set are retained.
+    """
+    rows = cache_db.get_all_multi_rates()
+    if not rows:
+        return None
+    min_date = rows[0][0]
+    max_date = rows[-1][0]
+    currencies = sorted({r[1] for r in rows if r[1]})
+    return min_date, max_date, ", ".join(currencies)
+
+
 def _humanize_csv_error(action: str, exc: BaseException) -> str:
     """Map a CSV import/export failure to plain-language accountant guidance.
 
@@ -127,9 +146,17 @@ class CSVPanel(SafePanel, ctk.CTkFrame):
 
                 cache = get_cache()
                 count = import_bot_csv(csv_path, cache)
-                self._safe_after(0, lambda: self._lbl_csv.configure(
-                    text=tr("csv.import_ok", count=count),
-                    text_color=t["modal_success"]))
+                summary = _summarize_cache(cache)
+                if summary is not None:
+                    span_lo, span_hi, currencies = summary
+                    msg = tr(
+                        "csv.import_ok_detail", count=count,
+                        currencies=currencies, start=span_lo, end=span_hi,
+                    )
+                else:
+                    msg = tr("csv.import_ok", count=count)
+                self._safe_after(0, lambda m=msg: self._lbl_csv.configure(
+                    text=m, text_color=t["modal_success"]))
             except (OSError, ValueError, KeyError) as e:
                 logger.error("CSV import failed for %s: %r", csv_path, e)
                 msg = _humanize_csv_error("Import", e)
@@ -167,9 +194,19 @@ class CSVPanel(SafePanel, ctk.CTkFrame):
 
                 cache = get_cache()
                 count = export_rates_csv(csv_path, cache)
-                self._safe_after(0, lambda: self._lbl_csv_export.configure(
-                    text=tr("csv.export_ok", count=count),
-                    text_color=t["modal_success"]))
+                if count == 0:
+                    # Header-only file written but nothing to export yet:
+                    # warning styling, not success-green, so a fresh install
+                    # isn't misled into thinking real data was saved.
+                    msg = tr("csv.export_empty")
+                    color = t["warning"]
+                else:
+                    msg = tr("csv.export_ok", count=count)
+                    color = t["modal_success"]
+                self._safe_after(
+                    0,
+                    lambda m=msg, c=color: self._lbl_csv_export.configure(
+                        text=m, text_color=c))
             except (OSError, ValueError) as e:
                 logger.error("CSV export failed for %s: %r", csv_path, e)
                 msg = _humanize_csv_error("Export", e)

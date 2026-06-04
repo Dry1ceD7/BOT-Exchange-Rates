@@ -161,3 +161,148 @@ class TestSettingsManagerReload:
         # reload() should bypass cache
         settings = mgr.reload()
         assert settings["appearance"] == "dark"
+
+
+class TestSettingsManagerExport:
+    """Tests for export_settings() — multi-PC deployment snapshots."""
+
+    def test_export_writes_json_file(self, config_dir, tmp_path):
+        mgr = SettingsManager(config_dir=config_dir)
+        mgr.set("appearance", "dark")
+        dest = str(tmp_path / "out" / "exported.json")
+        returned = mgr.export_settings(dest)
+        assert returned == dest
+        assert os.path.exists(dest)
+        with open(dest, encoding="utf-8") as f:
+            data = json.load(f)
+        assert data["appearance"] == "dark"
+
+    def test_export_includes_all_default_keys(self, config_dir, tmp_path):
+        mgr = SettingsManager(config_dir=config_dir)
+        dest = str(tmp_path / "exported.json")
+        mgr.export_settings(dest)
+        with open(dest, encoding="utf-8") as f:
+            data = json.load(f)
+        # Every known, non-sensitive setting should round-trip.
+        assert data["rate_type"] == DEFAULT_SETTINGS["rate_type"]
+        assert data["anomaly_threshold_pct"] == DEFAULT_SETTINGS[
+            "anomaly_threshold_pct"
+        ]
+        assert "language" in data
+
+    def test_export_strips_sensitive_keys(self, config_dir, tmp_path):
+        """A token-ish key parked in settings must NEVER be exported."""
+        mgr = SettingsManager(config_dir=config_dir)
+        # Sneak a sensitive-looking key into the persisted settings.
+        mgr.set("bot_api_token", "super-secret-value")
+        mgr.set("user_password", "hunter2")
+        dest = str(tmp_path / "exported.json")
+        mgr.export_settings(dest)
+        with open(dest, encoding="utf-8") as f:
+            data = json.load(f)
+        assert "bot_api_token" not in data
+        assert "user_password" not in data
+        # Non-sensitive keys still present.
+        assert "appearance" in data
+
+    def test_export_raises_oserror_on_bad_dir(self, config_dir):
+        mgr = SettingsManager(config_dir=config_dir)
+        # A path whose parent cannot be created (a file used as a dir).
+        bad = os.path.join(config_dir, "afile")
+        with open(bad, "w") as f:
+            f.write("x")
+        with pytest.raises(OSError):
+            mgr.export_settings(os.path.join(bad, "nested", "out.json"))
+
+
+class TestSettingsManagerImport:
+    """Tests for import_settings() — accept known keys, drop junk/secrets."""
+
+    def _write_json(self, path, payload):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+
+    def test_import_applies_known_keys(self, config_dir, tmp_path):
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "in.json")
+        self._write_json(src, {"appearance": "light", "rate_type": "selling"})
+        result = mgr.import_settings(src)
+        assert result["appearance"] == "light"
+        assert result["rate_type"] == "selling"
+        # Persisted: a fresh manager sees the imported values.
+        mgr2 = SettingsManager(config_dir=config_dir)
+        assert mgr2.get("appearance") == "light"
+        assert mgr2.get("rate_type") == "selling"
+
+    def test_import_drops_unknown_keys(self, config_dir, tmp_path):
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "in.json")
+        self._write_json(src, {"appearance": "dark", "junk_key": "nope"})
+        result = mgr.import_settings(src)
+        assert result["appearance"] == "dark"
+        assert "junk_key" not in result
+
+    def test_import_strips_sensitive_keys(self, config_dir, tmp_path):
+        """Even a known-looking secret key must not be imported."""
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "in.json")
+        # 'api_timeout_seconds' is known and safe; a token key must be dropped.
+        self._write_json(
+            src,
+            {
+                "appearance": "dark",
+                "api_timeout_seconds": 30,
+                "secret_token": "leak-me",
+            },
+        )
+        result = mgr.import_settings(src)
+        assert result["appearance"] == "dark"
+        assert result["api_timeout_seconds"] == 30
+        assert "secret_token" not in result
+
+    def test_import_preserves_unspecified_keys(self, config_dir, tmp_path):
+        """Keys not in the imported file keep their current value."""
+        mgr = SettingsManager(config_dir=config_dir)
+        mgr.set("anomaly_threshold_pct", 9.0)
+        src = str(tmp_path / "in.json")
+        self._write_json(src, {"appearance": "light"})
+        result = mgr.import_settings(src)
+        assert result["appearance"] == "light"
+        assert result["anomaly_threshold_pct"] == 9.0
+
+    def test_import_raises_valueerror_on_bad_json(self, config_dir, tmp_path):
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "bad.json")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("{not valid json")
+        with pytest.raises(ValueError):
+            mgr.import_settings(src)
+
+    def test_import_raises_valueerror_on_non_object(self, config_dir, tmp_path):
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "list.json")
+        self._write_json(src, ["not", "an", "object"])
+        with pytest.raises(ValueError):
+            mgr.import_settings(src)
+
+    def test_import_raises_oserror_on_missing_file(self, config_dir):
+        mgr = SettingsManager(config_dir=config_dir)
+        with pytest.raises(OSError):
+            mgr.import_settings(os.path.join(config_dir, "does_not_exist.json"))
+
+    def test_export_then_import_roundtrip(self, config_dir, tmp_path):
+        """A settings snapshot survives an export -> import cycle."""
+        src_mgr = SettingsManager(config_dir=config_dir)
+        src_mgr.set("appearance", "dark")
+        src_mgr.set("rate_type", "mid_rate")
+        src_mgr.set("anomaly_threshold_pct", 7.25)
+        snapshot = str(tmp_path / "snap.json")
+        src_mgr.export_settings(snapshot)
+
+        # Import into a different "PC" (separate config dir).
+        other_dir = str(tmp_path / "other_pc")
+        dst_mgr = SettingsManager(config_dir=other_dir)
+        result = dst_mgr.import_settings(snapshot)
+        assert result["appearance"] == "dark"
+        assert result["rate_type"] == "mid_rate"
+        assert result["anomaly_threshold_pct"] == 7.25

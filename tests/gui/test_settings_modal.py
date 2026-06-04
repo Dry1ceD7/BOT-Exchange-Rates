@@ -74,11 +74,28 @@ class TestSettingsModalConstruction:
         assert modal.title() == "Settings"
         modal.destroy()
 
-    def test_geometry_string_contains_420x720(self, tk_root):
+    def test_geometry_width_is_420(self, tk_root):
         modal, _ = _make_modal(tk_root)
         geo = modal.geometry()
-        # geometry() returns "WxH+X+Y"; just verify the size portion
-        assert geo.startswith("420x720"), f"unexpected geometry: {geo}"
+        # geometry() returns "WxH+X+Y". The height is now screen-capped (so the
+        # window always fits a small legacy screen and the content scrolls), but
+        # the width stays fixed at 420 for a tidy single-column layout.
+        assert geo.startswith("420x"), f"unexpected geometry: {geo}"
+        modal.destroy()
+
+    def test_height_capped_to_screen(self, tk_root):
+        """Window height never exceeds the available screen (audit: clipping)."""
+        modal, _ = _make_modal(tk_root)
+        assert modal._height <= 720
+        assert modal._height <= modal.winfo_screenheight()
+        modal.destroy()
+
+    def test_window_is_vertically_resizable(self, tk_root):
+        """Resizable height lets the user grow the window; minsize guards it."""
+        modal, _ = _make_modal(tk_root)
+        # resizable() returns (width_resizable, height_resizable)
+        resize_w, resize_h = modal.resizable()
+        assert resize_h
         modal.destroy()
 
     def test_appearance_var_attribute_exists(self, tk_root):
@@ -107,22 +124,47 @@ class TestSettingsModalConstruction:
 # ---------------------------------------------------------------------------
 
 class TestAppearanceSegmentedButton:
-    """Appearance control exposes system/dark/light and defaults correctly."""
+    """Appearance control shows Title-Case labels, persists lowercase codes.
+
+    Audit finding: the appearance buttons used lowercase labels
+    ('system'/'dark'/'light') while the Rate Type buttons used Title Case,
+    an inconsistent mix. The control now shows 'System'/'Dark'/'Light' and
+    maps them back to the lowercase mode codes CustomTkinter expects.
+    """
+
+    def test_appearance_labels_are_title_case(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        assert set(modal._appearance_map.keys()) == {"System", "Dark", "Light"}
+        modal.destroy()
+
+    def test_appearance_map_values_are_lowercase_codes(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        assert set(modal._appearance_map.values()) == {
+            "system", "dark", "light"
+        }
+        modal.destroy()
+
+    def test_appearance_reverse_is_inverse(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        for label, code in modal._appearance_map.items():
+            assert modal._appearance_reverse[code] == label
+        modal.destroy()
 
     def test_appearance_default_from_settings(self, tk_root):
+        """A persisted 'dark' code displays as the 'Dark' label."""
         modal, _ = _make_modal(tk_root, settings={"appearance": "dark"})
-        assert modal._appearance_var.get() == "dark"
+        assert modal._appearance_var.get() == "Dark"
         modal.destroy()
 
     def test_appearance_default_system_when_not_set(self, tk_root):
         modal, _ = _make_modal(tk_root)
-        assert modal._appearance_var.get() == "system"
+        assert modal._appearance_var.get() == "System"
         modal.destroy()
 
     def test_appearance_var_can_be_set_to_light(self, tk_root):
         modal, _ = _make_modal(tk_root)
-        modal._appearance_var.set("light")
-        assert modal._appearance_var.get() == "light"
+        modal._appearance_var.set("Light")
+        assert modal._appearance_var.get() == "Light"
         modal.destroy()
 
 
@@ -195,10 +237,11 @@ class TestOnAppearanceChange:
     """_on_appearance_change calls ctk.set_appearance_mode and parent callback."""
 
     def test_calls_set_appearance_mode(self, tk_root):
+        """The Title-Case label is mapped to the lowercase mode code."""
         modal, _ = _make_modal(tk_root)
         import customtkinter as ctk
         with patch.object(ctk, "set_appearance_mode") as mock_set:
-            modal._on_appearance_change("dark")
+            modal._on_appearance_change("Dark")
             mock_set.assert_called_once_with("dark")
         modal.destroy()
 
@@ -214,7 +257,7 @@ class TestOnAppearanceChange:
                 patch.object(ctk, "set_appearance_mode"),
                 patch.object(modal, "after") as mock_after,
             ):
-                modal._on_appearance_change("light")
+                modal._on_appearance_change("Light")
             # Scheduled with the 150ms delay and the parent's bound callback
             mock_after.assert_called_once()
             delay, callback = mock_after.call_args[0]
@@ -233,7 +276,7 @@ class TestOnAppearanceChange:
             del tk_root._apply_theme
         import customtkinter as ctk
         with patch.object(ctk, "set_appearance_mode"):
-            modal._on_appearance_change("system")  # must not raise
+            modal._on_appearance_change("System")  # must not raise
         modal.destroy()
 
 
@@ -304,8 +347,9 @@ class TestSaveAndClose:
     """_save_and_close persists all settings via SettingsManager and destroys."""
 
     def test_save_persists_appearance(self, tk_root):
+        """The Title-Case 'Dark' label persists as the lowercase 'dark' code."""
         modal, mock_mgr = _make_modal(tk_root)
-        modal._appearance_var.set("dark")
+        modal._appearance_var.set("Dark")
         modal._auto_update_var.set("on")
         modal._rate_type_var.set("Selling")
         modal._save_and_close()
@@ -578,6 +622,191 @@ class TestOpenFolderHelper:
             ),
         ):
             assert settings_modal._open_folder(str(tmp_path)) is False
+
+
+# ---------------------------------------------------------------------------
+# Scrollable body (no clipped controls on small screens)
+# ---------------------------------------------------------------------------
+
+class TestScrollableBody:
+    """Controls live in a scrollable body; the Save button stays pinned.
+
+    Audit finding: the fixed 720px non-resizable window clipped the bottom
+    controls on small legacy screens. The content now scrolls and the Save
+    button is packed outside the scroll region so it is always reachable.
+    """
+
+    def test_body_is_scrollable_frame(self, tk_root):
+        import customtkinter as ctk
+        modal, _ = _make_modal(tk_root)
+        assert isinstance(modal.body, ctk.CTkScrollableFrame)
+        modal.destroy()
+
+    def test_anomaly_entry_parented_to_body(self, tk_root):
+        """Inner controls sit inside the scroll body, not the toplevel."""
+        modal, _ = _make_modal(tk_root)
+        # The entry's master should be the scroll body's inner frame chain,
+        # never the modal toplevel directly.
+        assert modal._anomaly_entry.winfo_toplevel() is modal
+        assert modal._anomaly_entry.master is not modal
+        modal.destroy()
+
+    def test_save_button_outside_scroll_body(self, tk_root):
+        """The Save button lives outside the scroll body so it never clips.
+
+        Walks the whole widget tree (CTk wraps children in internal frames, so
+        a direct winfo_children() scan is unreliable) and asserts the 'Save and
+        Close' button is NOT a descendant of the scrollable body — i.e. it stays
+        pinned and always reachable regardless of how far the content scrolls.
+        """
+        import customtkinter as ctk
+        modal, _ = _make_modal(tk_root)
+
+        def _walk(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from _walk(child)
+
+        save_btns = [
+            w for w in _walk(modal)
+            if isinstance(w, ctk.CTkButton)
+            and "Save and Close" in str(w.cget("text"))
+        ]
+        assert save_btns, "Save button must exist in the modal"
+        body_widgets = set(_walk(modal.body))
+        assert all(b not in body_widgets for b in save_btns), (
+            "Save button must NOT be inside the scrollable body"
+        )
+        modal.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Restart wiring (Finding: app._restart_app does not exist)
+# ---------------------------------------------------------------------------
+
+class TestRestartWiring:
+    """VersionPanel.on_restart is wired to the real restart entry point.
+
+    Audit finding: the modal passed getattr(app, '_restart_app', None) — a
+    method that never existed — so on_restart was always None and the
+    'Restart Now' promise leaned on a silent fallback. It is now wired
+    explicitly to core.auto_updater.restart_app.
+    """
+
+    def test_version_panel_receives_real_restart_callback(self, tk_root):
+        from core.auto_updater import restart_app
+
+        with patch(
+            "gui.panels.version_panel.VersionPanel"
+        ) as mock_vp:
+            modal, _ = _make_modal(tk_root)
+            # VersionPanel was constructed with on_restart=restart_app.
+            on_restart = mock_vp.call_args.kwargs.get("on_restart")
+            assert on_restart is restart_app
+            assert callable(on_restart)
+            modal.destroy()
+
+    def test_modal_does_not_resolve_restart_via_getattr(self, tk_root):
+        """The dead getattr(app, '_restart_app', ...) call is gone.
+
+        Asserts the live wiring no longer probes the app for a phantom
+        '_restart_app' method (a comment may still mention it for history).
+        """
+        import inspect
+
+        from gui.panels import settings_modal
+        src = inspect.getsource(settings_modal._build_ui) \
+            if hasattr(settings_modal, "_build_ui") \
+            else inspect.getsource(settings_modal.SettingsModal._build_ui)
+        assert 'getattr(app, "_restart_app"' not in src
+        assert "getattr(app, '_restart_app'" not in src
+
+
+# ---------------------------------------------------------------------------
+# Export / Import settings (multi-PC deployment)
+# ---------------------------------------------------------------------------
+
+class TestExportImportSettings:
+    """Export/import buttons drive SettingsManager and surface status inline."""
+
+    def test_export_status_attr_exists(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        assert hasattr(modal, "_settings_io_status")
+        modal.destroy()
+
+    def test_export_calls_manager_export(self, tk_root):
+        modal, mock_mgr = _make_modal(tk_root)
+        with patch(
+            "tkinter.filedialog.asksaveasfilename",
+            return_value="/tmp/out.json",
+        ):
+            modal._on_export_settings()
+        mock_mgr.export_settings.assert_called_once_with("/tmp/out.json")
+        assert modal._settings_io_status.cget("text")  # success surfaced
+        modal.destroy()
+
+    def test_export_cancelled_does_nothing(self, tk_root):
+        modal, mock_mgr = _make_modal(tk_root)
+        with patch(
+            "tkinter.filedialog.asksaveasfilename", return_value=""
+        ):
+            modal._on_export_settings()
+        mock_mgr.export_settings.assert_not_called()
+        modal.destroy()
+
+    def test_export_failure_surfaced_inline(self, tk_root):
+        modal, mock_mgr = _make_modal(tk_root)
+        mock_mgr.export_settings.side_effect = OSError("disk full")
+        with patch(
+            "tkinter.filedialog.asksaveasfilename",
+            return_value="/tmp/out.json",
+        ):
+            modal._on_export_settings()
+        assert modal._settings_io_status.cget("text")  # error surfaced
+        modal.destroy()
+
+    def test_import_calls_manager_import_and_applies(self, tk_root):
+        modal, mock_mgr = _make_modal(tk_root)
+        mock_mgr.import_settings.return_value = {
+            "appearance": "dark",
+            "rate_type": "selling",
+            "anomaly_threshold_pct": 8.0,
+            "auto_update": False,
+            "language": "th",
+        }
+        with patch(
+            "tkinter.filedialog.askopenfilename",
+            return_value="/tmp/in.json",
+        ):
+            modal._on_import_settings()
+        mock_mgr.import_settings.assert_called_once_with("/tmp/in.json")
+        # Controls reflect the imported values.
+        assert modal._appearance_var.get() == "Dark"
+        assert modal._rate_type_var.get() == "Selling"
+        assert modal._anomaly_threshold_var.get() == "8.0"
+        assert modal._auto_update_var.get() == "off"
+        assert modal._settings_io_status.cget("text")  # success surfaced
+        modal.destroy()
+
+    def test_import_cancelled_does_nothing(self, tk_root):
+        modal, mock_mgr = _make_modal(tk_root)
+        with patch(
+            "tkinter.filedialog.askopenfilename", return_value=""
+        ):
+            modal._on_import_settings()
+        mock_mgr.import_settings.assert_not_called()
+        modal.destroy()
+
+    def test_import_failure_surfaced_inline(self, tk_root):
+        modal, mock_mgr = _make_modal(tk_root)
+        mock_mgr.import_settings.side_effect = ValueError("bad json")
+        with patch(
+            "tkinter.filedialog.askopenfilename",
+            return_value="/tmp/in.json",
+        ):
+            modal._on_import_settings()
+        assert modal._settings_io_status.cget("text")  # error surfaced
+        modal.destroy()
 
 
 # ---------------------------------------------------------------------------

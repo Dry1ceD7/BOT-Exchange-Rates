@@ -114,6 +114,22 @@ def _invoke_binding(widget, sequence):
             widget.withdraw()
 
 
+def _collect_comboboxes(dialog):
+    """Recursively collect all CTkComboBox instances from the dialog tree."""
+    import customtkinter as ctk
+
+    result = []
+
+    def _walk(w):
+        for child in w.winfo_children():
+            if isinstance(child, ctk.CTkComboBox):
+                result.append(child)
+            _walk(child)
+
+    _walk(dialog)
+    return result
+
+
 def _collect_switches(dialog):
     """Recursively collect all CTkSwitch instances from the dialog tree."""
     import customtkinter as ctk
@@ -906,3 +922,278 @@ class TestExrateWorkerHumanizedSaveError:
             f"Locked-file error not humanized, got {msg!r}"
         )
         assert "Errno" not in msg, "Raw errno leaked to the user"
+
+
+# ---------------------------------------------------------------------------
+# LOW finding 1 — month/year-aware day comboboxes (no impossible days)
+# ---------------------------------------------------------------------------
+
+
+def _manual_day_combos(tk_root):
+    """Open the dialog in manual mode and return (start_day, end_day) combos.
+
+    Combos are collected in widget-tree order: start (year, month, day) then
+    end (year, month, day), so indices 2 and 5 are the two day pickers.
+    """
+    dialog = _open_dialog(tk_root)
+    switches = _collect_switches(dialog)
+    sw = switches[0]
+    sw.select()
+    sw_cmd = sw.cget("command")
+    if callable(sw_cmd):
+        sw_cmd()
+    combos = _collect_comboboxes(dialog)
+    assert len(combos) == 6, f"Expected 6 date combos, got {len(combos)}"
+    return dialog, combos[0], combos[1], combos[2], combos[3], combos[4], combos[5]
+
+
+class TestExrateDayOptionsAreMonthAware:
+    """LOW #1: the day dropdown must reflect the selected month/year."""
+
+    def test_february_non_leap_has_no_day_29_30_31(self, tk_root):
+        dialog, s_year, s_month, s_day, *_ = _manual_day_combos(tk_root)
+        try:
+            s_year.set("2025")  # 2025 is not a leap year
+            s_month.set("02")
+            # Trigger the month combobox command (calendar.monthrange refresh).
+            s_month.cget("command")("02")
+            days = list(s_day.cget("values"))
+            assert "28" in days
+            assert "29" not in days, "Non-leap February must not offer day 29"
+            assert "30" not in days and "31" not in days
+        finally:
+            dialog.destroy()
+
+    def test_february_leap_year_has_day_29(self, tk_root):
+        dialog, s_year, s_month, s_day, *_ = _manual_day_combos(tk_root)
+        try:
+            s_year.set("2024")  # leap year
+            s_month.set("02")
+            s_month.cget("command")("02")
+            days = list(s_day.cget("values"))
+            assert "29" in days, "Leap February must offer day 29"
+            assert "30" not in days and "31" not in days
+        finally:
+            dialog.destroy()
+
+    def test_thirty_day_month_has_no_day_31(self, tk_root):
+        dialog, s_year, s_month, s_day, *_ = _manual_day_combos(tk_root)
+        try:
+            s_year.set("2026")
+            s_month.set("04")  # April = 30 days
+            s_month.cget("command")("04")
+            days = list(s_day.cget("values"))
+            assert "30" in days
+            assert "31" not in days, "30-day month must not offer day 31"
+        finally:
+            dialog.destroy()
+
+    def test_thirty_one_day_month_offers_day_31(self, tk_root):
+        dialog, s_year, s_month, s_day, *_ = _manual_day_combos(tk_root)
+        try:
+            s_year.set("2026")
+            s_month.set("01")  # January = 31 days
+            s_month.cget("command")("01")
+            assert "31" in list(s_day.cget("values"))
+        finally:
+            dialog.destroy()
+
+    def test_selected_day_clamped_when_month_shrinks(self, tk_root):
+        """A day past the new month's length snaps down (31 → 28 for Feb)."""
+        dialog, s_year, s_month, s_day, *_ = _manual_day_combos(tk_root)
+        try:
+            s_year.set("2025")
+            s_month.set("01")
+            s_month.cget("command")("01")
+            s_day.set("31")  # valid for January
+            # Switch to February (non-leap) — 31 is now impossible.
+            s_month.set("02")
+            s_month.cget("command")("02")
+            assert s_day.get() == "28", (
+                f"Day should clamp to 28 for non-leap Feb, got {s_day.get()!r}"
+            )
+        finally:
+            dialog.destroy()
+
+    def test_year_change_refreshes_february_leap(self, tk_root):
+        """Changing the YEAR (not month) re-evaluates leap-year Feb length."""
+        dialog, s_year, s_month, s_day, *_ = _manual_day_combos(tk_root)
+        try:
+            s_month.set("02")
+            s_year.set("2025")  # non-leap
+            s_year.cget("command")("2025")
+            assert "29" not in list(s_day.cget("values"))
+            s_year.set("2024")  # leap
+            s_year.cget("command")("2024")
+            assert "29" in list(s_day.cget("values"))
+        finally:
+            dialog.destroy()
+
+    def test_end_day_combo_is_also_month_aware(self, tk_root):
+        """The END day picker gets the same treatment as the start picker."""
+        dialog, _sy, _sm, _sd, e_year, e_month, e_day = _manual_day_combos(tk_root)
+        try:
+            e_year.set("2025")
+            e_month.set("02")
+            e_month.cget("command")("02")
+            assert "29" not in list(e_day.cget("values"))
+        finally:
+            dialog.destroy()
+
+
+# ---------------------------------------------------------------------------
+# LOW finding 2 — busy/cancel affordance for the long standalone fetch
+# ---------------------------------------------------------------------------
+
+
+class _CardApp(_FakeApp):
+    """Headless app stub that also exposes a real .card so the transient
+    Cancel button (a child of app.card) is actually created."""
+
+    def __init__(self, tk_root):
+        super().__init__()
+        import customtkinter as ctk
+
+        self.card = ctk.CTkFrame(tk_root)
+
+
+class _CancellableEngine:
+    """LedgerEngine stub that, on its first progress tick, presses the Cancel
+    button (proving the real wiring), then expects the second tick to raise."""
+
+    def __init__(self, app):
+        self._app = app
+        self.ticks = 0
+
+    def __call__(self, *a, **kw):
+        return self
+
+    async def update_exrate_standalone(self, filepath, *a, progress_cb=None, **kw):
+        import customtkinter as ctk
+
+        # First tick: simulate the user clicking the Cancel button on the card.
+        progress_cb("Fetching USD rates...")
+        self.ticks += 1
+        # Find and invoke the transient Cancel button's command.
+        for child in self._app.card.winfo_children():
+            if isinstance(child, ctk.CTkButton):
+                child.cget("command")()
+                break
+        # Second tick: the status callback must now raise _ExRateCancelled.
+        progress_cb("Fetching EUR rates...")  # should raise
+        self.ticks += 1
+        # Should never reach here.
+        from pathlib import Path as _P
+
+        _P(filepath).write_bytes(b"SHOULD-NOT-HAPPEN")
+        return filepath
+
+
+class TestExrateCancelAffordance:
+    """LOW #2: a Cancel button signals the worker to abort the fetch."""
+
+    def test_cancel_button_appears_on_card_during_fetch(self, monkeypatch, tmp_path, tk_root):
+        """A transient Cancel button is packed on app.card while fetching."""
+        import customtkinter as ctk
+
+        from gui.panels import exrate_dialog
+
+        dest = tmp_path / "ExRate.xlsx"
+
+        seen = {"had_cancel_button": False}
+
+        class _ObservingEngine:
+            def __call__(self, *a, **kw):
+                return self
+
+            async def update_exrate_standalone(self, filepath, *a, progress_cb=None, **kw):
+                # While the fetch runs, the card must carry a Cancel button.
+                for child in app.card.winfo_children():
+                    if isinstance(child, ctk.CTkButton):
+                        seen["had_cancel_button"] = True
+                from pathlib import Path as _P
+
+                _P(filepath).write_bytes(b"FILLED")
+                return filepath
+
+        _run_worker_sync(monkeypatch, lambda *a, **kw: _ObservingEngine())
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+
+        app = _CardApp(tk_root)
+        try:
+            exrate_dialog._create_exrate_file(
+                app, ["USD", "EUR"], {"Buying TT": "buying_transfer"},
+            )
+            assert seen["had_cancel_button"], (
+                "No Cancel button was shown on the card during the fetch"
+            )
+        finally:
+            app.card.destroy()
+
+    def test_cancel_aborts_fetch_and_preserves_dest(self, monkeypatch, tmp_path, tk_root):
+        """Clicking Cancel raises _ExRateCancelled and leaves dest untouched."""
+        from core.i18n import tr
+        from gui.panels import exrate_dialog
+
+        dest = tmp_path / "ExRate.xlsx"
+        dest.write_bytes(b"ORIGINAL")  # a pre-existing file must survive
+
+        engine_holder = {}
+
+        def _factory(*a, **kw):
+            eng = _CancellableEngine(app)
+            engine_holder["engine"] = eng
+            return eng
+
+        _run_worker_sync(monkeypatch, _factory)
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+
+        app = _CardApp(tk_root)
+        try:
+            exrate_dialog._create_exrate_file(
+                app, ["USD", "EUR"], {"Buying TT": "buying_transfer"},
+            )
+            # The engine aborted after the first tick (cancel) — never wrote.
+            assert engine_holder["engine"].ticks == 1, (
+                "Fetch did not abort on the cancel signal"
+            )
+            # Original file is byte-for-byte intact (temp discarded, no move).
+            assert dest.read_bytes() == b"ORIGINAL"
+            assert not list(tmp_path.glob(".exrate_tmp_*")), "Temp not cleaned up"
+            # Status reflects cancellation, not an error/traceback.
+            msg = app.lbl_status.cget("text")
+            assert msg == tr("exrate.cancelled")
+        finally:
+            app.card.destroy()
+
+    def test_cancel_button_removed_after_completion(self, monkeypatch, tmp_path, tk_root):
+        """On success the transient Cancel button is destroyed."""
+        import customtkinter as ctk
+
+        from gui.panels import exrate_dialog
+
+        dest = tmp_path / "ExRate.xlsx"
+        _run_worker_sync(monkeypatch, lambda *a, **kw: _SuccessEngine())
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+
+        app = _CardApp(tk_root)
+        try:
+            exrate_dialog._create_exrate_file(
+                app, ["USD"], {"Buying TT": "buying_transfer"},
+            )
+            remaining = [
+                c for c in app.card.winfo_children()
+                if isinstance(c, ctk.CTkButton)
+            ]
+            assert not remaining, "Cancel button must be removed after completion"
+        finally:
+            app.card.destroy()
