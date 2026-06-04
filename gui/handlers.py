@@ -69,14 +69,20 @@ class BatchHandler:
                 "type": "log",
                 "msg": "\u26a0 DRY RUN \u2014 files will NOT be modified.",
             })
+        # Cooperative-cancel signal: registered with the ThreadRegistry so
+        # shutdown_all() sets it, letting the batch stop at a safe boundary
+        # (between files, after wb.close) instead of being killed mid-save.
+        stop_event = threading.Event()
         thread = threading.Thread(
             target=self._batch_thread,
-            args=(files, start_date, dry_run),
+            args=(files, start_date, dry_run, stop_event),
             daemon=True,
             name="BatchWorker",
         )
         if self.registry is not None:
-            self.registry.register(thread, name="BatchWorker")
+            self.registry.register(
+                thread, name="BatchWorker", stop_event=stop_event,
+            )
         thread.start()
 
     def _batch_thread(
@@ -84,10 +90,13 @@ class BatchHandler:
         file_queue: list[str],
         start_date: str,
         dry_run: bool = False,
+        stop_event: threading.Event | None = None,
     ):
         """Thread target: runs the async batch in a fresh event loop."""
         try:
-            asyncio.run(self._run_batch(file_queue, start_date, dry_run))
+            asyncio.run(
+                self._run_batch(file_queue, start_date, dry_run, stop_event)
+            )
         except (httpx.ConnectError, httpx.TimeoutException):
             logger.exception("Network error during batch")
             self.bus.push({"type": "error", "msg": "Network error — check your internet connection."})
@@ -116,6 +125,7 @@ class BatchHandler:
         file_queue: list[str],
         start_date: str,
         dry_run: bool = False,
+        stop_event: threading.Event | None = None,
     ):
         """Async batch executor."""
         async with httpx.AsyncClient(
@@ -152,6 +162,7 @@ class BatchHandler:
                 start_date=start_date,
                 progress_cb=progress_cb,
                 dry_run=dry_run,
+                stop_event=stop_event,
             )
             label = "Simulation" if dry_run else "Batch"
             self.bus.push({

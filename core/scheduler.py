@@ -155,29 +155,44 @@ class AutoScheduler:
             timer.start()
 
     def _check_and_fire(self) -> None:
-        """Check if it's time to run, and if so, fire the callback."""
-        if not self._running:
-            return
+        """Check if it's time to run, and if so, fire the callback.
+
+        Runs on the Timer thread. Snapshot every shared field under the lock
+        up front so start()/stop()/update_config() mutations on another thread
+        cannot cause torn reads or a double-fire. We operate on the locals,
+        write _last_run_date back under the lock, and invoke the callback
+        OUTSIDE the lock (it may be slow / re-enter the scheduler).
+        """
+        with self._lock:
+            if not self._running:
+                return
+            target_time = self._target_time
+            callback = self._callback
+            watch_paths = list(self._watch_paths)
+            last_run_date = self._last_run_date
 
         now = datetime.now()
         current_time = now.strftime("%H:%M")
         current_date = now.strftime("%Y-%m-%d")
 
         # Prevent duplicate runs on the same day
-        if self._last_run_date == current_date:
+        if last_run_date == current_date:
             self._schedule_next()
             return
 
-        if current_time == self._target_time:
+        if current_time == target_time:
             logger.info("Scheduler firing at %s", current_time)
-            self._last_run_date = current_date
+            with self._lock:
+                self._last_run_date = current_date
 
-            # Scan watch paths for Excel files
-            files = self._scan_watch_paths()
+            # Scan watch paths for Excel files (using the snapshot)
+            files = self._scan_watch_paths(watch_paths)
 
-            if files and self._callback is not None:
+            # Invoke the callback OUTSIDE the lock — it may be slow or
+            # re-enter the scheduler.
+            if files and callback is not None:
                 try:
-                    self._callback(files)
+                    callback(files)
                 except (OSError, ValueError, RuntimeError) as e:
                     logger.error("Scheduler callback failed: %s", e)
             elif not files:
@@ -187,15 +202,20 @@ class AutoScheduler:
 
         self._schedule_next()
 
-    def _scan_watch_paths(self) -> list[str]:
+    def _scan_watch_paths(self, watch_paths: list[str]) -> list[str]:
         """
         Scan all configured watch paths for Excel files.
         Only looks in the specified directories (NOT recursive).
+
+        Args:
+            watch_paths: Snapshot of directories to scan. Passed in (rather
+                than read from self) so the caller can snapshot it under the
+                lock and avoid racing update_config().
         """
         files = []
         seen = set()
 
-        for path in self._watch_paths:
+        for path in watch_paths:
             if not Path(path).is_dir():
                 logger.debug("Watch path not found: %s", path)
                 continue
@@ -216,6 +236,6 @@ class AutoScheduler:
 
         logger.info(
             "Scheduler scan: %d files found across %d paths",
-            len(files), len(self._watch_paths),
+            len(files), len(watch_paths),
         )
         return files

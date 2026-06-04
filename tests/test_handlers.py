@@ -65,7 +65,7 @@ class TestConcurrencyGuard:
         release = threading.Event()
         started = threading.Event()
 
-        def slow_thread(file_queue, start_date, dry_run=False):
+        def slow_thread(file_queue, start_date, dry_run=False, stop_event=None):
             started.set()
             release.wait(timeout=3)
             with handler._batch_lock:
@@ -96,7 +96,7 @@ class TestConcurrencyGuard:
 
         calls = []
 
-        def fast_thread(file_queue, start_date, dry_run=False):
+        def fast_thread(file_queue, start_date, dry_run=False, stop_event=None):
             calls.append(list(file_queue))
             with handler._batch_lock:
                 handler._batch_active = False
@@ -138,7 +138,9 @@ class TestBatchEvents:
         bus = EventBus()
         handler = BatchHandler(app, event_bus=bus)
         seen = []
-        handler._batch_thread = lambda fq, sd, dry_run=False: seen.append(list(fq))
+        handler._batch_thread = (
+            lambda fq, sd, dry_run=False, stop_event=None: seen.append(list(fq))
+        )
 
         queue = ["a.xlsx"]
         handler.start_batch(queue, "2025-01-01")
