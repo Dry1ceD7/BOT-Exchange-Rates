@@ -4,11 +4,11 @@
 
 **Enterprise Desktop Application for Bank of Thailand Exchange Rate Automation**
 
-Version 3.4.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
+Version 3.5.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-806%20Passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-1173%20Passed-brightgreen)](tests/)
 
 ---
 
@@ -19,6 +19,20 @@ Version 3.4.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Rele
 The **BOT Exchange Rate Processor** is a standalone desktop application that automates the extraction, resolution, and embedding of official Bank of Thailand (BOT) exchange rates into financial accounting ledgers (`.xlsx`).
 
 It replaces a fragmented, error-prone multi-script workflow with a single, production-grade GUI application — built for **zero-downtime corporate environments**, legacy office hardware (4GB RAM, low-resolution monitors), and strict Thai accounting compliance.
+
+### What's New in V3.5.0 (Behavior Audit — 58 Findings Resolved, Thai UI, Backup Browser)
+
+| Feature | Description |
+|---------|-------------|
+| **Thai / English UI** | New language toggle in Settings — the main window and all dialogs render in professional Thai or English (logs and audit CSVs stay English for compliance). |
+| **Backup Browser** | Browse every automatic backup grouped by file with timestamps and restore any version by date, with an explicit confirmation preview. Revert now also confirms, previews, and supports `.xlsm`. |
+| **Audit Trail (Real)** | The audit CSV now records every modified cell on both GUI and CLI runs — previously the log was an empty header. The engine owns one populated log per run and the app surfaces its path. |
+| **Multi-Currency End-to-End** | Ledger rows in any cached/API currency are filled (not just USD/EUR), CSV-imported offline rates are consulted cache-first, unavailable rates write a visible `<ERROR: No Rate>` sentinel with per-file warnings. |
+| **Scheduler Upgrades** | Persisted schedules actually re-arm after restart; minute-precision time picker; skip-weekends / skip-Thai-holidays toggles; missed slots within 120 min still fire; tray notification + last-run summary for minimized runs. |
+| **Headless / CLI Power** | `--headless` no longer blocked by an open GUI; new `--dry-run`, `--schedule`, `--quiet` / `--verbose`; documented exit codes (0 ok / 1 total / 2 partial / 3 config / 4 nothing to do). |
+| **First-Run & Token UX** | Test Connection button verifies keys before saving, pasted keys are validated/stripped, rejected keys (401/403) produce a clear "re-enter your API keys" message, keychain fallback to .env now warns. |
+| **Batch UX & Feedback** | Failed files are listed with reasons on completion, the queue clears after a run, dry runs are honestly labeled, oversized/unsupported files are flagged at selection time, locked Excel files explain "close the file in Excel and retry". |
+| **Accessibility & Fit** | Light-mode text meets WCAG AA contrast (≥4.5:1, regression-locked by tests), minimum window size enforced for small legacy screens. Suite grew 806 → 1173 tests. |
 
 ### What's New in V3.4.0 (Deep-Audit Hardening — 57 Findings Resolved)
 
@@ -274,7 +288,7 @@ Two GitHub Actions workflows:
 
 ```bash
 # To trigger a release:
-git tag v3.4.0
+git tag v3.5.0
 git push origin main --tags
 ```
 
@@ -308,6 +322,6 @@ See [LICENSE](LICENSE) for the full terms.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.4.0*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.5.0*
 
 </div>
