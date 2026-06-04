@@ -255,7 +255,7 @@ Drop your `.xlsx` ledger files into the app and click **"Process Batch"**.
 
 ---
 
-## Headless CLI Mode (V3.1.0)
+## Headless CLI Mode
 
 For automated/unattended processing via cron jobs or Task Scheduler:
 
@@ -268,14 +268,67 @@ python main.py --headless --input ledger.xlsx --start-date 2025-01-02
 
 # Process default input directory (data/input/)
 python main.py --headless
+
+# Preview the changes without modifying any files (dry run / simulation)
+python main.py --headless --dry-run
+
+# Quiet: print only the final summary (clean cron mail)
+python main.py --headless --quiet
+
+# Verbose: raise the console log level to DEBUG for troubleshooting
+python main.py --headless --verbose
+
+# Emit a machine-readable JSON summary to stdout (for monitoring wrappers)
+python main.py --headless --json
 ```
 
 Headless mode:
 - Skips the GUI entirely
-- Auto-detects start dates from ledger files
-- Prints progress to stdout
-- Generates an audit trail CSV in `data/logs/`
-- Exits with code 0 (success) or 1 (failures)
+- Auto-detects start dates from ledger files (override with `--start-date`)
+- Prints per-file progress to stdout (standalone ExRate files are labelled
+  `OK (ExRate rates refreshed)` so they are distinguishable from ledger fills)
+- Generates an audit trail CSV in `data/logs/` (suppressed on `--dry-run`)
+- Is **not** blocked by an already-running GUI instance
+
+### CLI flags
+
+| Flag | Effect |
+|------|--------|
+| `--headless` | Run without the GUI: process files and exit. |
+| `--input`, `-i PATH` | Excel file or directory to process (default: `data/input/`). |
+| `--start-date`, `-s YYYY-MM-DD` | Force the rate-extraction start date (default: auto-detect). |
+| `--dry-run` | Preview changes without modifying files; skips the audit log. |
+| `--quiet`, `-q` | Suppress per-file lines; print only the final summary. |
+| `--verbose`, `-v` | Raise the console log level to DEBUG for troubleshooting. |
+| `--json` | Emit a machine-readable JSON summary (counts, errors, audit-log path) to stdout. |
+| `--schedule HH:MM` | Run the auto-scheduler in the foreground (cron-friendly), firing a headless batch daily at `HH:MM`. |
+| `--purge-credentials` | Delete the stored BOT API tokens from the OS keychain and exit. Invoked by the Windows uninstaller; safe to run manually to wipe saved keys. |
+
+### Exit codes (`--headless`)
+
+Distinct codes let cron / monitoring wrappers tell the outcomes apart instead
+of a coarse success/failure:
+
+| Code | Meaning |
+|------|---------|
+| `0` | All files succeeded (or the scheduler stopped cleanly). |
+| `1` | Total failure — every file failed. |
+| `2` | Partial failure — some succeeded, some failed. |
+| `3` | Usage/config error — missing tokens, bad input path, or bad date. |
+| `4` | Nothing to do — no Excel files found to process. |
+
+### Foreground scheduler
+
+For headless/server boxes with no GUI session, run the auto-scheduler in the
+foreground (it fires a headless batch daily at the given time and blocks until
+`Ctrl-C`):
+
+```bash
+python main.py --schedule 23:00 --input ./ledgers
+```
+
+Times are local machine time. `--dry-run`, `--quiet`, and `--verbose` apply to
+the batches it fires.
 
 ---
 

@@ -267,7 +267,7 @@ def _headless_args(main, **overrides):
     defaults = dict(
         headless=True, input=None, start_date="2025-01-02", dry_run=False,
         quiet=False, verbose=False, json=False, schedule=None,
-        purge_credentials=False,
+        purge_credentials=False, resume=False,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -327,6 +327,43 @@ def test_headless_exit_nothing_to_do_on_empty_folder(monkeypatch, tmp_path):
     empty.mkdir()
     args = _headless_args(main, input=str(empty))
     assert main._run_headless(args) == main.EXIT_NOTHING
+
+
+# ── --resume flag (crash-recovery) ───────────────────────────────────────
+def test_headless_resume_no_manifest_exits_nothing(monkeypatch):
+    """--resume with no saved batch returns EXIT_NOTHING (nothing to do)."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_tokens_present", lambda: True)
+
+    fake_manifest = types.SimpleNamespace(pending_files=lambda: [])
+    monkeypatch.setattr(
+        "core.engine.BatchManifest", lambda *a, **k: fake_manifest,
+    )
+    args = _headless_args(main, resume=True)
+    assert main._run_headless(args) == main.EXIT_NOTHING
+
+
+def test_headless_resume_processes_only_pending_files(monkeypatch):
+    """--resume feeds the manifest's unfinished files + saved date to the engine,
+    ignoring --input entirely."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_tokens_present", lambda: True)
+
+    fake_manifest = types.SimpleNamespace(
+        pending_files=lambda: ["/a/feb.xlsx", "/a/mar.xlsx"],
+        start_date=lambda: "2025-01-02",
+    )
+    monkeypatch.setattr(
+        "core.engine.BatchManifest", lambda *a, **k: fake_manifest,
+    )
+    captured = _stub_headless_engine(monkeypatch, main, success=2, fail=0)
+    # --input is deliberately bogus to prove resume ignores it.
+    args = _headless_args(main, resume=True, input="/no/such/path")
+    assert main._run_headless(args) == main.EXIT_OK
+    assert captured["files"] == ["/a/feb.xlsx", "/a/mar.xlsx"]
+    assert captured["start_date"] == "2025-01-02"
+    # A resume is a real run, never a dry run.
+    assert captured["dry_run"] is False
 
 
 # ── --dry-run flag ───────────────────────────────────────────────────────
@@ -531,3 +568,155 @@ def test_help_epilog_documents_exit_codes(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "partial failure" in out
     assert "nothing to do" in out
+
+
+# ── Standalone ExRate detection + distinct headless label ────────────────
+def _make_standalone_exrate_xlsx(tmp_path, name="ExRate.xlsx"):
+    """Build a standalone ExRate workbook: an 'ExRate' sheet, no month tabs."""
+    import openpyxl
+
+    fp = tmp_path / name
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "ExRate"
+    ws.append(["Date", "USD Buying TT", "USD Selling"])
+    ws.append(["2025-01-02", "33.1000", "33.5000"])
+    wb.save(str(fp))
+    wb.close()
+    return str(fp)
+
+
+def _make_ledger_xlsx(tmp_path, name="ledger.xlsx"):
+    """Build a normal ledger workbook with a month tab carrying Date/Cur."""
+    import openpyxl
+
+    fp = tmp_path / name
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Jan2025"
+    ws.append(["Date", "Cur", "EX Rate"])
+    ws.append(["2025-01-02", "USD", None])
+    wb.save(str(fp))
+    wb.close()
+    return str(fp)
+
+
+def test_is_standalone_exrate_true_for_exrate_only_workbook(monkeypatch, tmp_path):
+    main = _import_main_with_fake_tk(monkeypatch)
+    fp = _make_standalone_exrate_xlsx(tmp_path)
+    assert main._is_standalone_exrate_file(fp) is True
+
+
+def test_is_standalone_exrate_false_for_ledger(monkeypatch, tmp_path):
+    """A workbook with a Date/Cur month tab is a ledger, not standalone."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    fp = _make_ledger_xlsx(tmp_path)
+    assert main._is_standalone_exrate_file(fp) is False
+
+
+def test_is_standalone_exrate_false_for_non_xlsx(monkeypatch, tmp_path):
+    main = _import_main_with_fake_tk(monkeypatch)
+    fp = tmp_path / "ledger.xlsm"
+    fp.write_text("not really excel")
+    assert main._is_standalone_exrate_file(str(fp)) is False
+
+
+def test_is_standalone_exrate_false_on_corrupt_file(monkeypatch, tmp_path):
+    """A probe failure must never mislabel — returns False (treat as ledger)."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    fp = tmp_path / "broken.xlsx"
+    fp.write_text("definitely not a zip/xlsx")
+    assert main._is_standalone_exrate_file(str(fp)) is False
+
+
+def _stub_engine_drives_progress_cb(monkeypatch, main):
+    """Replace BOTClient + LedgerEngine so process_batch only drives the cb.
+
+    No real BOTClient/network is constructed. The fake engine invokes the
+    supplied progress_cb once per file (all succeeding) so the per-file output
+    lines can be asserted.
+    """
+    monkeypatch.setattr("core.api_client.BOTClient", lambda *a, **k: object())
+
+    class _FakeEngine:
+        def __init__(self, *a, **k):
+            self.last_audit_path = None
+
+        async def process_batch(self, files, *, start_date, progress_cb,
+                                dry_run=False):
+            total = len(files)
+            for idx, fp in enumerate(files, start=1):
+                progress_cb(idx, total, os.path.basename(fp), None)
+            return total, 0, []
+
+    monkeypatch.setattr("core.engine.LedgerEngine", _FakeEngine)
+
+
+def test_headless_labels_standalone_exrate_file_distinctly(
+    monkeypatch, tmp_path, capsys
+):
+    """A standalone ExRate file is labelled distinctly from a ledger in output.
+
+    Regression: standalone files reported an identical '[n/n] file — OK' even
+    though they took a completely different (rate-refresh) code path, hiding the
+    fact that no ledger cells were filled.
+    """
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_tokens_present", lambda: True)
+    ledger = _make_ledger_xlsx(tmp_path, "a_ledger.xlsx")
+    exrate = _make_standalone_exrate_xlsx(tmp_path, "z_exrate.xlsx")
+    _stub_engine_drives_progress_cb(monkeypatch, main)
+
+    args = _headless_args(main, input=str(tmp_path))
+    assert main._run_headless(args) == main.EXIT_OK
+
+    out = capsys.readouterr().out
+    # The ledger gets a plain OK; the standalone file is flagged as a refresh.
+    assert "a_ledger.xlsx — OK" in out
+    assert "z_exrate.xlsx — OK (ExRate rates refreshed)" in out
+    # The plain ledger line must NOT carry the refresh suffix.
+    assert "a_ledger.xlsx — OK (ExRate rates refreshed)" not in out
+    # The files exist so we exercised the real detector, not stubs.
+    assert os.path.exists(ledger)
+    assert os.path.exists(exrate)
+
+
+def test_headless_quiet_skips_standalone_probe(monkeypatch, tmp_path):
+    """Under --quiet/--json the standalone probe is skipped (no wasted reads)."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_tokens_present", lambda: True)
+    _make_standalone_exrate_xlsx(tmp_path, "z_exrate.xlsx")
+
+    probed: list = []
+    monkeypatch.setattr(
+        main, "_is_standalone_exrate_file",
+        lambda fp: probed.append(fp) or False,
+    )
+    _stub_engine_drives_progress_cb(monkeypatch, main)
+
+    args = _headless_args(main, input=str(tmp_path), quiet=True)
+    assert main._run_headless(args) == main.EXIT_OK
+    assert probed == []  # quiet prints no per-file lines → no probe needed
+
+
+# ── README documents the round-8 CLI flags + exit codes ──────────────────
+def test_readme_documents_cli_flags_and_exit_codes():
+    """The README CLI section must document every headless flag + exit code.
+
+    Regression: --purge-credentials and the round-8 flags (--dry-run/--schedule
+    /--quiet/--verbose/--json) plus the 0/1/2/3/4 exit-code contract existed in
+    code but the README still claimed a binary '0 (success) or 1 (failures)'.
+    """
+    from pathlib import Path
+
+    readme = Path(__file__).resolve().parents[1] / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    for flag in (
+        "--headless", "--dry-run", "--schedule", "--quiet", "--verbose",
+        "--json", "--purge-credentials",
+    ):
+        assert flag in text, f"README is missing CLI flag {flag}"
+    # The full exit-code contract must be documented, not the old binary claim.
+    assert "Partial failure" in text
+    assert "Nothing to do" in text
+    assert "0 (success) or 1 (failures)" not in text

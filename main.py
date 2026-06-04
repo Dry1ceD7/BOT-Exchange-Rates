@@ -60,7 +60,7 @@ Headless exit codes (--headless):
   1  total failure (every file failed)
   2  partial failure (some succeeded, some failed)
   3  usage/config error (missing tokens, bad input path, bad date)
-  4  nothing to do (no Excel files found)
+  4  nothing to do (no Excel files found; or --resume with no saved batch)
 
 Examples:
   python main.py --headless --input ./ledgers
@@ -68,6 +68,7 @@ Examples:
   python main.py --headless --dry-run            # preview, no files modified
   python main.py --headless --quiet              # only the final summary
   python main.py --headless --json               # machine-readable summary
+  python main.py --headless --resume             # finish an interrupted batch
   python main.py --schedule 23:00 --input ./ledgers   # foreground scheduler
 """
 
@@ -293,6 +294,13 @@ def main():
         help="Headless: emit a machine-readable JSON summary to stdout.",
     )
     parser.add_argument(
+        "--resume", action="store_true",
+        help="Headless: finish an interrupted/crashed batch from the saved "
+             "manifest (data/batch_state.json), processing only the files that "
+             "were not completed. Exits 4 (nothing to do) when no saved batch "
+             "exists. Ignores --input (the file list comes from the manifest).",
+    )
+    parser.add_argument(
         "--schedule", type=str, default=None, metavar="HH:MM",
         help="Run the auto-scheduler in the foreground (cron-friendly), firing "
              "a headless batch daily at HH:MM. Reuses core.scheduler.AutoScheduler.",
@@ -397,6 +405,49 @@ def _resolve_input_path(args: argparse.Namespace) -> str:
     return str(Path(get_project_root()) / "data" / "input")
 
 
+def _is_standalone_exrate_file(filepath: str) -> bool:
+    """Return True if ``filepath`` is a standalone ExRate workbook.
+
+    Mirrors ``LedgerEngine._detect_standalone_exrate``: a standalone ExRate
+    file has an ``ExRate`` sheet and NO month-tab sheets carrying the ledger
+    ``Date``/``Cur`` headers. Such files take a completely different code path
+    (rate refresh, not a ledger fill), so the headless per-file output must
+    label them distinctly instead of an undifferentiated ``— OK``.
+
+    Read-only probe on a small (<15 MB) workbook; called once per file BEFORE
+    processing so the progress callback stays a cheap set lookup. Any probe
+    failure returns False (treat as a normal ledger — never mislabel).
+    """
+    if not filepath.lower().endswith(".xlsx"):
+        return False
+    try:
+        import openpyxl as _opx
+
+        from core.constants import SKIP_SHEET_NAMES
+
+        wb = _opx.load_workbook(filepath, read_only=True)
+        try:
+            if "ExRate" not in wb.sheetnames:
+                return False
+            for sheet_name in wb.sheetnames:
+                if sheet_name in SKIP_SHEET_NAMES:
+                    continue
+                ws = wb[sheet_name]
+                for row in ws.iter_rows(min_row=1, max_row=5, values_only=True):
+                    row_strs = [
+                        str(c).strip() if c is not None else "" for c in row
+                    ]
+                    if "Date" in row_strs and "Cur" in row_strs:
+                        # A month tab exists → normal ledger, not standalone.
+                        return False
+            return True
+        finally:
+            wb.close()
+    except Exception:
+        # Probe failure must never mislabel a ledger; fall back to "not standalone".
+        return False
+
+
 def _run_headless(args: argparse.Namespace) -> int:
     """Run the processor in headless (CLI) mode without GUI.
 
@@ -424,32 +475,49 @@ def _run_headless(args: argparse.Namespace) -> int:
         )
         return EXIT_CONFIG
 
-    input_path = _resolve_input_path(args)
-    if not Path(input_path).exists():
-        print(f"ERROR: Input path not found: {input_path}", file=sys.stderr)
-        return EXIT_CONFIG
-
-    files = _collect_excel_files(input_path)
-    if not files:
-        # 'Nothing to do' is its own code so a cron user notices a misconfigured
-        # folder instead of seeing a success-looking exit 0.
-        print("No Excel files found to process.", file=sys.stderr)
-        return EXIT_NOTHING
-
-    _emit("BOT Exchange Rate Processor — Headless Mode")
-    if args.dry_run:
-        _emit("DRY RUN — no files will be modified")
-    _emit(f"Found {len(files)} file(s) to process")
-
-    # Determine start date
-    if args.start_date:
-        start_date = args.start_date
+    # ── Resume an interrupted/crashed batch ──────────────────────────────
+    # --resume takes its file list + start date from the saved manifest instead
+    # of scanning --input, so a cron wrapper can re-fire "finish what crashed"
+    # without re-specifying the original selection. No saved batch → exit 4.
+    if args.resume:
+        from core.engine import BatchManifest
+        manifest = BatchManifest()
+        files = manifest.pending_files()
+        if not files:
+            print("No interrupted batch to resume.", file=sys.stderr)
+            return EXIT_NOTHING
+        start_date = manifest.start_date()
+        _emit("BOT Exchange Rate Processor — Headless Resume")
+        _emit(f"Resuming {len(files)} unfinished file(s)")
+        if start_date:
+            _emit(f"Start date: {start_date} (from saved batch)")
     else:
-        from core.engine import LedgerEngine
-        oldest, was_detected = LedgerEngine.prescan_oldest_date(files)
-        start_date = oldest.strftime("%Y-%m-%d")
-        flag = "auto-detected" if was_detected else "fallback"
-        _emit(f"Start date: {start_date} ({flag})")
+        input_path = _resolve_input_path(args)
+        if not Path(input_path).exists():
+            print(f"ERROR: Input path not found: {input_path}", file=sys.stderr)
+            return EXIT_CONFIG
+
+        files = _collect_excel_files(input_path)
+        if not files:
+            # 'Nothing to do' is its own code so a cron user notices a
+            # misconfigured folder instead of a success-looking exit 0.
+            print("No Excel files found to process.", file=sys.stderr)
+            return EXIT_NOTHING
+
+        _emit("BOT Exchange Rate Processor — Headless Mode")
+        if args.dry_run:
+            _emit("DRY RUN — no files will be modified")
+        _emit(f"Found {len(files)} file(s) to process")
+
+        # Determine start date
+        if args.start_date:
+            start_date = args.start_date
+        else:
+            from core.engine import LedgerEngine
+            oldest, was_detected = LedgerEngine.prescan_oldest_date(files)
+            start_date = oldest.strftime("%Y-%m-%d")
+            flag = "auto-detected" if was_detected else "fallback"
+            _emit(f"Start date: {start_date} ({flag})")
 
     success, fail, errors, audit_path = _process_headless_batch(
         files, start_date, dry_run=args.dry_run, quiet=quiet,
@@ -503,6 +571,18 @@ def _process_headless_batch(
 
     import httpx
 
+    # Pre-classify standalone ExRate workbooks (1-based index, matching the
+    # ``idx`` process_batch hands the progress callback) so a succeeded
+    # standalone file is labelled "— OK (ExRate rates refreshed)" instead of an
+    # identical "— OK". One read-only probe per file BEFORE processing keeps the
+    # callback a cheap dict lookup. Skipped entirely under --quiet/--json (no
+    # per-file lines are printed, so the disk reads would be wasted).
+    standalone_idx: set[int] = set()
+    if not (quiet or json_mode):
+        for i, fp in enumerate(files, start=1):
+            if _is_standalone_exrate_file(fp):
+                standalone_idx.add(i)
+
     async def _run() -> tuple[int, int, list[str], str | None]:
         from core.api_client import BOTClient
         from core.engine import LedgerEngine
@@ -521,6 +601,11 @@ def _process_headless_batch(
                 prefix = "[SIM] " if dry_run else ""
                 if error:
                     print(f"  {prefix}[{idx}/{total}] {fname} — SKIPPED: {error}")
+                elif idx in standalone_idx:
+                    print(
+                        f"  {prefix}[{idx}/{total}] {fname} — "
+                        "OK (ExRate rates refreshed)"
+                    )
                 else:
                     print(f"  {prefix}[{idx}/{total}] {fname} — OK")
 
