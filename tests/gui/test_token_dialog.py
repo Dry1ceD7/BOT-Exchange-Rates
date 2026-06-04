@@ -82,10 +82,10 @@ class TestTokenDialogConstruction:
         assert "API Registration" in dialog.title()
         dialog.destroy()
 
-    def test_geometry_is_520x520(self, tk_root, tmp_path):
+    def test_geometry_is_520x560(self, tk_root, tmp_path):
         dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
         geom = dialog.geometry()
-        assert geom.startswith("520x520"), f"Expected 520x520 geometry, got: {geom}"
+        assert geom.startswith("520x560"), f"Expected 520x560 geometry, got: {geom}"
         dialog.destroy()
 
     def test_entry_exg_exists(self, tk_root, tmp_path):
@@ -407,4 +407,126 @@ class TestPortalLink:
         from gui.panels.token_dialog import BOT_PORTAL_URL
 
         assert "apiportal.bot.or.th" in BOT_PORTAL_URL
+
+
+# ---------------------------------------------------------------------------
+# Test Keys button
+# ---------------------------------------------------------------------------
+
+class TestTestKeysButton:
+    """The 'Test Keys' action verifies entered keys before Activate."""
+
+    def test_test_keys_button_exists(self, tk_root, tmp_path):
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        assert hasattr(dialog, "_btn_test")
+        assert dialog._btn_test.cget("text") == "Test Keys"
+        dialog.destroy()
+
+    def test_test_keys_requires_both_keys(self, tk_root, tmp_path):
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        dialog._entry_exg.insert(0, "ONLYEXGKEY1")
+        # _entry_hol left empty
+        dialog._on_test_keys()
+        # No worker should start; status prompts for both keys.
+        assert dialog._busy_test is False
+        assert dialog._lbl_status.cget("text") != ""
+        dialog.destroy()
+
+    def test_test_keys_spawns_worker_when_both_present(self, tk_root, tmp_path):
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        dialog._entry_exg.insert(0, "VALIDEXGKEY999")
+        dialog._entry_hol.insert(0, "VALIDHOLKEY999")
+
+        started = []
+        with patch(
+            "gui.panels.token_dialog.threading.Thread"
+        ) as mock_thread:
+            mock_thread.return_value.start.side_effect = lambda: started.append(True)
+            dialog._on_test_keys()
+
+        assert dialog._busy_test is True
+        assert started == [True]
+        # Button disabled while testing.
+        assert dialog._btn_test.cget("state") == "disabled"
+        dialog.destroy()
+
+    def test_test_done_success_shows_success_color(self, tk_root, tmp_path):
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        dialog._busy_test = True
+        dialog._test_done(True, "✓ Both keys accepted — connection verified.")
+        assert dialog._busy_test is False
+        assert "verified" in dialog._lbl_status.cget("text").lower()
+        dialog.destroy()
+
+    def test_test_done_failure_shows_message(self, tk_root, tmp_path):
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        dialog._busy_test = True
+        dialog._test_done(False, "✗ Key rejected. Check the key and try again.")
+        assert dialog._busy_test is False
+        assert "rejected" in dialog._lbl_status.cget("text").lower()
+        dialog.destroy()
+
+    def test_worker_reports_exg_failure(self, tk_root, tmp_path):
+        """Worker reports a bad exchange key without testing the holiday key."""
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        dialog._entry_exg.insert(0, "BADEXGKEY123")
+        dialog._entry_hol.insert(0, "VALIDHOLKEY999")
+
+        results = []
+        dialog._safe_after = lambda d, cb, *a: results.append((cb, a))
+
+        def _fake_ping(token, **kw):
+            return (False, "✗ Key rejected. Check the key and try again.")
+
+        with patch("gui.panels.token_dialog.threading.Thread") as mock_thread:
+            # Capture the worker target and run it synchronously.
+            def _capture(target, **kwargs):
+                mock_thread.captured = target
+                inst = MagicMock()
+                inst.start.side_effect = target
+                return inst
+            mock_thread.side_effect = _capture
+            with patch("gui.panels.token_dialog.ping_token", _fake_ping):
+                dialog._on_test_keys()
+
+        # Exactly one _test_done(False, ...) scheduled; holiday key never tested.
+        assert len(results) == 1
+        cb, args = results[0]
+        assert cb == dialog._test_done
+        assert args[0] is False
+        dialog.destroy()
+
+    def test_worker_reports_both_keys_ok(self, tk_root, tmp_path):
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        dialog._entry_exg.insert(0, "VALIDEXGKEY999")
+        dialog._entry_hol.insert(0, "VALIDHOLKEY999")
+
+        results = []
+        dialog._safe_after = lambda d, cb, *a: results.append((cb, a))
+
+        with patch("gui.panels.token_dialog.threading.Thread") as mock_thread:
+            def _capture(target, **kwargs):
+                inst = MagicMock()
+                inst.start.side_effect = target
+                return inst
+            mock_thread.side_effect = _capture
+            with patch(
+                "gui.panels.token_dialog.ping_token",
+                lambda token, **kw: (True, "✓ ok"),
+            ):
+                dialog._on_test_keys()
+
+        assert len(results) == 1
+        cb, args = results[0]
+        assert cb == dialog._test_done
+        assert args[0] is True
+        dialog.destroy()
+
+    def test_safe_after_skipped_when_destroyed(self, tk_root, tmp_path):
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        dialog._destroyed = True
+        called = []
+        dialog._safe_after(0, lambda: called.append(True))
+        assert called == []
+        dialog.destroy()
 
