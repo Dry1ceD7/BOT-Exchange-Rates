@@ -568,14 +568,6 @@ class LedgerEngine:
     #  STANDALONE EXRATE UPDATE
     # ================================================================== #
 
-    # Mapping from rate_type API field → human-readable label suffix
-    _RATE_LABELS = {
-        "buying_transfer": "Buying TT",
-        "buying_sight":    "Buying Sight",
-        "selling":         "Selling",
-        "mid_rate":        "Mid Rate",
-    }
-
     async def update_exrate_standalone(
         self,
         filepath: str,
