@@ -138,6 +138,51 @@ class TestMultiRates:
         assert raw[0] == "0.2300"
         assert raw[1] == "text"
 
+    def test_get_rates_multi_range_exact(self, db):
+        """get_rates_multi returns {date: Decimal} for one (ccy, rate_type)."""
+        db.insert_multi_rates_bulk([
+            ("2025-01-02", "GBP", "buying_transfer", Decimal("44.1234")),
+            ("2025-01-03", "GBP", "buying_transfer", Decimal("44.5678")),
+            ("2025-01-04", "GBP", "buying_transfer", Decimal("44.9999")),
+        ])
+        rates = db.get_rates_multi(
+            date(2025, 1, 2), date(2025, 1, 3), "GBP", "buying_transfer",
+        )
+        assert set(rates.keys()) == {date(2025, 1, 2), date(2025, 1, 3)}
+        assert isinstance(rates[date(2025, 1, 2)], Decimal)
+        assert rates[date(2025, 1, 2)] == Decimal("44.1234")
+        assert rates[date(2025, 1, 3)] == Decimal("44.5678")
+
+    def test_get_rates_multi_filters_currency_and_type(self, db):
+        """Only the requested currency AND rate_type rows are returned."""
+        db.insert_multi_rates_bulk([
+            ("2025-01-02", "GBP", "buying_transfer", Decimal("44.0000")),
+            ("2025-01-02", "GBP", "selling", Decimal("45.0000")),
+            ("2025-01-02", "JPY", "buying_transfer", Decimal("0.2300")),
+        ])
+        gbp_buy = db.get_rates_multi(
+            date(2025, 1, 1), date(2025, 1, 31), "GBP", "buying_transfer",
+        )
+        assert gbp_buy == {date(2025, 1, 2): Decimal("44.0000")}
+
+    def test_get_rates_multi_empty_when_absent(self, db):
+        """No rows for the (ccy, type, range) → empty dict, never None."""
+        result = db.get_rates_multi(
+            date(2025, 1, 1), date(2025, 1, 31), "GBP", "buying_transfer",
+        )
+        assert result == {}
+
+    def test_get_rates_multi_skips_null_values(self, db):
+        """A NULL stored value is omitted so only usable rates come back."""
+        db.insert_multi_rates_bulk([
+            ("2025-01-02", "GBP", "buying_transfer", None),
+            ("2025-01-03", "GBP", "buying_transfer", Decimal("44.5000")),
+        ])
+        result = db.get_rates_multi(
+            date(2025, 1, 1), date(2025, 1, 31), "GBP", "buying_transfer",
+        )
+        assert result == {date(2025, 1, 3): Decimal("44.5000")}
+
 
 # =========================================================================
 #  HOLIDAYS

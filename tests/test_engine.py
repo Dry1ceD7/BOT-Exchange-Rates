@@ -588,6 +588,134 @@ class TestBatchAndHolidayLookup:
 
 
 # =========================================================================
+#  PRE-FLIGHT SELECTION-TIME CHECK (engine.py:163)
+# =========================================================================
+
+class TestPreflightFile:
+    """LedgerEngine.preflight_file — cheap selection-time feedback so an
+    oversized / unsupported / missing / locked file is flagged immediately
+    instead of failing mid-run after the API fetch + backup."""
+
+    def test_good_file_is_ok(self, sample_xlsx):
+        result = LedgerEngine.preflight_file(sample_xlsx)
+        assert result["ok"] is True
+        assert result["exists"] is True
+        assert result["size_ok"] is True
+        assert result["supported"] is True
+        assert result["writable"] is True
+        assert result["reason"] is None
+        assert result["name"] == "test_ledger.xlsx"
+
+    def test_oversized_file_flagged_with_reason(self, oversized_file):
+        result = LedgerEngine.preflight_file(oversized_file)
+        assert result["ok"] is False
+        assert result["size_ok"] is False
+        # Size is surfaced in MB and names the limit so the GUI can show it.
+        assert result["size_mb"] > MAX_FILE_SIZE_MB
+        assert "too large" in result["reason"].lower()
+        assert str(MAX_FILE_SIZE_MB) in result["reason"]
+        assert "huge.xlsx" in result["reason"]
+
+    def test_unsupported_extension_flagged(self, tmp_path):
+        bad = tmp_path / "rates.csv"
+        bad.write_text("not excel", encoding="utf-8")
+        result = LedgerEngine.preflight_file(str(bad))
+        assert result["ok"] is False
+        assert result["supported"] is False
+        assert "Unsupported format" in result["reason"]
+        assert "rates.csv" in result["reason"]
+
+    def test_missing_file_flagged(self, tmp_path):
+        result = LedgerEngine.preflight_file(str(tmp_path / "nope.xlsx"))
+        assert result["ok"] is False
+        assert result["exists"] is False
+        assert result["size_mb"] == 0.0
+        assert "not found" in result["reason"].lower()
+
+    def test_xlsm_extension_supported(self, tmp_path):
+        macro = tmp_path / "macro_ledger.xlsm"
+        macro.write_bytes(b"x" * 1024)  # tiny, within the size limit
+        result = LedgerEngine.preflight_file(str(macro))
+        assert result["supported"] is True
+        assert result["ok"] is True
+
+    def test_locked_file_reason_matches_runtime_message(
+        self, sample_xlsx, monkeypatch,
+    ):
+        """A file the probe reports as not writable yields the SAME 'open in
+        Excel — close it' wording the run-time humanizer uses, so selection
+        feedback and batch-failure feedback are consistent."""
+        monkeypatch.setattr(
+            LedgerEngine, "_probe_writable", staticmethod(lambda fp: False),
+        )
+        result = LedgerEngine.preflight_file(sample_xlsx)
+        assert result["ok"] is False
+        assert result["writable"] is False
+        assert "open in Excel" in result["reason"]
+        assert "close it" in result["reason"].lower()
+
+    def test_probe_writable_true_for_writable_file(self, sample_xlsx):
+        assert LedgerEngine._probe_writable(Path(sample_xlsx)) is True
+
+
+# =========================================================================
+#  PRE-FLIGHT WRITABILITY/LOCK CHECK BEFORE BACKUP (engine.py:556)
+# =========================================================================
+
+class TestProcessLedgerPreflightWritability:
+    """A locked target must fail FAST — before the API fetch + backup — with
+    the round-7 humanized 'open in Excel' message, not after the round-trip."""
+
+    def test_locked_file_skips_before_backup_and_api(
+        self, engine, sample_xlsx, monkeypatch,
+    ):
+        # Simulate Excel holding the file: the writability probe reports it as
+        # not writable. The real save path is never reached.
+        monkeypatch.setattr(engine, "_probe_writable", lambda fp: False)
+
+        success, failed, errors = asyncio.run(
+            engine.process_batch([sample_xlsx]),
+        )
+        assert success == 0
+        assert failed == 1
+        # Humanized, actionable message (round-7 wording) — no raw OS noise.
+        assert "open in Excel" in errors[0]
+        assert "close it" in errors[0].lower()
+        assert "WinError" not in errors[0]
+        assert "Errno" not in errors[0]
+        # Fail-fast: NO backup taken and NO network round-trip for a locked file.
+        engine.backup.create_backup.assert_not_called()
+        engine.api.get_exchange_rates.assert_not_called()
+        engine.api.get_holidays.assert_not_called()
+
+    def test_writable_file_does_not_trip_preflight(
+        self, engine, sample_xlsx, monkeypatch,
+    ):
+        """A writable file passes the pre-flight and reaches the backup step."""
+        monkeypatch.setattr(engine, "_probe_writable", lambda fp: True)
+
+        success, failed, _errors = asyncio.run(
+            engine.process_batch([sample_xlsx]),
+        )
+        assert (success, failed) == (1, 0)
+        engine.backup.create_backup.assert_called_once()
+
+    def test_dry_run_skips_writability_probe(
+        self, engine, sample_xlsx, monkeypatch,
+    ):
+        """Dry runs write nothing, so a locked file must NOT block a simulation
+        (the probe is never consulted on the dry-run path)."""
+        def _boom(fp):
+            raise AssertionError("probe must not run on dry runs")
+
+        monkeypatch.setattr(engine, "_probe_writable", _boom)
+        success, failed, _errors = asyncio.run(
+            engine.process_batch([sample_xlsx], dry_run=True),
+        )
+        assert (success, failed) == (1, 0)
+
+
+# =========================================================================
 #  END-TO-END INTEGRATION (GAP2)
 # =========================================================================
 

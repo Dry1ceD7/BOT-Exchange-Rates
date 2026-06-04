@@ -85,6 +85,60 @@ class TestCSVImport:
         ) == Decimal("44.1234")
         cache.close()
 
+    def test_imported_non_usd_eur_rate_reachable_via_get_rates_multi(
+        self, tmp_path,
+    ):
+        """CSV-imported GBP/JPY rates must be reachable by the cache API the
+        ledger path reads (get_rates_multi), not stranded in rates_multi.
+
+        This is the read-back guarantee behind the multi-currency ledger fix:
+        the importer accepts any 3-letter code, and a cache-first extra-currency
+        fetch keyed on the chosen rate type must find those exact rows.
+        """
+        from core.database import CacheDB
+
+        csv_content = (
+            "Period,Currency_ID,Buying Transfer,Selling\n"
+            "2025-01-02,GBP,44.1234,45.6789\n"
+            "2025-01-03,JPY,0.2300,0.2400\n"
+        )
+        csv_path = self._make_csv(tmp_path, csv_content)
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+
+        import_bot_csv(csv_path, cache)
+
+        gbp_buy = cache.get_rates_multi(
+            date(2025, 1, 1), date(2025, 1, 31), "GBP", "buying_transfer",
+        )
+        assert gbp_buy == {date(2025, 1, 2): Decimal("44.1234")}
+
+        jpy_sell = cache.get_rates_multi(
+            date(2025, 1, 1), date(2025, 1, 31), "JPY", "selling",
+        )
+        assert jpy_sell == {date(2025, 1, 3): Decimal("0.2400")}
+        cache.close()
+
+    def test_long_format_non_usd_eur_reachable_via_get_rates_multi(
+        self, tmp_path,
+    ):
+        """The app's own long export of a GBP rate round-trips back through
+        get_rates_multi for the matching rate type."""
+        from core.database import CacheDB
+
+        csv_content = (
+            "Period,Currency_ID,Rate_Type,Value\n"
+            "2025-02-10,GBP,buying_transfer,44.5500\n"
+        )
+        csv_path = self._make_csv(tmp_path, csv_content)
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+
+        import_bot_csv(csv_path, cache)
+        rates = cache.get_rates_multi(
+            date(2025, 2, 1), date(2025, 2, 28), "GBP", "buying_transfer",
+        )
+        assert rates == {date(2025, 2, 10): Decimal("44.5500")}
+        cache.close()
+
     def test_zero_imported_raises(self, tmp_path):
         """A non-empty file that parses no rows must raise, not pass silently."""
         from core.database import CacheDB
