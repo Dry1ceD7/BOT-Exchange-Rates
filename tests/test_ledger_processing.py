@@ -11,7 +11,11 @@ from datetime import date
 
 import openpyxl
 
-from core.ledger_processing import prescan_target_dates
+from core.ledger_processing import (
+    classify_currencies,
+    prescan_target_dates,
+    prescan_target_dates_and_currencies,
+)
 
 TARGET_COLS = {"source_date": "Date", "currency": "Cur", "out_rate": "EX Rate"}
 
@@ -71,3 +75,80 @@ class TestPrescanTargetDates:
             "duplicate" in r.message.lower() and "Date" in r.message
             for r in caplog.records
         )
+
+
+class TestPrescanCurrencies:
+    """Currency collection powering the multi-currency ledger path."""
+
+    def test_collects_distinct_currency_codes(self, tmp_path):
+        path = _write_workbook(
+            tmp_path,
+            rows=[
+                [date(2025, 1, 7), "USD", None],
+                [date(2025, 1, 8), "gbp", None],   # lower-case → normalized
+                [date(2025, 1, 9), " EUR ", None],  # whitespace → trimmed
+                [date(2025, 1, 10), "GBP", None],   # dup → collapsed
+            ],
+            header=["Date", "Cur", "EX Rate"],
+        )
+        dates, currencies = prescan_target_dates_and_currencies(
+            path, TARGET_COLS,
+        )
+        assert dates == {
+            date(2025, 1, 7), date(2025, 1, 8),
+            date(2025, 1, 9), date(2025, 1, 10),
+        }
+        assert currencies == {"USD", "GBP", "EUR"}
+
+    def test_dates_only_wrapper_matches(self, tmp_path):
+        """prescan_target_dates returns the same dates as the combined scan."""
+        path = _write_workbook(
+            tmp_path,
+            rows=[[date(2025, 1, 7), "USD", None]],
+            header=["Date", "Cur", "EX Rate"],
+        )
+        dates_only = prescan_target_dates(path, TARGET_COLS)
+        dates_combined, _ = prescan_target_dates_and_currencies(
+            path, TARGET_COLS,
+        )
+        assert dates_only == dates_combined == {date(2025, 1, 7)}
+
+    def test_skip_sheet_currencies_ignored(self, tmp_path):
+        """Currencies on a SKIP sheet (ExRate) must not be collected."""
+        filepath = tmp_path / "with_exrate.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Jan"
+        ws.append(["Date", "Cur", "EX Rate"])
+        ws.append([date(2025, 6, 2), "GBP", None])
+        ws_ex = wb.create_sheet("ExRate")
+        ws_ex.append(["Date", "Cur"])
+        ws_ex.append([date(1999, 1, 1), "XXX"])
+        wb.save(str(filepath))
+        wb.close()
+        _dates, currencies = prescan_target_dates_and_currencies(
+            str(filepath), TARGET_COLS,
+        )
+        assert currencies == {"GBP"}
+        assert "XXX" not in currencies
+
+
+class TestClassifyCurrencies:
+    """classify_currencies splits scanned codes into extra vs unsupported."""
+
+    def test_usd_eur_thb_are_dropped(self):
+        extra, unsupported = classify_currencies({"USD", "EUR", "THB"})
+        # All handled by the core IFS branches — nothing to fetch / warn about.
+        assert extra == []
+        assert unsupported == []
+
+    def test_supported_extra_currencies_sorted(self):
+        extra, unsupported = classify_currencies({"JPY", "GBP", "USD"})
+        # Sorted for deterministic ExRate column ordering.
+        assert extra == ["GBP", "JPY"]
+        assert unsupported == []
+
+    def test_unsupported_currency_flagged(self):
+        extra, unsupported = classify_currencies({"GBP", "XYZ", "ABC"})
+        assert extra == ["GBP"]
+        assert unsupported == ["ABC", "XYZ"]

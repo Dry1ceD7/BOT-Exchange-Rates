@@ -36,6 +36,22 @@ SKIP_SHEET_NAMES: frozenset = frozenset({"ExRate", "Exrate USD", "Exrate EUR"})
 "Exrate USD" / "Exrate EUR" are pre-existing rate tabs in older workbooks;
 they lack the standard Date/Cur/EX Rate header and must be skipped."""
 
+# THB is the company's home currency — its ledger rows take a literal 1.0, so
+# it is "supported" without an API rate (the IFS formula handles it inline).
+LEDGER_HOME_CURRENCY: str = "THB"
+"""The home currency that resolves to a literal exchange rate of 1.0."""
+
+# Currencies the ledger path can fetch from the BOT API and fill end-to-end.
+# USD/EUR occupy the fixed master-sheet columns B-E; any OTHER code here gets a
+# dynamically appended ExRate column + IFS branch. THB is handled separately as
+# the home currency. A ledger row whose currency is none of these (and which the
+# API returns no data for) is reported as unsupported rather than left silently
+# blank — see core/ledger_processing.classify_currencies.
+LEDGER_SUPPORTED_CURRENCIES: frozenset = frozenset(
+    {"USD", "EUR", "GBP", "JPY", "CNY", "SGD", "HKD", "AUD", "CHF", "CAD"}
+)
+"""Currency codes the ledger multi-currency path can fetch + write."""
+
 BACKUP_MAX_AGE_DAYS: int = int(os.environ.get("BOT_BACKUP_AGE_DAYS", "7"))
 """Auto-cleanup backups older than this many days."""
 
@@ -169,6 +185,52 @@ def _normalize_year(parsed: date) -> date | None:
         if _plausible_year(converted.year):
             return converted
     return None
+
+
+# ── Locked-file / save-error humanization ────────────────────────────────
+# Windows surfaces a sharing violation as WinError 32 (no portable errno);
+# POSIX uses EACCES (13) / EBUSY (16). We match on both the errno and the
+# raw text so a clear "close it in Excel" message replaces the cryptic OS
+# string for a non-technical accountant.
+_LOCKED_FILE_ERRNOS = frozenset({13, 16})  # EACCES, EBUSY
+_LOCKED_FILE_MARKERS = (
+    "winerror 32",
+    "being used by another process",
+    "permission denied",
+    "errno 13",
+    "errno 16",
+    "resource busy",
+)
+
+
+def humanize_save_error(filename: str, exc: BaseException) -> str | None:
+    """Translate a locked-file OSError into an actionable accountant message.
+
+    Returns a clear "close the file in Excel and process again" message when
+    ``exc`` looks like a file-locked / sharing-violation error (the file is
+    open in Excel or another program), or None when the error is something
+    else and the caller should keep its original message.
+
+    Centralized here so the engine, standalone, and scheduler paths reuse one
+    translation instead of leaking raw WinError/errno strings to the user.
+    """
+    if not isinstance(exc, OSError):
+        return None
+    is_locked = isinstance(exc, PermissionError)
+    errno = getattr(exc, "errno", None)
+    winerror = getattr(exc, "winerror", None)
+    if errno in _LOCKED_FILE_ERRNOS or winerror == 32:
+        is_locked = True
+    if not is_locked:
+        text = str(exc).lower()
+        if any(marker in text for marker in _LOCKED_FILE_MARKERS):
+            is_locked = True
+    if not is_locked:
+        return None
+    return (
+        f"{filename}: File is open in Excel or another program. "
+        "Please close it and process again."
+    )
 
 
 def bot_today() -> date:

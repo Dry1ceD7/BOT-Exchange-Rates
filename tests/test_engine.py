@@ -10,6 +10,7 @@ Uses mocked API client and temporary files.
 import asyncio
 import threading
 from datetime import date, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -537,6 +538,54 @@ class TestBatchAndHolidayLookup:
         assert processed == ["a.xlsx", "b.xlsx"]
         assert (success, failed, errors) == (2, 0, [])
 
+    def test_locked_file_gets_actionable_message(self, engine, monkeypatch):
+        """A file open in Excel surfaces a clear 'close it and retry' message
+        instead of a raw WinError/EACCES string the user cannot act on."""
+        async def _fake_process_ledger(fp, *args, **kwargs):
+            # Simulate the in-place save failing because Excel holds the file.
+            raise PermissionError(
+                13, "The process cannot access the file because it is being "
+                "used by another process",
+            )
+
+        monkeypatch.setattr(engine, "process_ledger", _fake_process_ledger)
+        calls = []
+        success, failed, errors = asyncio.run(engine.process_batch(
+            ["January_Ledger.xlsx"], dry_run=True,
+            progress_cb=lambda i, t, n, e: calls.append((i, t, n, e)),
+        ))
+        assert success == 0
+        assert failed == 1
+        assert len(errors) == 1
+        # Actionable, localized message — names the file and the remedy.
+        assert "January_Ledger.xlsx" in errors[0]
+        assert "open in Excel" in errors[0]
+        assert "close it" in errors[0].lower()
+        # The raw OS noise is NOT surfaced to the user.
+        assert "WinError" not in errors[0]
+        assert "Errno" not in errors[0]
+        # progress_cb carries the same friendly message.
+        assert calls[0][3] == errors[0]
+
+    def test_non_locked_oserror_keeps_original_message(
+        self, engine, monkeypatch,
+    ):
+        """A non-locked OSError (e.g. disk space) keeps its original text —
+        the humanizer only rewrites locked-file errors."""
+        async def _fake_process_ledger(fp, *args, **kwargs):
+            raise OSError(
+                "Insufficient disk space (0MB free, need 100MB). "
+                "File NOT saved."
+            )
+
+        monkeypatch.setattr(engine, "process_ledger", _fake_process_ledger)
+        _success, failed, errors = asyncio.run(
+            engine.process_batch(["a.xlsx"], dry_run=True)
+        )
+        assert failed == 1
+        assert "Insufficient disk space" in errors[0]
+        assert "open in Excel" not in errors[0]
+
 
 # =========================================================================
 #  END-TO-END INTEGRATION (GAP2)
@@ -913,3 +962,204 @@ class TestPrescanTargetDates:
         assert engine._prescan_target_dates(sample_xlsx) == prescan_target_dates(
             sample_xlsx, engine.target_cols,
         )
+
+
+# =========================================================================
+#  AUDIT TRAIL — process_batch wires log_row_change into the write pipeline
+# =========================================================================
+
+def _audit_engine(per_ccy, tmp_cache):
+    """LedgerEngine whose mocked API emits one record per date per currency.
+
+    ``per_ccy`` maps a currency code → (buying_transfer, selling) so any
+    requested window resolves. Mirrors the multi-currency test helper so the
+    full process_ledger write pipeline runs end-to-end with real rates.
+    """
+    from datetime import timedelta as _td
+
+    async def _rates(start, end, currency):
+        pair = per_ccy.get(currency)
+        if pair is None:
+            return []
+        buy, sell = pair
+        out, d = [], start
+        while d <= end:
+            out.append(SimpleNamespace(
+                period=d.strftime("%Y-%m-%d"), currency=currency,
+                buying_transfer=buy, buying_sight=None,
+                selling=sell, mid_rate=None,
+            ))
+            d += _td(days=1)
+        return out
+
+    api = AsyncMock()
+    api.get_exchange_rates = AsyncMock(side_effect=_rates)
+    api.get_holidays = AsyncMock(return_value=[])
+    return LedgerEngine(api, backup=MagicMock(), cache=tmp_cache)
+
+
+def _build_ledger(tmp_path, rows, name="audit_led.xlsx"):
+    filepath = tmp_path / name
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Jan"
+    ws.append(["Date", "Cur", "EX Rate", "Amount"])
+    for d, ccy in rows:
+        ws.append([d, ccy, None, 1000])
+    wb.save(str(filepath))
+    wb.close()
+    return str(filepath)
+
+
+def _patch_audit_dir(monkeypatch, tmp_path):
+    """Redirect engine-owned AuditLogger output into ``tmp_path``."""
+    import functools
+
+    import core.engine as eng
+    from core.audit_logger import AuditLogger as _RealAuditLogger
+
+    log_dir = tmp_path / "logs"
+    monkeypatch.setattr(
+        eng, "AuditLogger",
+        functools.partial(_RealAuditLogger, log_dir=str(log_dir)),
+    )
+    # cleanup_old_audit_logs() runs against data/logs by default; point it at
+    # the temp dir so the real project folder is never touched by the test.
+    monkeypatch.setattr(
+        eng, "cleanup_old_audit_logs",
+        lambda *a, **k: 0,
+    )
+    return log_dir
+
+
+class TestAuditTrailWiredIntoBatch:
+    """Fix: log_row_change had ZERO call sites — process_batch now records a
+    per-cell change for every resolved EX Rate cell and writes a real CSV."""
+
+    def _read_rows(self, audit_path):
+        import csv
+        with open(audit_path, encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            header = next(reader)
+            rows = [r for r in reader if r and r[0]]
+        return header, rows
+
+    def test_real_batch_writes_populated_audit_csv(
+        self, tmp_path, tmp_cache, monkeypatch,
+    ):
+        _patch_audit_dir(monkeypatch, tmp_path)
+        path = _build_ledger(tmp_path, [
+            (date(2025, 1, 7), "USD"),
+            (date(2025, 1, 8), "THB"),
+        ])
+        engine = _audit_engine(
+            {"USD": (33.1234, 33.5), "EUR": (36.0, 36.5)}, tmp_cache,
+        )
+
+        success, fail, _errors = asyncio.run(engine.process_batch([path]))
+        assert (success, fail) == (1, 0)
+
+        # The engine published a real audit CSV path.
+        assert engine.last_audit_path is not None
+        assert Path(engine.last_audit_path).exists()
+
+        header, rows = self._read_rows(engine.last_audit_path)
+        assert header[1] == "Filename"
+        # At least the USD and THB cells were recorded (no longer a hollow log).
+        cells = [r for r in rows if "BATCH SUMMARY" not in r[1]]
+        currencies = {r[5] for r in cells}
+        assert "USD" in currencies
+        assert "THB" in currencies
+        # The USD row carries the 4dp-quantized resolved rate as New_Value.
+        usd_rows = [r for r in cells if r[5] == "USD"]
+        assert any(r[7] == "33.1234" for r in usd_rows), usd_rows
+        # The summary is no longer a misleading 0.
+        assert any(
+            "Total Rows Modified" in c and "0" not in c.split(":")[-1]
+            for r in rows for c in r if "Total Rows Modified" in c
+        )
+
+    def test_dry_run_writes_no_audit_log(
+        self, tmp_path, tmp_cache, monkeypatch,
+    ):
+        log_dir = _patch_audit_dir(monkeypatch, tmp_path)
+        path = _build_ledger(tmp_path, [(date(2025, 1, 7), "USD")])
+        engine = _audit_engine({"USD": (33.0, 33.5)}, tmp_cache)
+
+        asyncio.run(engine.process_batch([path], dry_run=True))
+        assert engine.last_audit_path is None
+        # No CSV files were created for a simulation.
+        assert not log_dir.exists() or not list(log_dir.glob("Audit_Log_*.csv"))
+
+    def test_injected_audit_is_not_finalized_by_engine(
+        self, tmp_path, tmp_cache, monkeypatch,
+    ):
+        """A caller-supplied audit log keeps its lifecycle: the engine records
+        rows but does not finalize, summarize, or set last_audit_path."""
+        _patch_audit_dir(monkeypatch, tmp_path)
+        from core.audit_logger import AuditLogger
+
+        path = _build_ledger(tmp_path, [(date(2025, 1, 7), "USD")])
+        engine = _audit_engine({"USD": (33.0, 33.5)}, tmp_cache)
+        external = AuditLogger(log_dir=str(tmp_path / "ext"))
+
+        asyncio.run(engine.process_batch([path], audit=external))
+        # Engine did not claim ownership.
+        assert engine.last_audit_path is None
+        # Rows were recorded into the caller's log; it is still open.
+        assert external.row_count >= 1
+        assert not external._closed
+        external.finalize()
+
+    def test_failed_file_records_do_not_leak_into_next_file(
+        self, tmp_path, tmp_cache, monkeypatch,
+    ):
+        """Regression: WorkbookWriter pushes per-cell AuditRecords into the
+        collector BEFORE the atomic save. A file that fails AFTER that point
+        (disk-full, locked, etc.) must have its phantom records drained and
+        discarded — never flushed into the NEXT successful file's audit rows.
+        """
+        _patch_audit_dir(monkeypatch, tmp_path)
+        file_a = _build_ledger(
+            tmp_path, [(date(2025, 1, 7), "USD")], name="fileA.xlsx",
+        )
+        file_b = _build_ledger(
+            tmp_path, [(date(2025, 1, 8), "EUR")], name="fileB.xlsx",
+        )
+        engine = _audit_engine(
+            {"USD": (33.1234, 33.5), "EUR": (36.5678, 36.9)}, tmp_cache,
+        )
+
+        # Wrap process_ledger so file A populates the shared collector with its
+        # per-cell records (exactly as STEP 5 does) and THEN raises a save-time
+        # OSError; file B proceeds normally.
+        from core.audit_logger import AuditRecord
+
+        real_process_ledger = engine.process_ledger
+
+        async def _flaky(fp, *args, **kwargs):
+            if Path(fp).name == "fileA.xlsx":
+                collector = kwargs.get("audit")
+                if collector is not None:
+                    collector.add(AuditRecord(
+                        filename="fileA.xlsx", sheet="Jan", row=2,
+                        cell_date="2025-01-07", currency="USD",
+                        original_value="", new_value="33.1234",
+                    ))
+                raise OSError("disk full during save")
+            return await real_process_ledger(fp, *args, **kwargs)
+
+        monkeypatch.setattr(engine, "process_ledger", _flaky)
+
+        success, fail, _errors = asyncio.run(
+            engine.process_batch([file_a, file_b]),
+        )
+        assert (success, fail) == (1, 1)
+
+        header, rows = self._read_rows(engine.last_audit_path)
+        cells = [r for r in rows if "BATCH SUMMARY" not in r[1]]
+        filenames = {r[1] for r in cells}
+        # fileA failed its save → none of its phantom records may appear.
+        assert "fileA.xlsx" not in filenames, cells
+        # Only the file that was actually written is audited.
+        assert filenames == {"fileB.xlsx"}, cells

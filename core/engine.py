@@ -25,6 +25,7 @@ import openpyxl
 
 from core.anomaly_guard import AnomalyGuard
 from core.api_client import BOTAPIError, BOTClient
+from core.audit_logger import AuditCollector, AuditLogger, cleanup_old_audit_logs
 from core.backup_manager import BackupError, BackupManager
 from core.config_manager import SettingsManager
 from core.constants import (
@@ -33,12 +34,15 @@ from core.constants import (
     MAX_FILE_SIZE_MB,
     SKIP_SHEET_NAMES,
     bot_today,
+    humanize_save_error,
     parse_date,
 )
 from core.database import CacheDB
 from core.exrate_updater import StandaloneExRateUpdater, WorkbookWriter
 from core.ledger_processing import (
+    classify_currencies,
     prescan_target_dates,
+    prescan_target_dates_and_currencies,
     run_anomaly_check,
 )
 from core.logic import (
@@ -140,6 +144,9 @@ class LedgerEngine:
         self._anomaly_guard = AnomalyGuard(threshold_pct=threshold)
         self._last_anomaly_count = 0
         self._last_batch_anomaly_count = 0
+        # Path to the audit CSV written by the most recent process_batch run
+        # (None for dry runs / when an external caller owns the audit log).
+        self.last_audit_path: str | None = None
 
     def _emit(self, msg: str, etype: str = "log") -> None:
         """Push event to EventBus if one is attached."""
@@ -419,6 +426,41 @@ class LedgerEngine:
             emit_fn=self._emit,
         )
 
+    async def _fetch_extra_currency_rates(
+        self,
+        extra_currencies: list[str],
+        api_field: str,
+        start_dt: date,
+        end_dt: date,
+    ) -> dict[str, dict[date, Decimal]]:
+        """Fetch the selected rate type for non-USD/EUR ledger currencies.
+
+        Returns ``{ccy: {date: Decimal}}`` quantized to 4dp (Mathematical
+        Truth — never the raw API float). The BOT API client already accepts a
+        currency param, so each detected currency is fetched independently and
+        only the ``api_field`` matching the user's snapshotted rate type is
+        kept. Featherweight: sequential per-currency fetch, no extra workbook
+        loads.
+        """
+        out: dict[str, dict[date, Decimal]] = {}
+        for ccy in extra_currencies:
+            self._emit(f"Fetching {ccy} rates")
+            records = await self.api.get_exchange_rates(start_dt, end_dt, ccy)
+            by_date: dict[date, Decimal] = {}
+            for rec in records:
+                try:
+                    rec_date = datetime.strptime(
+                        rec.period, "%Y-%m-%d"
+                    ).date()
+                except (ValueError, TypeError):
+                    continue
+                val = getattr(rec, api_field, None)
+                dec = safe_to_decimal(val)
+                if dec is not None:
+                    by_date[rec_date] = dec
+            out[ccy] = by_date
+        return out
+
     def _build_holiday_lookup(
         self,
         all_target_dates: set[date],
@@ -442,8 +484,15 @@ class LedgerEngine:
         filepath: str,
         start_date: str | None = None,
         dry_run: bool = False,
+        audit: AuditCollector | None = None,
     ) -> str:
-        """Process a single ledger file end-to-end."""
+        """Process a single ledger file end-to-end.
+
+        ``audit`` (an AuditCollector) receives one record per EX Rate cell that
+        resolves to a rate, so the batch-level audit CSV captures every cell
+        mutation. It is threaded into the WorkbookWriter and ignored on dry runs
+        (no file is written, so there is nothing to audit).
+        """
 
         # noqa: PTH100 — os.path.abspath normalizes WITHOUT resolving symlinks;
         # Path.resolve() would resolve symlinks and could change the in-place
@@ -470,8 +519,27 @@ class LedgerEngine:
             self.backup.create_backup(filepath)
             self._emit("Backup created")
 
-        # ── Pre-scan dates for API data loading ──────────────────────
-        all_target_dates = self._prescan_target_dates(filepath)
+        # ── Snapshot rate type ONCE at the start of this file's run ─────
+        # Re-reading SettingsManager later (inside the writer) let a mid-batch
+        # Settings "Save" silently switch the rate basis for the remaining
+        # files. Snapshotting here keeps one consistent rate type per file run
+        # regardless of concurrent settings edits.
+        rate_type = SettingsManager().load().get(
+            "rate_type", "buying_transfer"
+        )
+
+        # ── Pre-scan dates + currencies for API data loading ──────────
+        all_target_dates, ledger_currencies = (
+            prescan_target_dates_and_currencies(
+                filepath,
+                self.target_cols,
+                parse_date_fn=self._parse_date,
+                emit_fn=self._emit,
+            )
+        )
+        extra_currencies, unsupported_currencies = classify_currencies(
+            ledger_currencies
+        )
 
         # ── Date hierarchy ───────────────────────────────────────────
         target_year = (
@@ -486,6 +554,20 @@ class LedgerEngine:
             logic_engine, usd_selling, eur_selling,
             usd_buying, eur_buying, usd_data, eur_data,
         ) = await self._preload_api_data(all_target_dates, start_date)
+
+        # ── Fetch any extra (non-USD/EUR) supported currencies ─────────
+        # The master sheet gets one appended column per extra currency, filled
+        # with the snapshotted rate type, so multi-currency ledger rows resolve
+        # instead of silently leaving blank EX Rate cells.
+        extra_currency_rates: dict[str, dict[date, Decimal]] = {}
+        if extra_currencies:
+            try:
+                ec_start = datetime.strptime(start_date, "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                ec_start = date(target_year - 1, 12, 20)
+            extra_currency_rates = await self._fetch_extra_currency_rates(
+                extra_currencies, rate_type, ec_start, bot_today(),
+            )
 
         # v3.1.0: Anomaly detection — check for suspicious rate jumps
         anomaly_count = self._run_anomaly_check(
@@ -516,6 +598,10 @@ class LedgerEngine:
             filepath, dry_run,
             usd_buying, usd_selling, eur_buying, eur_selling,
             master_holidays_set, holidays_names, computed_start,
+            rate_type=rate_type,
+            extra_currency_rates=extra_currency_rates,
+            unsupported_currencies=unsupported_currencies,
+            audit=None if dry_run else audit,
         )
 
     # ================================================================== #
@@ -528,13 +614,24 @@ class LedgerEngine:
         progress_cb: Callable[[int, int, str, str | None], None] | None = None,
         dry_run: bool = False,
         stop_event: threading.Event | None = None,
+        audit: AuditLogger | None = None,
     ) -> tuple[int, int, list[str]]:
-        """Batch processing with pre-edit backup, cache, and auto-cleanup.
+        """Batch processing with pre-edit backup, cache, audit trail, cleanup.
 
         ``stop_event`` (set by the GUI on shutdown) is checked BETWEEN files —
         a safe boundary after the previous file's wb.close()+gc — so a cancel
         never lands mid-save and risks truncating an in-place .xlsx. Remaining
         files are reported as unprocessed via errors + progress_cb.
+
+        Audit trail (compliance):
+          * If a caller passes its own ``audit`` AuditLogger, the engine records
+            per-cell changes into it and leaves the summary/finalize to the
+            caller (the CLI in main.py owns its log this way).
+          * Otherwise, for a real (non-dry) run the engine creates, summarizes,
+            finalizes, and prunes its OWN audit CSV so the GUI/scheduler paths
+            get an identical auditor-facing trail without any extra wiring. The
+            resulting path is exposed via ``self.last_audit_path``.
+        Dry runs never write an audit log (no files are modified).
         """
         if not dry_run:
             self.backup.cleanup_old_backups(max_age_days=BACKUP_MAX_AGE_DAYS)
@@ -542,6 +639,16 @@ class LedgerEngine:
         success = 0
         anomaly_total = 0
         errors: list[str] = []
+
+        # ── Audit-log lifecycle ──────────────────────────────────────────
+        # Own the log only when the caller did not inject one AND this is a
+        # real run; record cell changes into a thread-safe collector and drain
+        # them into the CSV after each file's workbook is safely closed.
+        self.last_audit_path = None
+        owns_audit = audit is None and not dry_run
+        if owns_audit:
+            audit = AuditLogger()
+        collector = AuditCollector() if audit is not None else None
 
         for idx, fp in enumerate(filepaths):
             fname = Path(fp).name
@@ -553,10 +660,13 @@ class LedgerEngine:
                 if progress_cb:
                     progress_cb(idx + 1, total, fname, "cancelled")
                 continue
+            file_ok = False
             try:
                 await self.process_ledger(
                     fp, start_date=start_date, dry_run=dry_run,
+                    audit=collector,
                 )
+                file_ok = True
                 success += 1
                 anomaly_total += self.last_anomaly_count
                 if progress_cb:
@@ -586,16 +696,51 @@ class LedgerEngine:
                     progress_cb(idx + 1, total, fname, str(e))
             except (OSError, ValueError, KeyError,
                     openpyxl.utils.exceptions.InvalidFileException) as e:
-                err_msg = f"{fname}: {e!s}"
+                # A file open in Excel surfaces as a raw WinError 32 / EACCES
+                # string a non-technical accountant cannot act on. Translate it
+                # into a clear "close it in Excel and retry" message; any other
+                # OS/value error keeps its original text.
+                friendly = humanize_save_error(fname, e)
+                err_msg = friendly if friendly is not None else f"{fname}: {e!s}"
                 errors.append(err_msg)
                 logger.error(
                     "File SKIPPED: %s\n%s",
                     fname, traceback.format_exc(),
                 )
                 if progress_cb:
-                    progress_cb(idx + 1, total, fname, str(e))
+                    progress_cb(idx + 1, total, fname, err_msg)
+            finally:
+                # Drain on EVERY terminal path, not just success. WorkbookWriter
+                # adds per-cell AuditRecords (STEP 5) BEFORE the atomic save, so a
+                # file that fails during/after save (disk-full, locked, etc.) has
+                # already pushed records into the collector. Flush them into the
+                # CSV only when the file was actually written; otherwise drain and
+                # discard so phantom records can't leak into the next file's flush.
+                if collector is not None:
+                    drained = collector.drain()
+                    if file_ok:
+                        audit.log_records(drained)
 
         self._last_batch_anomaly_count = anomaly_total
+
+        # ── Finalize the engine-owned audit log ─────────────────────────
+        # A caller-supplied audit log is left open for the caller to summarize
+        # and finalize (it may aggregate more than this batch). When the engine
+        # owns the log it writes the summary, finalizes, prunes stale logs, and
+        # publishes the path so the GUI can surface it.
+        if owns_audit and audit is not None:
+            try:
+                audit.log_batch_summary(
+                    total_files=total,
+                    success=success,
+                    failed=total - success,
+                    anomalies_detected=anomaly_total,
+                )
+            except ValueError:
+                logger.debug("Audit log already finalized before summary")
+            self.last_audit_path = audit.finalize()
+            cleanup_old_audit_logs()
+
         return success, total - success, errors
 
     # ================================================================== #
