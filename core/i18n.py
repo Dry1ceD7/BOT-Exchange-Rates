@@ -119,10 +119,51 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "Ready to process {count} ledger{plural}.",
         "th": "พร้อมประมวลผลสมุดบัญชี {count} ไฟล์",
     },
+    # Crash-resume prompt shown at startup when an unfinished batch manifest
+    # is found. _title is a dialog heading (no args); _body/_loaded take the
+    # count of pending files plus the {plural} suffix from plural().
+    "main.resume_title": {
+        "en": "Resume unfinished batch?",
+        "th": "ดำเนินการชุดงานที่ค้างต่อหรือไม่?",
+    },
+    "main.resume_body": {
+        "en": (
+            "A previous run left {count} ledger{plural} unprocessed.  "
+            "Reload them into the queue?"
+        ),
+        "th": (
+            "การทำงานครั้งก่อนเหลือสมุดบัญชี {count} ไฟล์ที่ยังไม่ได้ประมวลผล  "
+            "ต้องการโหลดกลับเข้าคิวหรือไม่?"
+        ),
+    },
+    "main.resume_loaded": {
+        "en": "Resumed:  {count} ledger{plural} reloaded into the queue.",
+        "th": "ดำเนินการต่อ:  โหลดสมุดบัญชี {count} ไฟล์กลับเข้าคิวแล้ว",
+    },
+    "main.empty_state_steps": {
+        "en": (
+            "1. Drop or select your Excel ledgers   "
+            "2. Press Process Batch   "
+            "3. Review the results below"
+        ),
+        "th": (
+            "1. วางหรือเลือกไฟล์ Excel   "
+            "2. กด ประมวลผลชุด   "
+            "3. ตรวจสอบผลด้านล่าง"
+        ),
+    },
+    "main.scanning_folder": {
+        "en": "Scanning folder for Excel files...",
+        "th": "กำลังสแกนโฟลเดอร์หาไฟล์ Excel...",
+    },
     # ── Main window: action buttons ───────────────────────────────────
     "main.btn_process": {
         "en": "Process Batch",
         "th": "ประมวลผลทั้งชุด",
+    },
+    "main.btn_clear_queue": {
+        "en": "Clear Queue",
+        "th": "ล้างรายการ",
     },
     "main.btn_revert": {
         "en": "Revert Previous Edit",
@@ -156,6 +197,31 @@ CATALOG: dict[str, dict[str, str]] = {
     "main.status_busy": {
         "en": "Busy:  a batch is already running — please wait.",
         "th": "ไม่ว่าง:  กำลังประมวลผลอยู่ — กรุณารอสักครู่",
+    },
+    "main.status_progress_ok": {
+        "en": (
+            "Done:  {idx} of {total}  ({remaining} remaining)  |  {fname}"
+        ),
+        "th": (
+            "เสร็จ:  {idx} จาก {total}  (เหลือ {remaining})  |  {fname}"
+        ),
+    },
+    "main.status_progress_skipped": {
+        "en": (
+            "Skipped:  {idx} of {total}  ({remaining} remaining)  |  {fname}"
+        ),
+        "th": (
+            "ข้าม:  {idx} จาก {total}  (เหลือ {remaining})  |  {fname}"
+        ),
+    },
+    # Window-title progress (shown in taskbar while a batch runs).
+    "main.title_processing": {
+        "en": "Processing {idx} of {total}",
+        "th": "กำลังประมวลผล {idx} จาก {total}",
+    },
+    "main.title_processing_generic": {
+        "en": "Processing...",
+        "th": "กำลังประมวลผล...",
     },
     "main.status_complete_all": {
         "en": "Complete:  All {count} ledger{plural} processed successfully.",
@@ -248,6 +314,55 @@ CATALOG: dict[str, dict[str, str]] = {
             "เพื่อไม่ให้การประมวลผลหยุดที่ไฟล์เหล่านี้"
         ),
     },
+    # ── Main window: Help & About dialog ──────────────────────────────
+    "main.help_btn": {
+        "en": "Help",
+        "th": "ช่วยเหลือ",
+    },
+    "main.help_title": {
+        "en": "Help & About",
+        "th": "ช่วยเหลือและเกี่ยวกับ",
+    },
+    "main.help_license": {
+        "en": (
+            "Property of Advanced ID Asia Engineering Co., Ltd (AAE). "
+            "For internal accounting use."
+        ),
+        "th": (
+            "ลิขสิทธิ์ของ Advanced ID Asia Engineering Co., Ltd (AAE) — "
+            "ใช้ภายในสำหรับงานบัญชี"
+        ),
+    },
+    "main.help_shortcuts_header": {
+        "en": "Keyboard shortcuts",
+        "th": "ปุ่มลัด",
+    },
+    # Shortcut KEYS stay in English (they are literal keystrokes); the
+    # action LABELS after each em dash are translated.
+    "main.help_shortcuts_body": {
+        "en": (
+            "F5 / Ctrl+Enter — Process Batch\n"
+            "Ctrl+R — Revert Previous Edit\n"
+            "Ctrl+E — Create ExRate Sheet\n"
+            "F1 — this Help dialog\n"
+            "Esc — close a dialog"
+        ),
+        "th": (
+            "F5 / Ctrl+Enter — ประมวลผลทั้งชุด\n"
+            "Ctrl+R — ย้อนกลับการแก้ไขก่อนหน้า\n"
+            "Ctrl+E — สร้างชีตอัตราแลกเปลี่ยน\n"
+            "F1 — เปิดหน้าต่างช่วยเหลือนี้\n"
+            "Esc — ปิดหน้าต่าง"
+        ),
+    },
+    "main.help_open_logs": {
+        "en": "Open Logs / Audit Folder",
+        "th": "เปิดโฟลเดอร์บันทึก / ตรวจสอบ",
+    },
+    "main.help_close": {
+        "en": "Close",
+        "th": "ปิด",
+    },
     # ── Settings modal ────────────────────────────────────────────────
     "settings.title": {
         "en": "Settings",
@@ -301,6 +416,38 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "Could not open the logs folder.",
         "th": "ไม่สามารถเปิดโฟลเดอร์บันทึกได้",
     },
+    "settings.btn_export_settings": {
+        "en": "Export Settings…",
+        "th": "ส่งออกการตั้งค่า…",
+    },
+    "settings.btn_import_settings": {
+        "en": "Import Settings…",
+        "th": "นำเข้าการตั้งค่า…",
+    },
+    "settings.export_dialog_title": {
+        "en": "Export Settings to File",
+        "th": "ส่งออกการตั้งค่าไปยังไฟล์",
+    },
+    "settings.import_dialog_title": {
+        "en": "Import Settings from File",
+        "th": "นำเข้าการตั้งค่าจากไฟล์",
+    },
+    "settings.export_ok": {
+        "en": "Settings exported. Secrets (API keys) were not included.",
+        "th": "ส่งออกการตั้งค่าสำเร็จ ไม่รวมคีย์ API",
+    },
+    "settings.export_failed": {
+        "en": "Could not export settings. Check the location and try again.",
+        "th": "ไม่สามารถส่งออกการตั้งค่าได้ กรุณาตรวจสอบตำแหน่งและลองอีกครั้ง",
+    },
+    "settings.import_ok": {
+        "en": "Settings imported.",
+        "th": "นำเข้าการตั้งค่าสำเร็จ",
+    },
+    "settings.import_failed": {
+        "en": "Could not import settings. The file was not a valid settings file.",
+        "th": "ไม่สามารถนำเข้าการตั้งค่าได้ ไฟล์ไม่ถูกต้อง",
+    },
     "settings.btn_save": {
         "en": "Save and Close",
         "th": "บันทึกและปิด",
@@ -318,13 +465,39 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "Enter your Bank of Thailand API keys to activate",
         "th": "ใส่คีย์ API ของธนาคารแห่งประเทศไทยเพื่อเปิดใช้งาน",
     },
+    "token.products_guide": {
+        "en": (
+            "You need TWO keys from two separate BOT API products. "
+            "Subscribe to both in the BOT API portal, then paste one key "
+            "into each field below."
+        ),
+        "th": (
+            "คุณต้องใช้คีย์สองรายการจากผลิตภัณฑ์ API ของ ธปท. สองรายการที่แยกจากกัน "
+            "สมัครใช้งานทั้งสองรายการในพอร์ทัล API ของ ธปท. "
+            "แล้ววางคีย์ลงในแต่ละช่องด้านล่าง"
+        ),
+    },
     "token.label_exg": {
         "en": "EXCHANGE RATE API KEY",
         "th": "คีย์ API อัตราแลกเปลี่ยน",
     },
+    "token.hint_exg": {
+        "en": 'From the "Daily Average Exchange Rate" API product',
+        "th": 'จากผลิตภัณฑ์ API "อัตราแลกเปลี่ยนเฉลี่ยรายวัน"',
+    },
     "token.label_hol": {
         "en": "HOLIDAY API KEY",
         "th": "คีย์ API วันหยุด",
+    },
+    "token.hint_hol": {
+        "en": (
+            'From the "Financial Institutions Holidays" API product '
+            "(a different subscription)"
+        ),
+        "th": (
+            'จากผลิตภัณฑ์ API "วันหยุดสถาบันการเงิน" '
+            "(เป็นการสมัครใช้งานคนละรายการ)"
+        ),
     },
     "token.placeholder_exg": {
         "en": "Paste your exchange rate API key here",
@@ -414,6 +587,24 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "Next run: {time} — watching {count} folder{plural}",
         "th": "ทำงานครั้งถัดไป: {time} — เฝ้าดู {count} โฟลเดอร์",
     },
+    "sched.status_next_run_some_missing": {
+        "en": (
+            "Next run: {time} — watching {count} folder{plural} "
+            "({missing} unavailable)"
+        ),
+        "th": (
+            "ทำงานครั้งถัดไป: {time} — เฝ้าดู {count} โฟลเดอร์ "
+            "({missing} ไม่พบ)"
+        ),
+    },
+    "sched.last_run": {
+        "en": "Last run: {summary}",
+        "th": "ทำงานล่าสุด: {summary}",
+    },
+    "sched.unavailable": {
+        "en": "(unavailable)",
+        "th": "(ไม่พบโฟลเดอร์)",
+    },
     "sched.skip_weekends": {
         "en": "  Skip weekends",
         "th": "  ข้ามวันหยุดสุดสัปดาห์",
@@ -421,6 +612,31 @@ CATALOG: dict[str, dict[str, str]] = {
     "sched.skip_holidays": {
         "en": "  Skip Thai holidays",
         "th": "  ข้ามวันหยุดธนาคารไทย",
+    },
+    # Scheduler tooltips (hover help on each control).
+    "sched.tip_toggle": {
+        "en": "Turn automatic daily processing on or off.",
+        "th": "เปิด/ปิด การประมวลผลอัตโนมัติประจำวัน",
+    },
+    "sched.tip_time": {
+        "en": "Time of day the scheduled batch runs (local machine time).",
+        "th": "เวลาที่ตั้งให้ประมวลผลอัตโนมัติในแต่ละวัน (เวลาเครื่อง)",
+    },
+    "sched.tip_skip_weekends": {
+        "en": "Skip scheduled runs on Saturday and Sunday.",
+        "th": "ข้ามการทำงานอัตโนมัติในวันเสาร์และวันอาทิตย์",
+    },
+    "sched.tip_skip_holidays": {
+        "en": "Skip scheduled runs on Thai bank holidays.",
+        "th": "ข้ามการทำงานอัตโนมัติในวันหยุดธนาคารไทย",
+    },
+    "sched.tip_add": {
+        "en": "Add a folder to watch for Excel ledgers.",
+        "th": "เพิ่มโฟลเดอร์ที่จะเฝ้าดูไฟล์ Excel",
+    },
+    "sched.tip_remove": {
+        "en": "Remove a folder from the watch list.",
+        "th": "นำโฟลเดอร์ออกจากรายการที่เฝ้าดู",
     },
     # ── CSV panel ─────────────────────────────────────────────────────
     "csv.btn_import": {
@@ -443,9 +659,25 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "✓ Imported {count} rate entries",
         "th": "✓ นำเข้าอัตรา {count} รายการแล้ว",
     },
+    # Detailed import confirmation (shown when a date span is known); the
+    # plain csv.import_ok above is the no-detail fallback.
+    "csv.import_ok_detail": {
+        "en": (
+            "✓ Imported {count} entries: {currencies} — {start} to {end}. "
+            "These rates are now used automatically by Process Batch."
+        ),
+        "th": (
+            "✓ นำเข้า {count} รายการ: {currencies} — {start} ถึง {end} "
+            "ระบบจะใช้อัตราเหล่านี้โดยอัตโนมัติเมื่อประมวลผลทั้งชุด"
+        ),
+    },
     "csv.export_ok": {
         "en": "✓ Exported {count} rate rows",
         "th": "✓ ส่งออกอัตรา {count} แถวแล้ว",
+    },
+    "csv.export_empty": {
+        "en": "No cached rates to export yet — fetch or import rates first.",
+        "th": "ยังไม่มีอัตราที่บันทึกไว้ให้ส่งออก — กรุณาดึงหรือนำเข้าอัตราก่อน",
     },
     # ── ExRate dialog ─────────────────────────────────────────────────
     "exrate.window_title": {
@@ -483,6 +715,18 @@ CATALOG: dict[str, dict[str, str]] = {
     "exrate.btn_create": {
         "en": "Create ExRate File",
         "th": "สร้างไฟล์อัตราแลกเปลี่ยน",
+    },
+    "exrate.btn_cancel": {
+        "en": "Cancel",
+        "th": "ยกเลิก",
+    },
+    "exrate.cancelling": {
+        "en": "Cancelling…",
+        "th": "กำลังยกเลิก…",
+    },
+    "exrate.cancelled": {
+        "en": "ExRate creation cancelled.",
+        "th": "ยกเลิกการสร้างไฟล์ ExRate แล้ว",
     },
     "exrate.err_batch_running": {
         "en": "A batch is running — wait for it to finish first.",
@@ -534,6 +778,34 @@ CATALOG: dict[str, dict[str, str]] = {
     "backup.btn_restore": {
         "en": "Restore Selected",
         "th": "กู้คืนรายการที่เลือก",
+    },
+    # ── Rate ticker (live-data status indicator) ──────────────────────
+    "ticker.connecting": {
+        "en": "SYNC",
+        "th": "กำลังเชื่อมต่อ",
+    },
+    "ticker.live": {
+        "en": "● LIVE",
+        "th": "● สด",
+    },
+    "ticker.offline": {
+        "en": "OFFLINE",
+        "th": "ออฟไลน์",
+    },
+    # ── Version / update browser ──────────────────────────────────────
+    "version.err_batch_running": {
+        "en": (
+            "Update will restart the app — wait for the current batch to "
+            "finish first."
+        ),
+        "th": (
+            "การอัปเดตจะรีสตาร์ทโปรแกรม — "
+            "กรุณารอให้การประมวลผลชุดปัจจุบันเสร็จก่อน"
+        ),
+    },
+    "version.restart_blocked_title": {
+        "en": "Restart Postponed",
+        "th": "เลื่อนการรีสตาร์ท",
     },
 }
 

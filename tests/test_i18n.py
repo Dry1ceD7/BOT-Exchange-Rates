@@ -18,6 +18,7 @@ Each test resets the i18n module cache so cross-test state never leaks.
 """
 
 import re
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -34,6 +35,48 @@ from core.i18n import (
     set_language,
     tr,
 )
+
+# Repo root = parent of the tests/ directory that holds this file.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Source trees whose tr() call sites must every resolve to a catalog entry.
+# gui/ is the primary surface; core/ and main.py also emit a handful of
+# user-facing strings (e.g. early token-validation popups).
+_SOURCE_ROOTS = ("gui", "core")
+_SOURCE_FILES = ("main.py",)
+
+# Matches tr('key') / tr("key") — a literal, dotted, namespaced key. Dynamic
+# keys (tr(variable)) are intentionally not matched: only literals can be
+# statically verified, and the codebase uses literals everywhere.
+_TR_CALL = re.compile(r"""\btr\(\s*['"]([a-zA-Z0-9_.]+)['"]""")
+
+
+def _iter_source_files():
+    """Yield every .py file under the source roots, excluding i18n.py itself."""
+    seen: set[Path] = set()
+    for root in _SOURCE_ROOTS:
+        base = _REPO_ROOT / root
+        if base.is_dir():
+            for path in base.rglob("*.py"):
+                if path.name != "i18n.py":
+                    seen.add(path)
+    for name in _SOURCE_FILES:
+        path = _REPO_ROOT / name
+        if path.is_file():
+            seen.add(path)
+    return sorted(seen)
+
+
+def _collect_tr_keys() -> dict[str, list[str]]:
+    """Map each literal tr() key -> list of 'relpath:line' call sites."""
+    keys: dict[str, list[str]] = {}
+    for path in _iter_source_files():
+        text = path.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            for match in _TR_CALL.finditer(line):
+                rel = path.relative_to(_REPO_ROOT)
+                keys.setdefault(match.group(1), []).append(f"{rel}:{lineno}")
+    return keys
 
 
 @pytest.fixture(autouse=True)
@@ -187,6 +230,59 @@ class TestCatalogIntegrity:
             if not entry.get(lang, "").strip()
         ]
         assert not empty, f"empty translations: {empty}"
+
+
+# ---------------------------------------------------------------------------
+# Call-site coverage — every tr() key used in the source has a catalog entry
+# ---------------------------------------------------------------------------
+class TestCallSiteCoverage:
+    """Static guard: every literal ``tr('key')`` in the source resolves.
+
+    This is the regression guard for the whole "a new tr() call site shipped
+    without a catalog entry" class of bug. ``tr()`` degrades a missing key to
+    the raw dotted string (e.g. the UI literally shows ``main.help_btn``), so a
+    missing entry never crashes — it just leaks an untranslated identifier onto
+    a Thai accounting operator's screen. Only a static scan catches that.
+
+    It scans gui/, core/, and main.py for ``tr('literal.key')`` occurrences and
+    asserts each appears in CATALOG with BOTH an EN and a TH string. Dynamic
+    keys (``tr(var)``) are out of scope — they cannot be checked statically and
+    the codebase does not use them.
+    """
+
+    def test_source_has_tr_call_sites(self):
+        # Guards the scanner itself: if the regex or paths break, this fails
+        # loudly rather than letting an empty scan vacuously "pass".
+        keys = _collect_tr_keys()
+        assert keys, "no tr() call sites found — scanner is misconfigured"
+        # Sanity anchor: a well-known key must be among those discovered.
+        assert "main.btn_process" in keys
+
+    def test_every_used_key_exists_in_catalog(self):
+        keys = _collect_tr_keys()
+        missing = {
+            key: sites for key, sites in keys.items() if key not in CATALOG
+        }
+        assert not missing, (
+            "tr() keys used in source but absent from CATALOG "
+            f"(add EN+TH entries): {missing}"
+        )
+
+    def test_every_used_key_has_both_languages(self):
+        keys = _collect_tr_keys()
+        incomplete = {}
+        for key in keys:
+            entry = CATALOG.get(key, {})
+            langs = [
+                lang
+                for lang in SUPPORTED_LANGUAGES
+                if not entry.get(lang, "").strip()
+            ]
+            if langs:
+                incomplete[key] = langs
+        assert not incomplete, (
+            f"tr() keys missing a language translation: {incomplete}"
+        )
 
 
 # ---------------------------------------------------------------------------
