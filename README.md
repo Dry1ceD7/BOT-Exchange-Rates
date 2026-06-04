@@ -4,11 +4,11 @@
 
 **Enterprise Desktop Application for Bank of Thailand Exchange Rate Automation**
 
-Version 3.3.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
+Version 3.4.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-703%20Passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-806%20Passed-brightgreen)](tests/)
 
 ---
 
@@ -19,6 +19,19 @@ Version 3.3.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Rele
 The **BOT Exchange Rate Processor** is a standalone desktop application that automates the extraction, resolution, and embedding of official Bank of Thailand (BOT) exchange rates into financial accounting ledgers (`.xlsx`).
 
 It replaces a fragmented, error-prone multi-script workflow with a single, production-grade GUI application — built for **zero-downtime corporate environments**, legacy office hardware (4GB RAM, low-resolution monitors), and strict Thai accounting compliance.
+
+### What's New in V3.4.0 (Deep-Audit Hardening — 57 Findings Resolved)
+
+| Feature | Description |
+|---------|-------------|
+| **Credential Hygiene** | Keychain-aware log redaction and Sentry event scrubber; new `--purge-credentials` CLI flag and uninstaller keyring purge hook remove stored tokens on demand. |
+| **Resilient API Client** | HTTP 5xx responses now retry with exponential backoff instead of failing the batch immediately. |
+| **Excel Write Integrity** | Weekend/holiday carry-forward capped at 10 days (fixes blank XLOOKUP cells), atomic saves via temp-file + `os.replace`, and custom date-range end (`dr_end`) honored. |
+| **Batch Robustness** | Batch processing continues past per-file API errors, honors `stop_event` cancellation mid-run, and auto-recovers from a corrupted `cache.db`. |
+| **Thai Date Correctness** | Buddhist-Era years auto-detected in `parse_date`; "today" resolved in Asia/Bangkok (UTC+7) regardless of PC timezone; audit-log retention policy added. |
+| **GUI Consistency** | Theme-token consistency pass, live-console line cap (memory bound), update-install progress surfacing, tray/banner features gated Windows-only. |
+| **Supply-Chain Gate** | `pip-audit` now blocking in CI, CVE-driven dependency locks (urllib3/idna/pillow), ruff `S` (bandit) security lint family enabled, Node 24 GitHub Actions bumps. |
+| **Installer & Legal** | Uninstaller offers consented data cleanup, macOS DMG ships a proper `.app` bundle, proprietary LICENSE added. Suite grew 703 → 806 tests. |
 
 ### What's New in V3.3.0 (Security Hardening & Engine Decomposition)
 
@@ -261,7 +274,7 @@ Two GitHub Actions workflows:
 
 ```bash
 # To trigger a release:
-git tag v3.3.0
+git tag v3.4.0
 git push origin main --tags
 ```
 
@@ -295,6 +308,6 @@ See [LICENSE](LICENSE) for the full terms.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.3.0*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.4.0*
 
 </div>
