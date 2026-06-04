@@ -153,7 +153,7 @@ class TestSchedulerPanelToggleOn:
     def test_toggle_on_fires_on_start_callback(self, tk_root):
         fired = []
 
-        def on_start(t, p):
+        def on_start(t, p, **kwargs):
             fired.append((t, p))
 
         panel, _ = _make_panel(tk_root, on_start=on_start)
@@ -167,7 +167,7 @@ class TestSchedulerPanelToggleOn:
     def test_toggle_on_passes_time_to_callback(self, tk_root):
         fired = []
 
-        def on_start(t, p):
+        def on_start(t, p, **kwargs):
             fired.append((t, p))
 
         panel, _ = _make_panel(tk_root, on_start=on_start)
@@ -184,7 +184,7 @@ class TestSchedulerPanelToggleOn:
     def test_toggle_on_passes_paths_list_to_callback(self, tk_root):
         fired = []
 
-        def on_start(t, p):
+        def on_start(t, p, **kwargs):
             fired.append((t, p))
 
         panel, _ = _make_panel(tk_root, on_start=on_start)
@@ -213,7 +213,7 @@ class TestSchedulerPanelToggleOn:
         fired = []
 
         panel, mock_mgr = _make_panel(
-            tk_root, on_start=lambda t, p: fired.append((t, p))
+            tk_root, on_start=lambda t, p, **kw: fired.append((t, p))
         )
         panel._paths = []
         mock_mgr.set.reset_mock()
@@ -287,16 +287,18 @@ class TestSchedulerPanelTimePicker:
         assert list(values) == expected
         panel.destroy()
 
-    def test_minute_menu_has_four_options(self, tk_root):
+    def test_minute_menu_has_sixty_options(self, tk_root):
+        # Widened from the old quarter-hour-only set so any minute is
+        # selectable and any persisted off-grid minute round-trips.
         panel, _ = _make_panel(tk_root)
         values = panel._minute_menu.cget("values")
-        assert len(values) == 4, f"Expected 4 minute options, got {len(values)}"
+        assert len(values) == 60, f"Expected 60 minute options, got {len(values)}"
         panel.destroy()
 
-    def test_minute_menu_options_are_quarter_hours(self, tk_root):
+    def test_minute_menu_options_are_full_range(self, tk_root):
         panel, _ = _make_panel(tk_root)
         values = panel._minute_menu.cget("values")
-        assert list(values) == ["00", "15", "30", "45"]
+        assert list(values) == [f"{m:02d}" for m in range(60)]
         panel.destroy()
 
     def test_default_hour_is_23(self, tk_root):
@@ -503,6 +505,8 @@ class TestSchedulerPanelConfigPersistence:
             "scheduler_enabled",
             "scheduler_time",
             "scheduler_paths",
+            "scheduler_skip_weekends",
+            "scheduler_skip_holidays",
         }
         panel.destroy()
 
@@ -590,7 +594,7 @@ class TestSchedulerPanelArmsOnLaunch:
         panel, _ = _make_panel(
             tk_root,
             settings=settings,
-            on_start=lambda t, p: fired.append((t, p)),
+            on_start=lambda t, p, **kw: fired.append((t, p)),
         )
 
         assert len(fired) == 1, "on_start must fire once on persisted launch"
@@ -613,7 +617,7 @@ class TestSchedulerPanelArmsOnLaunch:
         panel, _ = _make_panel(
             tk_root,
             settings=settings,
-            on_start=lambda t, p: fired.append((t, p)),
+            on_start=lambda t, p, **kw: fired.append((t, p)),
         )
 
         assert fired == [], "disabled scheduler must not arm on launch"
@@ -638,7 +642,7 @@ class TestSchedulerPanelArmsOnLaunch:
         panel, mock_mgr = _make_panel(
             tk_root,
             settings=settings,
-            on_start=lambda t, p: fired.append((t, p)),
+            on_start=lambda t, p, **kw: fired.append((t, p)),
         )
 
         assert fired == [], "must not arm when no valid folder survives"
@@ -646,4 +650,303 @@ class TestSchedulerPanelArmsOnLaunch:
         # On-disk flag repaired to False via per-key set().
         saved = {c.args[0]: c.args[1] for c in mock_mgr.set.call_args_list}
         assert saved.get("scheduler_enabled") is False
+        panel.destroy()
+
+
+# ---------------------------------------------------------------------------
+# 10. Minute picker — full 60-minute resolution + off-grid persisted repair
+#     (finding: scheduler_panel.py:128)
+# ---------------------------------------------------------------------------
+
+class TestSchedulerPanelMinuteResolution:
+    """Any minute is selectable; a persisted off-grid minute round-trips."""
+
+    def test_minute_menu_has_sixty_options(self, tk_root):
+        panel, _ = _make_panel(tk_root)
+        values = panel._minute_menu.cget("values")
+        assert len(values) == 60, f"Expected 60 minute options, got {len(values)}"
+        panel.destroy()
+
+    def test_minute_menu_options_zero_padded_full_range(self, tk_root):
+        panel, _ = _make_panel(tk_root)
+        values = list(panel._minute_menu.cget("values"))
+        assert values == [f"{m:02d}" for m in range(60)]
+        # The previously-impossible 08:05 minute is now offered.
+        assert "05" in values
+        assert "37" in values
+        panel.destroy()
+
+    def test_persisted_non_quarter_minute_round_trips(self, tk_root):
+        """A persisted 08:37 must load as 37 (not snap to a quarter hour)."""
+        settings = {"scheduler_time": "08:37", "scheduler_paths": []}
+        panel, _ = _make_panel(tk_root, settings=settings)
+        assert panel._hour_var.get() == "08"
+        assert panel._minute_var.get() == "37"
+        # And 37 is a real option, so opening the dropdown won't reset it.
+        assert "37" in panel._minute_menu.cget("values")
+        panel.destroy()
+
+    def test_persisted_unpadded_components_are_repaired(self, tk_root):
+        """Legacy '7:5' must snap to valid two-digit options ('07','05')."""
+        settings = {"scheduler_time": "7:5", "scheduler_paths": []}
+        panel, _ = _make_panel(tk_root, settings=settings)
+        assert panel._hour_var.get() == "07"
+        assert panel._minute_var.get() == "05"
+        panel.destroy()
+
+    def test_persisted_garbage_minute_falls_back(self, tk_root):
+        """A non-numeric persisted minute falls back to a valid option."""
+        settings = {"scheduler_time": "09:zz", "scheduler_paths": []}
+        panel, _ = _make_panel(tk_root, settings=settings)
+        assert panel._hour_var.get() == "09"
+        # Fallback minute "00" is a valid dropdown option.
+        assert panel._minute_var.get() in panel._minute_menu.cget("values")
+        assert panel._minute_var.get() == "00"
+        panel.destroy()
+
+
+# ---------------------------------------------------------------------------
+# 11. apply_theme recolors every interior widget (finding: scheduler_panel:326)
+# ---------------------------------------------------------------------------
+
+class TestSchedulerPanelApplyTheme:
+    """A theme switch must recolor the dropdowns, buttons, list and labels —
+    not just the frame and title — so the panel is never half-themed.
+    """
+
+    def test_apply_theme_recolors_option_menus(self, tk_root):
+        from gui.theme import get_theme
+
+        panel, _ = _make_panel(tk_root)
+        t = get_theme()
+        panel.apply_theme(t)
+        for menu in (panel._hour_menu, panel._minute_menu):
+            assert menu.cget("fg_color") == t["option_bg"]
+            assert menu.cget("button_color") == t["trust_blue"]
+        panel.destroy()
+
+    def test_apply_theme_recolors_action_buttons(self, tk_root):
+        from gui.theme import get_theme
+
+        panel, _ = _make_panel(tk_root)
+        t = get_theme()
+        panel.apply_theme(t)
+        assert panel._btn_add.cget("fg_color") == t["trust_blue"]
+        assert panel._btn_add.cget("hover_color") == t["blue_hover"]
+        assert panel._btn_remove.cget("fg_color") == t["revert_bg"]
+        assert panel._btn_remove.cget("hover_color") == t["revert_hover"]
+        panel.destroy()
+
+    def test_apply_theme_recolors_path_list(self, tk_root):
+        from gui.theme import get_theme
+
+        panel, _ = _make_panel(tk_root)
+        t = get_theme()
+        panel.apply_theme(t)
+        assert panel._path_list.cget("fg_color") == t["path_list_bg"]
+        assert panel._path_list.cget("border_color") == t["sched_border"]
+        panel.destroy()
+
+    def test_apply_theme_recolors_static_labels(self, tk_root):
+        from gui.theme import get_theme
+
+        panel, _ = _make_panel(tk_root)
+        t = get_theme()
+        panel.apply_theme(t)
+        assert panel._lbl_run_at.cget("text_color") == t["text_muted"]
+        assert panel._lbl_watch.cget("text_color") == t["text_muted"]
+        assert panel._lbl_colon.cget("text_color") == t["text_primary"]
+        panel.destroy()
+
+    def test_apply_theme_recolors_frame_and_title(self, tk_root):
+        from gui.theme import get_theme
+
+        panel, _ = _make_panel(tk_root)
+        t = get_theme()
+        panel.apply_theme(t)
+        assert panel.cget("fg_color") == t["sched_bg"]
+        assert panel.cget("border_color") == t["sched_border"]
+        assert panel._lbl_title.cget("text_color") == t["text_primary"]
+        panel.destroy()
+
+    def test_apply_theme_does_not_raise(self, tk_root):
+        from gui.theme import get_theme
+
+        panel, _ = _make_panel(tk_root)
+        panel.apply_theme(get_theme())  # must not raise
+        panel.destroy()
+
+
+# ---------------------------------------------------------------------------
+# 12. Skip-weekends / skip-holidays checkboxes
+# ---------------------------------------------------------------------------
+
+class TestSchedulerPanelSkipToggles:
+    """Skip-weekends and skip-holidays checkboxes persist, restore, and forward."""
+
+    def test_skip_weekends_checkbox_exists(self, tk_root):
+        import customtkinter as ctk
+
+        panel, _ = _make_panel(tk_root)
+        assert hasattr(panel, "_chk_skip_weekends")
+        assert isinstance(panel._chk_skip_weekends, ctk.CTkCheckBox)
+        panel.destroy()
+
+    def test_skip_holidays_checkbox_exists(self, tk_root):
+        import customtkinter as ctk
+
+        panel, _ = _make_panel(tk_root)
+        assert hasattr(panel, "_chk_skip_holidays")
+        assert isinstance(panel._chk_skip_holidays, ctk.CTkCheckBox)
+        panel.destroy()
+
+    def test_skip_weekends_defaults_to_off(self, tk_root):
+        panel, _ = _make_panel(tk_root)
+        assert panel._skip_weekends_var.get() == "off"
+        panel.destroy()
+
+    def test_skip_holidays_defaults_to_off(self, tk_root):
+        panel, _ = _make_panel(tk_root)
+        assert panel._skip_holidays_var.get() == "off"
+        panel.destroy()
+
+    def test_skip_weekends_persisted_true_restored(self, tk_root):
+        settings = {
+            "scheduler_skip_weekends": True,
+            "scheduler_skip_holidays": False,
+            "scheduler_paths": [],
+        }
+        panel, _ = _make_panel(tk_root, settings=settings)
+        assert panel._skip_weekends_var.get() == "on"
+        assert panel._skip_holidays_var.get() == "off"
+        panel.destroy()
+
+    def test_skip_holidays_persisted_true_restored(self, tk_root):
+        settings = {
+            "scheduler_skip_weekends": False,
+            "scheduler_skip_holidays": True,
+            "scheduler_paths": [],
+        }
+        panel, _ = _make_panel(tk_root, settings=settings)
+        assert panel._skip_weekends_var.get() == "off"
+        assert panel._skip_holidays_var.get() == "on"
+        panel.destroy()
+
+    def test_save_config_persists_skip_weekends_true(self, tk_root):
+        panel, mock_mgr = _make_panel(tk_root)
+        panel._skip_weekends_var.set("on")
+        mock_mgr.set.reset_mock()
+        panel._save_config()
+
+        saved = _set_calls(mock_mgr)
+        assert saved.get("scheduler_skip_weekends") is True
+        panel.destroy()
+
+    def test_save_config_persists_skip_holidays_true(self, tk_root):
+        panel, mock_mgr = _make_panel(tk_root)
+        panel._skip_holidays_var.set("on")
+        mock_mgr.set.reset_mock()
+        panel._save_config()
+
+        saved = _set_calls(mock_mgr)
+        assert saved.get("scheduler_skip_holidays") is True
+        panel.destroy()
+
+    def test_save_config_persists_skip_flags_false_by_default(self, tk_root):
+        panel, mock_mgr = _make_panel(tk_root)
+        mock_mgr.set.reset_mock()
+        panel._save_config()
+
+        saved = _set_calls(mock_mgr)
+        assert saved.get("scheduler_skip_weekends") is False
+        assert saved.get("scheduler_skip_holidays") is False
+        panel.destroy()
+
+    def test_toggle_on_forwards_skip_weekends_to_start(self, tk_root):
+        fired = []
+
+        def on_start(t, p, skip_weekends=False, skip_holidays=False):
+            fired.append({"skip_weekends": skip_weekends, "skip_holidays": skip_holidays})
+
+        panel, _ = _make_panel(tk_root, on_start=on_start)
+        panel._paths = ["/some/folder"]
+        panel._skip_weekends_var.set("on")
+        panel._skip_holidays_var.set("off")
+        panel._enable_var.set("on")
+        panel._on_toggle()
+
+        assert len(fired) == 1
+        assert fired[0]["skip_weekends"] is True
+        assert fired[0]["skip_holidays"] is False
+        panel.destroy()
+
+    def test_toggle_on_forwards_skip_holidays_to_start(self, tk_root):
+        fired = []
+
+        def on_start(t, p, skip_weekends=False, skip_holidays=False):
+            fired.append({"skip_weekends": skip_weekends, "skip_holidays": skip_holidays})
+
+        panel, _ = _make_panel(tk_root, on_start=on_start)
+        panel._paths = ["/some/folder"]
+        panel._skip_weekends_var.set("off")
+        panel._skip_holidays_var.set("on")
+        panel._enable_var.set("on")
+        panel._on_toggle()
+
+        assert len(fired) == 1
+        assert fired[0]["skip_weekends"] is False
+        assert fired[0]["skip_holidays"] is True
+        panel.destroy()
+
+    def test_config_change_forwards_skip_flags(self, tk_root):
+        """Changing a skip checkbox live-updates the running scheduler."""
+        fired = []
+
+        def on_start(t, p, skip_weekends=False, skip_holidays=False):
+            fired.append({"skip_weekends": skip_weekends, "skip_holidays": skip_holidays})
+
+        panel, _ = _make_panel(tk_root, on_start=on_start)
+        panel._paths = ["/some/folder"]
+        panel._enable_var.set("on")
+        panel._skip_weekends_var.set("on")
+        panel._skip_holidays_var.set("on")
+        panel._on_config_change()
+
+        assert len(fired) == 1
+        assert fired[0]["skip_weekends"] is True
+        assert fired[0]["skip_holidays"] is True
+        panel.destroy()
+
+    def test_persisted_skip_flags_forwarded_on_launch_arm(self, tk_root, tmp_path):
+        """A persisted-enabled panel with skip flags must arm with both flags."""
+        folder = tmp_path / "ledgers"
+        folder.mkdir()
+        fired = []
+
+        def on_start(t, p, skip_weekends=False, skip_holidays=False):
+            fired.append({"skip_weekends": skip_weekends, "skip_holidays": skip_holidays})
+
+        settings = {
+            "scheduler_enabled": True,
+            "scheduler_time": "08:00",
+            "scheduler_paths": [str(folder)],
+            "scheduler_skip_weekends": True,
+            "scheduler_skip_holidays": True,
+        }
+        panel, _ = _make_panel(tk_root, settings=settings, on_start=on_start)
+
+        assert len(fired) == 1, "on_start must fire once on persisted launch"
+        assert fired[0]["skip_weekends"] is True
+        assert fired[0]["skip_holidays"] is True
+        panel.destroy()
+
+    def test_get_config_includes_skip_flags(self, tk_root):
+        panel, _ = _make_panel(tk_root)
+        panel._skip_weekends_var.set("on")
+        panel._skip_holidays_var.set("off")
+        cfg = panel.get_config()
+        assert "skip_weekends" in cfg
+        assert "skip_holidays" in cfg
+        assert cfg["skip_weekends"] is True
+        assert cfg["skip_holidays"] is False
         panel.destroy()
