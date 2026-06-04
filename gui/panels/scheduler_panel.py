@@ -23,6 +23,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 
 from core.config_manager import SettingsManager
+from core.i18n import plural, tr
 from gui.theme import MONO_FONT, get_theme
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,7 @@ class SchedulerPanel(ctk.CTkFrame):
         header.pack(fill="x", padx=12, pady=(10, 4))
 
         self._lbl_title = ctk.CTkLabel(
-            header, text="⏰ Auto-Processing",
+            header, text=tr("sched.title"),
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=t["text_primary"],
         )
@@ -94,11 +95,12 @@ class SchedulerPanel(ctk.CTkFrame):
         time_row = ctk.CTkFrame(self._content, fg_color="transparent")
         time_row.pack(fill="x", padx=12, pady=(4, 2))
 
-        ctk.CTkLabel(
-            time_row, text="Run at:",
+        self._lbl_run_at = ctk.CTkLabel(
+            time_row, text=tr("sched.run_at"),
             font=ctk.CTkFont(size=12),
             text_color=t["text_muted"],
-        ).pack(side="left")
+        )
+        self._lbl_run_at.pack(side="left")
 
         self._hour_var = ctk.StringVar(value="23")
         self._hour_menu = ctk.CTkOptionMenu(
@@ -125,7 +127,10 @@ class SchedulerPanel(ctk.CTkFrame):
         self._minute_menu = ctk.CTkOptionMenu(
             time_row,
             variable=self._minute_var,
-            values=["00", "15", "30", "45"],
+            # All 60 minutes (not just quarter hours) so any time — e.g. 08:05
+            # — is selectable and any persisted off-grid minute round-trips
+            # without silently snapping to a quarter the user never chose.
+            values=[f"{m:02d}" for m in range(60)],
             width=60, height=28,
             font=ctk.CTkFont(size=12),
             fg_color=t["option_bg"],
@@ -135,18 +140,51 @@ class SchedulerPanel(ctk.CTkFrame):
         )
         self._minute_menu.pack(side="left", padx=2)
 
+        # ── Skip options row ──────────────────────────────────────────
+        skip_row = ctk.CTkFrame(self._content, fg_color="transparent")
+        skip_row.pack(fill="x", padx=12, pady=(2, 0))
+
+        self._skip_weekends_var = ctk.StringVar(value="off")
+        self._chk_skip_weekends = ctk.CTkCheckBox(
+            skip_row,
+            text=tr("sched.skip_weekends"),
+            variable=self._skip_weekends_var,
+            onvalue="on", offvalue="off",
+            font=ctk.CTkFont(size=11),
+            text_color=t["text_muted"],
+            checkmark_color=t["trust_blue"],
+            hover_color=t["trust_blue"],
+            command=self._on_config_change,
+        )
+        self._chk_skip_weekends.pack(side="left", padx=(0, 16))
+
+        self._skip_holidays_var = ctk.StringVar(value="off")
+        self._chk_skip_holidays = ctk.CTkCheckBox(
+            skip_row,
+            text=tr("sched.skip_holidays"),
+            variable=self._skip_holidays_var,
+            onvalue="on", offvalue="off",
+            font=ctk.CTkFont(size=11),
+            text_color=t["text_muted"],
+            checkmark_color=t["trust_blue"],
+            hover_color=t["trust_blue"],
+            command=self._on_config_change,
+        )
+        self._chk_skip_holidays.pack(side="left")
+
         # ── Watch paths section ───────────────────────────────────────
         paths_header = ctk.CTkFrame(self._content, fg_color="transparent")
         paths_header.pack(fill="x", padx=12, pady=(8, 2))
 
-        ctk.CTkLabel(
-            paths_header, text="Watch Folders:",
+        self._lbl_watch = ctk.CTkLabel(
+            paths_header, text=tr("sched.watch_folders"),
             font=ctk.CTkFont(size=12),
             text_color=t["text_muted"],
-        ).pack(side="left")
+        )
+        self._lbl_watch.pack(side="left")
 
         self._btn_remove = ctk.CTkButton(
-            paths_header, text="✕ Remove",
+            paths_header, text=tr("sched.btn_remove"),
             width=80, height=26,
             font=ctk.CTkFont(size=11),
             fg_color=t["revert_bg"], hover_color=t["revert_hover"],
@@ -156,7 +194,7 @@ class SchedulerPanel(ctk.CTkFrame):
         self._btn_remove.pack(side="right", padx=(4, 0))
 
         self._btn_add = ctk.CTkButton(
-            paths_header, text="+ Add Folder",
+            paths_header, text=tr("sched.btn_add"),
             width=100, height=26,
             font=ctk.CTkFont(size=11),
             fg_color=t["trust_blue"], hover_color=t["blue_hover"],
@@ -194,16 +232,31 @@ class SchedulerPanel(ctk.CTkFrame):
         enabled = self._settings.get("scheduler_enabled", False)
         time_str = self._settings.get("scheduler_time", "23:00")
         paths = self._settings.get("scheduler_paths", [])
+        skip_weekends = self._settings.get("scheduler_skip_weekends", False)
+        skip_holidays = self._settings.get("scheduler_skip_holidays", False)
 
-        # Parse time
+        # Parse time, snapping any malformed/off-grid persisted component to a
+        # value that exists in the dropdown so it round-trips. The minute menu
+        # now offers all 60 values, so a normal HH:MM persists verbatim; this
+        # only repairs corrupt data (e.g. "7:5", "08:37 " with stray text, or a
+        # non-numeric) that would otherwise display a value the dropdown cannot
+        # represent and silently jump the moment the user touches it.
+        hour_opts = self._hour_menu.cget("values")
+        minute_opts = self._minute_menu.cget("values")
         parts = time_str.split(":")
         if len(parts) == 2:
-            self._hour_var.set(parts[0])
-            self._minute_var.set(parts[1])
+            self._hour_var.set(self._snap_to_options(parts[0], hour_opts, "23"))
+            self._minute_var.set(
+                self._snap_to_options(parts[1], minute_opts, "00")
+            )
 
         # Load paths
         self._paths = [p for p in paths if Path(p).is_dir()]
         self._refresh_path_list()
+
+        # Restore skip toggles.
+        self._skip_weekends_var.set("on" if skip_weekends else "off")
+        self._skip_holidays_var.set("on" if skip_holidays else "off")
 
         # Set toggle (triggers _on_toggle which shows/hides content).
         #
@@ -224,6 +277,8 @@ class SchedulerPanel(ctk.CTkFrame):
                 self._on_start(
                     f"{self._hour_var.get()}:{self._minute_var.get()}",
                     list(self._paths),
+                    skip_weekends=self._skip_weekends_var.get() == "on",
+                    skip_holidays=self._skip_holidays_var.get() == "on",
                 )
         else:
             self._enable_var.set("off")
@@ -234,6 +289,26 @@ class SchedulerPanel(ctk.CTkFrame):
                 self._content.pack(fill="x", pady=(0, 4))
                 self._update_status()
                 self._save_config()
+
+    @staticmethod
+    def _snap_to_options(raw: str, options, fallback: str) -> str:
+        """Return a value guaranteed to exist in ``options``.
+
+        A persisted time component is normalized to a zero-padded two-digit
+        string and matched against the dropdown's option list. If the cleaned
+        value is not a valid option (corrupt/legacy data), the fallback is
+        returned so the dropdown never displays an unrepresentable value that
+        would silently snap when the user opens it.
+        """
+        opts = list(options)
+        cleaned = (raw or "").strip()
+        if cleaned in opts:
+            return cleaned
+        try:
+            padded = f"{int(cleaned):02d}"
+        except (TypeError, ValueError):
+            return fallback
+        return padded if padded in opts else fallback
 
     def _on_toggle(self):
         """Handle enable/disable toggle."""
@@ -255,6 +330,8 @@ class SchedulerPanel(ctk.CTkFrame):
                 self._on_start(
                     f"{self._hour_var.get()}:{self._minute_var.get()}",
                     list(self._paths),
+                    skip_weekends=self._skip_weekends_var.get() == "on",
+                    skip_holidays=self._skip_holidays_var.get() == "on",
                 )
         else:
             self._content.pack_forget()
@@ -263,7 +340,7 @@ class SchedulerPanel(ctk.CTkFrame):
         self._save_config()
 
     def _on_config_change(self, _=None):
-        """Handle time or path changes."""
+        """Handle time, path, or skip-option changes."""
         self._save_config()
         self._update_status()
         # If scheduler is running, update it live
@@ -271,6 +348,8 @@ class SchedulerPanel(ctk.CTkFrame):
             self._on_start(
                 f"{self._hour_var.get()}:{self._minute_var.get()}",
                 list(self._paths),
+                skip_weekends=self._skip_weekends_var.get() == "on",
+                skip_holidays=self._skip_holidays_var.get() == "on",
             )
 
     def _on_add_path(self):
@@ -326,14 +405,14 @@ class SchedulerPanel(ctk.CTkFrame):
         time_str = f"{self._hour_var.get()}:{self._minute_var.get()}"
         if n == 0:
             self._lbl_status.configure(
-                text="⚠ No folders selected — add at least one.",
+                text=tr("sched.status_no_folders"),
                 text_color=t["warning"],
             )
         else:
             self._lbl_status.configure(
-                text=(
-                    f"Next run: {time_str} — "
-                    f"watching {n} folder{'s' if n != 1 else ''}"
+                text=tr(
+                    "sched.status_next_run",
+                    time=time_str, count=n, plural=plural(n),
                 ),
                 text_color=t["success"],
             )
@@ -355,6 +434,8 @@ class SchedulerPanel(ctk.CTkFrame):
                 f"{self._hour_var.get()}:{self._minute_var.get()}"
             ),
             "scheduler_paths": list(self._paths),
+            "scheduler_skip_weekends": self._skip_weekends_var.get() == "on",
+            "scheduler_skip_holidays": self._skip_holidays_var.get() == "on",
         }
         for key, value in scheduler_keys.items():
             self._mgr.set(key, value)
@@ -367,15 +448,67 @@ class SchedulerPanel(ctk.CTkFrame):
             "enabled": self._enable_var.get() == "on",
             "time": f"{self._hour_var.get()}:{self._minute_var.get()}",
             "paths": list(self._paths),
+            "skip_weekends": self._skip_weekends_var.get() == "on",
+            "skip_holidays": self._skip_holidays_var.get() == "on",
         }
 
     def apply_theme(self, t: dict) -> None:
-        """Re-apply theme colors to the scheduler panel."""
+        """Re-apply theme colors to EVERY interior widget.
+
+        A theme switch (Light <-> Dark) previously recolored only the frame and
+        title, leaving the time dropdowns, Watch-Folders label, +Add/Remove
+        buttons, the folder-list box and the static labels stuck in the old
+        palette — a visibly half-themed panel (e.g. a white folder list on a
+        dark card). Reconfigure each widget with the same tokens used at build.
+        """
         self.configure(
             fg_color=t["sched_bg"],
             border_color=t["sched_border"],
         )
         if hasattr(self, "_lbl_title"):
             self._lbl_title.configure(text_color=t["text_primary"])
-        # _lbl_status color is intentionally left as-is so success/warning
-        # states survive a theme re-apply.
+        if hasattr(self, "_lbl_colon"):
+            self._lbl_colon.configure(text_color=t["text_primary"])
+        # Static muted sub-labels.
+        for attr in ("_lbl_run_at", "_lbl_watch"):
+            lbl = getattr(self, attr, None)
+            if lbl is not None:
+                lbl.configure(text_color=t["text_muted"])
+        # Skip-option checkboxes.
+        for attr in ("_chk_skip_weekends", "_chk_skip_holidays"):
+            chk = getattr(self, attr, None)
+            if chk is not None:
+                chk.configure(
+                    text_color=t["text_muted"],
+                    checkmark_color=t["trust_blue"],
+                    hover_color=t["trust_blue"],
+                )
+        # Time option menus.
+        for menu in (
+            getattr(self, "_hour_menu", None),
+            getattr(self, "_minute_menu", None),
+        ):
+            if menu is not None:
+                menu.configure(
+                    fg_color=t["option_bg"],
+                    button_color=t["trust_blue"],
+                )
+        # Action buttons.
+        if hasattr(self, "_btn_add"):
+            self._btn_add.configure(
+                fg_color=t["trust_blue"], hover_color=t["blue_hover"],
+            )
+        if hasattr(self, "_btn_remove"):
+            self._btn_remove.configure(
+                fg_color=t["revert_bg"], hover_color=t["revert_hover"],
+            )
+        # Folder-list textbox.
+        if hasattr(self, "_path_list"):
+            self._path_list.configure(
+                fg_color=t["path_list_bg"],
+                border_color=t["sched_border"],
+            )
+        # Recompute the status label so its success/warning color is correct
+        # for the new palette (rather than freezing the old-theme color).
+        if hasattr(self, "_lbl_status"):
+            self._update_status()

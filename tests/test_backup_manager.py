@@ -296,3 +296,146 @@ class TestRestoreIntegrity:
 
         with pytest.raises(BackupError, match="empty"):
             mgr.restore_latest(test_file)
+
+
+# =========================================================================
+#  BACKUP BROWSER API (inspect / grouped metadata + restore-by-selection)
+# =========================================================================
+
+class TestInspectBackups:
+    """inspect_backups returns metadata only — no workbook loading."""
+
+    def test_inspect_returns_metadata_fields(self, backup_env):
+        mgr, test_file, _, _ = backup_env
+        mgr.create_backup(test_file)
+        records = mgr.inspect_backups(test_file)
+        assert len(records) == 1
+        rec = records[0]
+        assert set(rec) == {"path", "key", "timestamp", "size_bytes"}
+        assert rec["key"] == "ledger"
+        assert isinstance(rec["timestamp"], datetime)
+        # FAKE_XLSX_CONTENT_ORIGINAL is 26 bytes.
+        assert rec["size_bytes"] == len(b"FAKE_XLSX_CONTENT_ORIGINAL")
+
+    def test_inspect_newest_first(self, backup_env):
+        mgr, test_file, _, _ = backup_env
+        mgr.create_backup(test_file)
+        time.sleep(1.1)
+        with open(test_file, "wb") as f:
+            f.write(b"NEWER")
+        newest = mgr.create_backup(test_file)
+        records = mgr.inspect_backups(test_file)
+        assert len(records) == 2
+        assert records[0]["path"] == newest
+
+    def test_inspect_all_when_no_filter(self, backup_env):
+        mgr, _, _, tmpdir = backup_env
+        for name, data in (("a.xlsx", b"A"), ("b.xlsx", b"B")):
+            p = os.path.join(tmpdir, name)
+            with open(p, "wb") as f:
+                f.write(data)
+            mgr.create_backup(p)
+        records = mgr.inspect_backups()
+        assert len(records) == 2
+
+    def test_inspect_ignores_unparsable_timestamp(self, backup_env):
+        """A stray __bak__ file with a bad timestamp still lists (ts=None)."""
+        mgr, _, backup_dir, _ = backup_env
+        stray = os.path.join(backup_dir, "weird__bak__NOTATIME.xlsx")
+        with open(stray, "wb") as f:
+            f.write(b"X")
+        records = mgr.inspect_backups()
+        assert any(r["timestamp"] is None for r in records)
+
+
+class TestGroupedBackups:
+    """list_grouped_backups groups by original file key."""
+
+    def test_groups_by_key(self, backup_env):
+        mgr, _, _, tmpdir = backup_env
+        file_a = os.path.join(tmpdir, "alpha.xlsx")
+        file_b = os.path.join(tmpdir, "beta.xlsx")
+        with open(file_a, "wb") as f:
+            f.write(b"A")
+        with open(file_b, "wb") as f:
+            f.write(b"B")
+        mgr.create_backup(file_a)
+        mgr.create_backup(file_a)
+        mgr.create_backup(file_b)
+
+        grouped = mgr.list_grouped_backups()
+        assert set(grouped) == {"alpha", "beta"}
+        assert len(grouped["alpha"]) == 2
+        assert len(grouped["beta"]) == 1
+
+    def test_keys_sorted(self, backup_env):
+        mgr, _, _, tmpdir = backup_env
+        for name in ("zeta.xlsx", "alpha.xlsx", "mid.xlsx"):
+            p = os.path.join(tmpdir, name)
+            with open(p, "wb") as f:
+                f.write(b"X")
+            mgr.create_backup(p)
+        grouped = mgr.list_grouped_backups()
+        assert list(grouped) == ["alpha", "mid", "zeta"]
+
+    def test_empty_when_no_backups(self, backup_env):
+        mgr, _, _, _ = backup_env
+        assert mgr.list_grouped_backups() == {}
+
+
+class TestRestoreSpecific:
+    """restore_specific rolls back to a CHOSEN backup, safely."""
+
+    def test_restore_earlier_backup(self, backup_env):
+        mgr, test_file, _, _ = backup_env
+        # Backup 1: ORIGINAL.
+        first = mgr.create_backup(test_file)
+        time.sleep(1.1)
+        # Backup 2: UPDATED.
+        with open(test_file, "wb") as f:
+            f.write(b"UPDATED_CONTENT")
+        mgr.create_backup(test_file)
+        # Live file is now corrupted.
+        with open(test_file, "wb") as f:
+            f.write(b"CORRUPTED")
+
+        # Restore the EARLIER backup specifically (not the latest).
+        used = mgr.restore_specific(test_file, first)
+        assert used == first
+        with open(test_file, "rb") as f:
+            assert f.read() == b"FAKE_XLSX_CONTENT_ORIGINAL"
+
+    def test_restore_specific_creates_pre_revert_snapshot(self, backup_env):
+        mgr, test_file, _, _ = backup_env
+        backup = mgr.create_backup(test_file)
+        with open(test_file, "wb") as f:
+            f.write(b"LIVE_BEFORE")
+        mgr.restore_specific(test_file, backup)
+        pre = test_file + ".pre-revert"
+        assert os.path.exists(pre)
+        with open(pre, "rb") as f:
+            assert f.read() == b"LIVE_BEFORE"
+
+    def test_restore_specific_rejects_foreign_backup(self, backup_env):
+        """A backup that belongs to a DIFFERENT file is refused."""
+        mgr, test_file, _, tmpdir = backup_env
+        other = os.path.join(tmpdir, "other.xlsx")
+        with open(other, "wb") as f:
+            f.write(b"OTHER")
+        other_backup = mgr.create_backup(other)
+        with pytest.raises(BackupError, match="does not belong"):
+            mgr.restore_specific(test_file, other_backup)
+
+    def test_restore_specific_missing_backup_raises(self, backup_env):
+        mgr, test_file, backup_dir, _ = backup_env
+        ghost = os.path.join(backup_dir, "ledger__bak__20200101_000000_000000.xlsx")
+        with pytest.raises(BackupError, match="no longer exists"):
+            mgr.restore_specific(test_file, ghost)
+
+    def test_restore_specific_rejects_empty_backup(self, backup_env):
+        mgr, test_file, backup_dir, _ = backup_env
+        ts = datetime.now().strftime(BackupManager._TS_FORMAT)
+        empty = os.path.join(backup_dir, f"ledger__bak__{ts}.xlsx")
+        open(empty, "wb").close()
+        with pytest.raises(BackupError, match="empty"):
+            mgr.restore_specific(test_file, empty)

@@ -14,7 +14,7 @@ import logging
 import os
 import threading
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from core.constants import (
@@ -26,14 +26,28 @@ from core.constants import (
 
 logger = logging.getLogger(__name__)
 
+# How many minutes past the configured slot a late poll may still trigger the
+# day's run. The PC being asleep at the exact target minute, or the process
+# being busy for >POLL_INTERVAL across the boundary, no longer silently skips
+# the whole day: any poll within this window after the slot fires once.
+# Override via BOT_SCHED_CATCHUP_MIN (capped at a sane 12h so a wildly large
+# value can't make a long-overdue slot fire many hours later).
+_CATCH_UP_WINDOW_MINUTES: int = max(
+    1, min(720, int(os.environ.get("BOT_SCHED_CATCHUP_MIN", "120")))
+)
+
 
 class AutoScheduler:
     """
     Background scheduler that fires a callback at a configured time.
 
-    The scheduler polls every 30 seconds to check if the current time
-    matches the target. Once fired, it waits until the next day to
-    prevent duplicate runs.
+    The scheduler polls every POLL_INTERVAL_SECONDS to check whether the day's
+    run is due. Times are interpreted in LOCAL machine time. Rather than
+    requiring an exact ``HH:MM`` match (which silently skipped the whole day if
+    the PC was asleep at that minute or busy across the boundary), the run
+    fires on the first poll at-or-after the slot, within a catch-up window
+    (default 120 min). Once fired it records the date and will not fire again
+    until the next day. Optionally skips weekends and BOT holidays.
 
     Usage:
         scheduler = AutoScheduler()
@@ -41,12 +55,14 @@ class AutoScheduler:
             time_str="23:00",
             watch_paths=["/path/to/ledgers"],
             callback=my_process_function,
+            skip_weekends=True,
         )
         # ... later ...
         scheduler.stop()
     """
 
     POLL_INTERVAL_SECONDS = _DEFAULT_POLL_INTERVAL
+    CATCH_UP_WINDOW_MINUTES = _CATCH_UP_WINDOW_MINUTES
 
     def __init__(self):
         self._timer: threading.Timer | None = None
@@ -55,6 +71,8 @@ class AutoScheduler:
         self._watch_paths: list[str] = []
         self._callback: Callable | None = None
         self._last_run_date: str | None = None
+        self._skip_weekends: bool = False
+        self._skip_holidays: bool = False
         self._lock = threading.Lock()
 
     @property
@@ -88,19 +106,28 @@ class AutoScheduler:
         time_str: str,
         watch_paths: list[str],
         callback: Callable[[list[str]], None],
+        skip_weekends: bool = False,
+        skip_holidays: bool = False,
     ) -> None:
         """
         Start the scheduler.
 
         Args:
-            time_str: Target time in "HH:MM" format (24h).
+            time_str: Target time in "HH:MM" format (24h), LOCAL machine time.
             watch_paths: List of directory paths to scan for Excel files.
             callback: Function to call with the list of discovered files.
+            skip_weekends: When True, Saturday/Sunday slots are marked done for
+                the day without firing the callback (no batch on weekends).
+            skip_holidays: When True, dates present in the BOT holiday cache are
+                likewise skipped. Read-only access to the cached holidays via
+                core.database.get_cache(); no network and no DB writes.
         """
         with self._lock:
             self._target_time = time_str
             self._watch_paths = list(watch_paths)
             self._callback = callback
+            self._skip_weekends = bool(skip_weekends)
+            self._skip_holidays = bool(skip_holidays)
             self._running = True
             self._last_run_date = None
 
@@ -155,13 +182,21 @@ class AutoScheduler:
             timer.start()
 
     def _check_and_fire(self) -> None:
-        """Check if it's time to run, and if so, fire the callback.
+        """Check if the day's run is due, and if so, fire the callback.
 
         Runs on the Timer thread. Snapshot every shared field under the lock
         up front so start()/stop()/update_config() mutations on another thread
         cannot cause torn reads or a double-fire. We operate on the locals,
         write _last_run_date back under the lock, and invoke the callback
         OUTSIDE the lock (it may be slow / re-enter the scheduler).
+
+        Fire rule (vs. the old exact ``current_time == target_time`` equality
+        that silently skipped the whole day on a sleepy/busy PC):
+          fire once when  now >= today-at-target  AND  now < target + window
+          AND we have not already run today.
+        A poll a few minutes late still triggers; a poll arriving long after
+        the catch-up window has closed does NOT (we don't want a 23:00 job
+        suddenly firing at 06:00 the next morning).
         """
         with self._lock:
             if not self._running:
@@ -170,37 +205,100 @@ class AutoScheduler:
             callback = self._callback
             watch_paths = list(self._watch_paths)
             last_run_date = self._last_run_date
+            skip_weekends = self._skip_weekends
+            skip_holidays = self._skip_holidays
 
         now = datetime.now()
-        current_time = now.strftime("%H:%M")
         current_date = now.strftime("%Y-%m-%d")
 
-        # Prevent duplicate runs on the same day
+        # Prevent duplicate runs on the same day.
         if last_run_date == current_date:
             self._schedule_next()
             return
 
-        if current_time == target_time:
-            logger.info("Scheduler firing at %s", current_time)
-            with self._lock:
-                self._last_run_date = current_date
+        if not self._is_run_due(now, target_time):
+            self._schedule_next()
+            return
 
-            # Scan watch paths for Excel files (using the snapshot)
-            files = self._scan_watch_paths(watch_paths)
+        # The slot is due today. Mark it done up front so weekend/holiday skips
+        # and a fired run alike consume the day exactly once (no retry storm
+        # across the catch-up window, no double-fire race on the Timer thread).
+        with self._lock:
+            self._last_run_date = current_date
 
-            # Invoke the callback OUTSIDE the lock — it may be slow or
-            # re-enter the scheduler.
-            if files and callback is not None:
-                try:
-                    callback(files)
-                except (OSError, ValueError, RuntimeError) as e:
-                    logger.error("Scheduler callback failed: %s", e)
-            elif not files:
-                logger.info(
-                    "Scheduler: no Excel files found in watched paths"
-                )
+        if skip_weekends and now.weekday() >= 5:
+            logger.info(
+                "Scheduler: %s is a weekend — skipping today's run.",
+                current_date,
+            )
+            self._schedule_next()
+            return
+
+        if skip_holidays and self._is_holiday(now):
+            logger.info(
+                "Scheduler: %s is a BOT holiday — skipping today's run.",
+                current_date,
+            )
+            self._schedule_next()
+            return
+
+        logger.info("Scheduler firing for %s (slot %s)", current_date, target_time)
+
+        # Scan watch paths for Excel files (using the snapshot).
+        files = self._scan_watch_paths(watch_paths)
+
+        # Invoke the callback OUTSIDE the lock — it may be slow or re-enter the
+        # scheduler.
+        if files and callback is not None:
+            try:
+                callback(files)
+            except (OSError, ValueError, RuntimeError) as e:
+                logger.error("Scheduler callback failed: %s", e)
+        elif not files:
+            logger.info("Scheduler: no Excel files found in watched paths")
 
         self._schedule_next()
+
+    def _is_run_due(self, now: datetime, target_time: str) -> bool:
+        """Return True if ``now`` is at-or-after today's slot, within the window.
+
+        Parses ``target_time`` ("HH:MM"); a malformed value never fires (logged
+        once per poll at debug). The window upper bound stops a long-overdue
+        slot from firing hours later (e.g. machine woken the next morning).
+        """
+        try:
+            hh, mm = target_time.split(":")
+            slot = now.replace(
+                hour=int(hh), minute=int(mm), second=0, microsecond=0,
+            )
+        except (ValueError, TypeError):
+            logger.debug("Scheduler: bad target_time %r — not firing", target_time)
+            return False
+        if now < slot:
+            return False
+        return now < slot + timedelta(minutes=self.CATCH_UP_WINDOW_MINUTES)
+
+    def _is_holiday(self, now: datetime) -> bool:
+        """Read-only check of the BOT holiday cache for ``now``'s date.
+
+        Uses core.database.get_cache() (the public, process-wide accessor) and
+        only READS — no network, no DB writes. Any cache error is treated as
+        "not a holiday" so a missing/empty cache never blocks a scheduled run.
+        """
+        try:
+            from core.database import get_cache
+
+            year = now.year
+            cache = get_cache()
+            if not cache.has_holidays_for_year(year):
+                return False
+            target = now.strftime("%Y-%m-%d")
+            return any(
+                row[0] == target for row in cache.get_holidays(year)
+            )
+        except Exception as exc:  # noqa: BLE001 — never let cache errors block
+            logger.debug("Scheduler holiday check failed (ignored): %s", exc)
+            return False
 
     def _scan_watch_paths(self, watch_paths: list[str]) -> list[str]:
         """

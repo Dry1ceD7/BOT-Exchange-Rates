@@ -362,6 +362,39 @@ class CacheDB:
             return None
         return Decimal(str(row[0]))
 
+    def get_rates_multi(
+        self, start: date, end: date, currency: str, rate_type: str,
+    ) -> dict[date, Decimal]:
+        """Return every cached ``(currency, rate_type)`` rate in a date range.
+
+        Returns ``{date: Decimal}`` (the same per-currency shape the engine's
+        extra-currency fetch produces), so a cache-first ledger path can read
+        CSV-imported GBP/JPY/etc. rates directly from ``rates_multi`` instead
+        of reaching the API. Dates with a NULL stored value are omitted so the
+        result only carries usable rates.
+
+        Featherweight: one indexed range scan, exact-Decimal round-trip from
+        the TEXT-affinity ``value`` column (never a lossy float).
+        """
+        s_str = start.strftime("%Y-%m-%d")
+        e_str = end.strftime("%Y-%m-%d")
+        rows = self._conn().execute(
+            "SELECT date, value FROM rates_multi "
+            "WHERE currency = ? AND rate_type = ? "
+            "AND date BETWEEN ? AND ?",
+            (currency, rate_type, s_str, e_str),
+        ).fetchall()
+        result: dict[date, Decimal] = {}
+        for d_str, value in rows:
+            if value is None:
+                continue
+            try:
+                d = datetime.strptime(d_str, "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                logger.debug("Skipped unparseable rates_multi date: %s", d_str)
+                continue
+            result[d] = Decimal(str(value))
+        return result
 
     def insert_multi_rates_bulk(
         self, entries: list[tuple],

@@ -52,7 +52,7 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 | Feature | Description |
 |---------|-------------|
 | **Rate Type Persistence** | Fixed formula injection to dynamically map XLOOKUP columns based on the user's Buying/Selling/Mid rate preference. |
-| **Multi-Currency Architecture** | Upgraded formula generation with dynamic `IFS` branching to safely support `GBP`, `JPY`, and `CNY` currencies. |
+| **Multi-Currency Ledger Fill** | Ledger rows in any of 10 supported currencies — `USD`, `EUR`, `GBP`, `JPY`, `CNY`, `SGD`, `HKD`, `AUD`, `CHF`, `CAD` (plus `THB`, which resolves to a literal `1.0`) — are filled end-to-end: USD/EUR use the fixed `ExRate` columns, while every other supported code gets a dynamically appended `ExRate` column wired into the row's lookup formula. Any currency outside this set is left blank and surfaced as a per-file warning (never silently empty). |
 | **Batch Start Date Accuracy** | Fixed prescan pipeline bug; `process_ledger` now correctly honors user-provided start dates instead of falling back to year-end defaults. |
 | **Download Concurrency Guard** | Hardened the auto-updater version panel with a strict `_busy_download` mutex to prevent installer corruption on rapid double-clicks. |
 | **Anomaly UI Consistency** | Added explicit `warning` styling in `LiveConsolePanel`, preventing anomaly alerts from rendering as plain `[---]`. |

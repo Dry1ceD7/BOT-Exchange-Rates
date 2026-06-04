@@ -32,13 +32,23 @@ _GET_TOKEN = "gui.panels.version_panel.get_token"
 _HTTPX_GET = "gui.panels.version_panel.httpx.get"
 _CHECK_FOR_UPDATE = "core.auto_updater.check_for_update"
 _AUTO_UPDATER_MODULE = "gui.panels.version_panel"
+_CAN_INSTALL = "gui.panels.version_panel._can_install_in_place"
+_WEBBROWSER_OPEN = "gui.panels.version_panel.webbrowser.open"
 
 
-def _make_panel(tk_root, **kwargs):
-    """Create a VersionPanel under tk_root with all external deps mocked."""
+def _make_panel(tk_root, *, can_install=True, **kwargs):
+    """Create a VersionPanel under tk_root with all external deps mocked.
+
+    `can_install` controls the platform-gating helper so a single test process
+    can exercise both the Windows (install in place) and macOS/Linux
+    (release-page redirect) branches without touching real sys.platform.
+    """
     from gui.panels.version_panel import VersionPanel
 
-    with patch(_GET_TOKEN, return_value=None):
+    with (
+        patch(_GET_TOKEN, return_value=None),
+        patch(_CAN_INSTALL, return_value=can_install),
+    ):
         panel = VersionPanel(tk_root, **kwargs)
     return panel
 
@@ -435,11 +445,15 @@ class TestVersionPanelVersionSelection:
 
     def test_on_download_selected_version_calls_download(self, tk_root):
         """_on_download_selected_version triggers _download_in_app for a known version."""
-        panel = _make_panel(tk_root)
+        panel = _make_panel(tk_root, can_install=True)
         panel._version_list = [("3.2.8", "v3.2.8", False)]
         panel._selected_version.set("v3.2.8")
 
-        with patch.object(panel, "_download_in_app") as mock_dl:
+        # Patch the runtime gate too: the install branch only runs on Windows.
+        with (
+            patch(_CAN_INSTALL, return_value=True),
+            patch.object(panel, "_download_in_app") as mock_dl,
+        ):
             panel._on_download_selected_version()
 
         mock_dl.assert_called_once_with("3.2.8")
@@ -447,11 +461,14 @@ class TestVersionPanelVersionSelection:
 
     def test_on_download_selected_version_noop_for_unknown_label(self, tk_root):
         """_on_download_selected_version does nothing if label not in version_list."""
-        panel = _make_panel(tk_root)
+        panel = _make_panel(tk_root, can_install=True)
         panel._version_list = [("3.2.8", "v3.2.8", False)]
         panel._selected_version.set("v99.99.99")
 
-        with patch.object(panel, "_download_in_app") as mock_dl:
+        with (
+            patch(_CAN_INSTALL, return_value=True),
+            patch.object(panel, "_download_in_app") as mock_dl,
+        ):
             panel._on_download_selected_version()
 
         mock_dl.assert_not_called()
@@ -518,4 +535,264 @@ class TestVersionPanelInstallFailure:
         mock_box.assert_called_once()
         # Message text carries the underlying error so it is never silent
         assert "boom" in mock_box.call_args[0][1]
+        panel.destroy()
+
+
+# ---------------------------------------------------------------------------
+# 10. Platform gating — macOS/Linux must not start an impossible install
+#     (finding: "In-app updater lets macOS/Linux users download an update
+#      that can never install")
+# ---------------------------------------------------------------------------
+
+class TestVersionPanelPlatformGating:
+    """On non-installable platforms the panel redirects to the release page."""
+
+    def test_can_install_helper_true_only_on_frozen_win32(self):
+        from gui.panels import version_panel as vp
+
+        with patch.object(vp.sys, "platform", "win32"), \
+             patch.object(vp.sys, "frozen", True, create=True):
+            assert vp._can_install_in_place() is True
+
+    def test_can_install_helper_false_on_macos(self):
+        from gui.panels import version_panel as vp
+
+        with patch.object(vp.sys, "platform", "darwin"), \
+             patch.object(vp.sys, "frozen", True, create=True):
+            assert vp._can_install_in_place() is False
+
+    def test_can_install_helper_false_when_unfrozen(self):
+        from gui.panels import version_panel as vp
+
+        with patch.object(vp.sys, "platform", "win32"), \
+             patch.object(vp.sys, "frozen", False, create=True):
+            assert vp._can_install_in_place() is False
+
+    def test_download_button_label_is_release_page_on_non_install(self, tk_root):
+        panel = _make_panel(tk_root, can_install=False)
+        assert "Release Page" in panel._btn_dl_version.cget("text")
+        panel.destroy()
+
+    def test_download_button_label_is_download_on_windows(self, tk_root):
+        panel = _make_panel(tk_root, can_install=True)
+        assert panel._btn_dl_version.cget("text") == "Download"
+        panel.destroy()
+
+    def test_platform_hint_label_present_on_non_install(self, tk_root):
+        panel = _make_panel(tk_root, can_install=False)
+        assert hasattr(panel, "_lbl_platform")
+        assert "Windows only" in panel._lbl_platform.cget("text")
+        panel.destroy()
+
+    def test_no_platform_hint_label_on_windows(self, tk_root):
+        panel = _make_panel(tk_root, can_install=True)
+        assert not hasattr(panel, "_lbl_platform")
+        panel.destroy()
+
+    def test_download_selected_opens_release_page_on_non_install(self, tk_root):
+        """Selecting + 'downloading' on macOS/Linux opens the page, never DLs."""
+        panel = _make_panel(tk_root, can_install=False)
+        panel._version_list = [("3.3.0", "v3.3.0", False)]
+        panel._selected_version.set("v3.3.0")
+
+        with (
+            patch(_CAN_INSTALL, return_value=False),
+            patch.object(panel, "_download_in_app") as mock_dl,
+            patch(_WEBBROWSER_OPEN) as mock_open,
+        ):
+            panel._on_download_selected_version()
+
+        mock_dl.assert_not_called()
+        mock_open.assert_called_once()
+        panel.destroy()
+
+    def test_download_in_app_redirects_to_release_page_on_non_install(
+        self, tk_root
+    ):
+        """Even a direct _download_in_app call must not start a real download."""
+        panel = _make_panel(tk_root, can_install=False)
+
+        with (
+            patch(_CAN_INSTALL, return_value=False),
+            patch(_WEBBROWSER_OPEN) as mock_open,
+            patch("gui.panels.version_panel.threading.Thread") as mock_thread,
+        ):
+            panel._download_in_app("3.3.0")
+
+        mock_open.assert_called_once()
+        mock_thread.assert_not_called()
+        assert panel._busy_download is False
+        panel.destroy()
+
+    def test_update_done_with_version_opens_page_on_non_install(self, tk_root):
+        """A found update on macOS/Linux offers the release page, not Download."""
+        panel = _make_panel(tk_root, can_install=False)
+        panel._busy_update = True
+
+        with patch(_CAN_INSTALL, return_value=False):
+            panel._update_done("Update available: V3.3.0", "#ffaa00", "3.3.0")
+
+        assert "Release Page" in panel._btn_update.cget("text")
+
+        # The button command now routes to the release page, not a download.
+        cmd = panel._btn_update.cget("command")
+        with patch(_WEBBROWSER_OPEN) as mock_open:
+            cmd()
+        mock_open.assert_called_once()
+        panel.destroy()
+
+    def test_open_release_page_calls_webbrowser(self, tk_root):
+        panel = _make_panel(tk_root, can_install=False)
+        with patch(_WEBBROWSER_OPEN) as mock_open:
+            panel._open_release_page()
+        mock_open.assert_called_once()
+        # Targets the canonical GitHub releases page.
+        assert "releases" in mock_open.call_args[0][0]
+        panel.destroy()
+
+
+# ---------------------------------------------------------------------------
+# 11. Release notes ("What's New") rendering
+#     (finding: "Version browser and updater show no release notes")
+# ---------------------------------------------------------------------------
+
+class TestVersionPanelReleaseNotes:
+    """The version browser and update check surface release notes."""
+
+    def test_notes_box_starts_hidden(self, tk_root):
+        panel = _make_panel(tk_root)
+        # Not packed (no manager) until there are notes to show.
+        assert panel._notes_box.winfo_manager() == ""
+        panel.destroy()
+
+    def test_set_notes_shows_text(self, tk_root):
+        panel = _make_panel(tk_root)
+        panel._set_notes("- Fixed the thing\n- Added another thing")
+        assert "Fixed the thing" in panel._notes_box.get("1.0", "end")
+        assert panel._notes_box.winfo_manager() == "pack"
+        panel.destroy()
+
+    def test_set_notes_empty_hides_box(self, tk_root):
+        panel = _make_panel(tk_root)
+        panel._set_notes("notes here")
+        panel._set_notes("")
+        assert panel._notes_box.winfo_manager() == ""
+        panel.destroy()
+
+    def test_notes_box_is_read_only(self, tk_root):
+        panel = _make_panel(tk_root)
+        panel._set_notes("read only please")
+        # CTkTextbox does not expose state via cget; check the inner Text.
+        assert panel._notes_box._textbox.cget("state") == "disabled"
+        panel.destroy()
+
+    def test_truncate_notes_caps_length(self):
+        from gui.panels.version_panel import _MAX_NOTES_CHARS, _truncate_notes
+
+        long_body = "x" * (_MAX_NOTES_CHARS + 500)
+        out = _truncate_notes(long_body)
+        assert len(out) <= _MAX_NOTES_CHARS + len("\n…(truncated)")
+        assert "truncated" in out
+
+    def test_truncate_notes_handles_none(self):
+        from gui.panels.version_panel import _truncate_notes
+
+        assert _truncate_notes(None) == ""
+
+    def test_show_versions_stores_and_renders_notes(self, tk_root):
+        panel = _make_panel(tk_root)
+        panel._busy_browse = True
+        versions = [
+            ("3.3.0", "v3.3.0", False),
+            ("3.2.0", "v3.2.0", False),
+        ]
+        notes = {"v3.3.0": "New in 3.3.0", "v3.2.0": "Old news"}
+
+        panel._show_versions(versions, notes)
+
+        # Latest version's notes render immediately.
+        assert "New in 3.3.0" in panel._notes_box.get("1.0", "end")
+        panel.destroy()
+
+    def test_version_selection_swaps_notes(self, tk_root):
+        panel = _make_panel(tk_root)
+        panel._busy_browse = True
+        versions = [
+            ("3.3.0", "v3.3.0", False),
+            ("3.2.0", "v3.2.0", False),
+        ]
+        notes = {"v3.3.0": "New in 3.3.0", "v3.2.0": "Old news 3.2.0"}
+        panel._show_versions(versions, notes)
+
+        panel._on_version_selected("v3.2.0")
+
+        assert "Old news 3.2.0" in panel._notes_box.get("1.0", "end")
+        panel.destroy()
+
+    def test_browse_worker_extracts_body_from_releases(self, tk_root):
+        """_on_browse_versions parses GitHub `body` into the notes map."""
+        panel = _make_panel(tk_root)
+
+        fake_releases = [
+            {"tag_name": "v3.3.0", "prerelease": False,
+             "body": "Release notes for 3.3.0"},
+            {"tag_name": "v3.2.0", "prerelease": False, "body": ""},
+        ]
+        fake_resp = MagicMock()
+        fake_resp.json.return_value = fake_releases
+        fake_resp.raise_for_status.return_value = None
+
+        captured = {}
+
+        def _capture(_ms, fn, *args):
+            captured["fn"] = fn
+            captured["args"] = args
+
+        with (
+            patch(_HTTPX_GET, return_value=fake_resp),
+            patch.object(panel, "_safe_after", side_effect=_capture),
+        ):
+            # Run the worker body synchronously by capturing the thread target.
+            with patch("gui.panels.version_panel.threading.Thread") as mt:
+                panel._on_browse_versions()
+                worker = mt.call_args.kwargs["target"]
+            worker()
+
+        # _show_versions(versions, notes) was scheduled with the parsed body.
+        versions, notes = captured["args"]
+        assert notes["v3.3.0"] == "Release notes for 3.3.0"
+        assert any(tag == "3.3.0" for tag, _, _ in versions)
+        panel.destroy()
+
+    def test_update_done_renders_notes(self, tk_root):
+        panel = _make_panel(tk_root, can_install=True)
+        panel._busy_update = True
+
+        panel._update_done(
+            "Update available: V3.3.0", "#ffaa00", "3.3.0",
+            "What's new: faster everything",
+        )
+
+        assert "faster everything" in panel._notes_box.get("1.0", "end")
+        panel.destroy()
+
+    def test_fetch_release_notes_returns_body(self, tk_root):
+        panel = _make_panel(tk_root)
+        fake_resp = MagicMock()
+        fake_resp.json.return_value = {"body": "the changelog"}
+        fake_resp.raise_for_status.return_value = None
+
+        with patch(_HTTPX_GET, return_value=fake_resp):
+            out = panel._fetch_release_notes("3.3.0")
+
+        assert out == "the changelog"
+        panel.destroy()
+
+    def test_fetch_release_notes_swallows_errors(self, tk_root):
+        import httpx
+
+        panel = _make_panel(tk_root)
+        with patch(_HTTPX_GET, side_effect=httpx.ConnectError("boom")):
+            out = panel._fetch_release_notes("3.3.0")
+        assert out == ""
         panel.destroy()

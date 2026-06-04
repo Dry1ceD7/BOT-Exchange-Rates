@@ -15,7 +15,9 @@ SFFB: Strict < 200 lines.
 
 import contextlib
 import logging
+import sys
 import threading
+import webbrowser
 from pathlib import Path
 
 import customtkinter as ctk
@@ -31,11 +33,40 @@ logger = logging.getLogger(__name__)
 _RELEASES_URL = (
     "https://api.github.com/repos/Dry1ceD7/BOT-Exchange-Rates/releases"
 )
+_RELEASES_PAGE_URL = (
+    "https://github.com/Dry1ceD7/BOT-Exchange-Rates/releases"
+)
 _BOT_API_PING = (
     "https://gateway.api.bot.or.th"
     "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
     "?start_period=2025-01-01&end_period=2025-01-02&currency=USD"
 )
+
+# Longest release-notes blob we render inline (keep the panel featherweight
+# and avoid pasting a megabyte of changelog into a Tk textbox).
+_MAX_NOTES_CHARS = 1200
+
+
+def _can_install_in_place() -> bool:
+    """True only when the in-app installer can actually apply an update.
+
+    core.auto_updater.apply_update only works on a frozen Windows build (it
+    runs the Inno Setup .exe). On macOS/Linux — or an unfrozen dev run — the
+    install step always fails, so the in-app *install* flow is a dead end.
+    Mirrors UpdateManager.check_for_updates' win32 gating so the panel never
+    promises an install it cannot deliver.
+    """
+    return sys.platform == "win32" and getattr(sys, "frozen", False)
+
+
+def _truncate_notes(body: str | None) -> str:
+    """Normalise GitHub release `body` markdown into short plain text."""
+    if not body:
+        return ""
+    text = body.replace("\r\n", "\n").strip()
+    if len(text) > _MAX_NOTES_CHARS:
+        text = text[:_MAX_NOTES_CHARS].rstrip() + "\n…(truncated)"
+    return text
 
 
 class VersionPanel(SafePanel, ctk.CTkFrame):
@@ -53,6 +84,9 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
         self._on_restart = on_restart
         self._on_error = on_error
         self._busy_download = False
+        # Maps a version label -> its release notes (plain text), populated by
+        # _on_browse_versions so _on_version_selected can render them.
+        self._version_notes: dict[str, str] = {}
         self._build_ui()
 
     def _build_ui(self):
@@ -126,15 +160,55 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
         )
         self._version_menu.pack(side="left", expand=True, fill="x", padx=(0, 8))
 
+        # On platforms where we cannot install in place (macOS/Linux, or an
+        # unfrozen dev build) the button opens the release page instead of
+        # promising a download+install that can never complete.
+        dl_text = "Download" if _can_install_in_place() else "Open Release Page"
         self._btn_dl_version = ctk.CTkButton(
-            self._version_frame, text="Download",
+            self._version_frame, text=dl_text,
             fg_color=t["warning"], hover_color=t["warning_hover"],
             font=ctk.CTkFont(size=12, weight="bold"),
-            corner_radius=6, height=32, width=100,
+            corner_radius=6, height=32, width=140,
             state="disabled",
             command=self._on_download_selected_version,
         )
         self._btn_dl_version.pack(side="right")
+
+        # ── Release Notes ("What's New") ─────────────────────────────
+        # Hidden until a version with a non-empty body is selected (browse) or
+        # a stable update is found (check). Read-only, scrollable, truncated.
+        self._notes_box = ctk.CTkTextbox(
+            self, height=110, wrap="word",
+            font=ctk.CTkFont(size=11),
+            fg_color=(t["section_bg"], t["card_bg"]),
+            text_color=(t["text_primary"], t["modal_text"]),
+            border_width=1, border_color=t["divider"],
+            corner_radius=6,
+        )
+        self._notes_box.configure(state="disabled")
+
+        if not _can_install_in_place():
+            self._lbl_platform = ctk.CTkLabel(
+                self, text="Updates install automatically on Windows only — "
+                           "on this OS, download from the release page.",
+                font=ctk.CTkFont(size=11),
+                text_color=t["modal_muted"], wraplength=320,
+            )
+            self._lbl_platform.pack(pady=(0, 4))
+
+    def _set_notes(self, text: str) -> None:
+        """Render plain-text release notes into the read-only textbox.
+
+        An empty string hides the box; non-empty content shows it.
+        """
+        if not text:
+            self._notes_box.pack_forget()
+            return
+        self._notes_box.configure(state="normal")
+        self._notes_box.delete("1.0", "end")
+        self._notes_box.insert("1.0", text)
+        self._notes_box.configure(state="disabled")
+        self._notes_box.pack(fill="x", pady=(0, 8))
 
     # ── API Ping ─────────────────────────────────────────────────────
     def _on_ping_api(self):
@@ -196,32 +270,64 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
                 result = check_for_update(current_version=__version__)
                 if result.get("update_available"):
                     ver = result.get("latest_version", "?")
+                    notes = _truncate_notes(self._fetch_release_notes(ver))
                     self._safe_after(0, self._update_done,
-                               f"Update available: V{ver}", t["warning"], ver)
+                               f"Update available: V{ver}", t["warning"],
+                               ver, notes)
                 elif result.get("error"):
                     self._safe_after(0, self._update_done,
                                f"Check failed: {result['error']}",
-                               t["error_text"], None)
+                               t["error_text"], None, "")
                 else:
                     self._safe_after(0, self._update_done,
                                f"✓ Up to date (V{__version__})",
-                               t["modal_success"], None)
+                               t["modal_success"], None, "")
             except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
                 self._safe_after(0, self._update_done,
-                           f"Error: {e}", t["error_text"], None)
+                           f"Error: {e}", t["error_text"], None, "")
 
         threading.Thread(target=_worker, daemon=True, name="UpdateCheck").start()
 
-    def _update_done(self, text: str, color: str, version):
+    def _fetch_release_notes(self, version: str) -> str:
+        """Fetch the GitHub release `body` for a tag. Returns '' on any error.
+
+        Runs inside a worker thread only; failures are non-fatal — release
+        notes are a nicety, never a blocker for the update flow.
+        """
+        try:
+            resp = httpx.get(
+                f"https://api.github.com/repos/Dry1ceD7/"
+                f"BOT-Exchange-Rates/releases/tags/v{version}",
+                headers={"Accept": "application/vnd.github+json"},
+                timeout=8.0,
+            )
+            resp.raise_for_status()
+            return resp.json().get("body", "") or ""
+        except (httpx.RequestError, httpx.HTTPStatusError,
+                OSError, ValueError) as e:
+            logger.debug("Could not fetch release notes for %s: %s", version, e)
+            return ""
+
+    def _update_done(self, text: str, color: str, version, notes: str = ""):
         self._busy_update = False
         t = self._t
         self._lbl_update.configure(text=text, text_color=color)
-        if version:
+        self._set_notes(notes)
+        if version and _can_install_in_place():
             self._btn_update.configure(
                 text=f"Download V{version}",
                 fg_color=t["warning"], hover_color=t["warning_hover"],
                 state="normal",
                 command=lambda: self._download_in_app(version),
+            )
+        elif version:
+            # No in-place install on this OS: send the user to the release
+            # page rather than starting a download that can never install.
+            self._btn_update.configure(
+                text=f"Open V{version} Release Page",
+                fg_color=t["warning"], hover_color=t["warning_hover"],
+                state="normal",
+                command=self._open_release_page,
             )
         else:
             self._btn_update.configure(
@@ -256,20 +362,24 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
                 releases = resp.json()
 
                 versions = []
+                notes = {}
                 for rel in releases:
                     tag = rel.get("tag_name", "").lstrip("vV")
                     is_pre = rel.get("prerelease", False)
                     label = f"v{tag} [BETA]" if is_pre else f"v{tag}"
                     versions.append((tag, label, is_pre))
+                    # GitHub already returns the body here — keep it so the
+                    # browser can show 'what's new' without a second request.
+                    notes[label] = _truncate_notes(rel.get("body", ""))
 
-                self._safe_after(0, self._show_versions, versions)
+                self._safe_after(0, self._show_versions, versions, notes)
             except (httpx.RequestError, httpx.HTTPStatusError,
                     OSError, ValueError) as e:
                 self._safe_after(0, self._versions_error, str(e))
 
         threading.Thread(target=_worker, daemon=True, name="VersionBrowse").start()
 
-    def _show_versions(self, versions):
+    def _show_versions(self, versions, notes: dict | None = None):
         self._busy_browse = False
         t = self._t
         self._btn_versions.configure(state="normal")
@@ -280,15 +390,19 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
             return
 
         self._version_list = versions
+        self._version_notes = notes or {}
         labels = [v[1] for v in versions]
+        action = "download" if _can_install_in_place() else "view"
         self._lbl_versions.configure(
-            text=f"{len(versions)} versions available — select to download:",
+            text=f"{len(versions)} versions available — select to {action}:",
             text_color=t["modal_muted"],
         )
         self._selected_version.set(labels[0])
         self._version_menu.configure(values=labels)
         self._version_frame.pack(fill="x", pady=(0, 8))
         self._btn_dl_version.configure(state="normal")
+        # Render the notes for the initially-selected (latest) version.
+        self._set_notes(self._version_notes.get(labels[0], ""))
 
     def _versions_error(self, msg: str):
         self._busy_browse = False
@@ -300,8 +414,25 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
 
     def _on_version_selected(self, label: str):
         self._btn_dl_version.configure(state="normal")
+        # Show the selected version's release notes (empty -> hides the box).
+        self._set_notes(self._version_notes.get(label, ""))
+
+    def _open_release_page(self):
+        """Open the GitHub releases page in the default browser.
+
+        Used on platforms where the in-app installer cannot run, so the user
+        gets the binary from the canonical source instead of a dead-end
+        download-then-fail-to-install flow.
+        """
+        with contextlib.suppress(OSError, webbrowser.Error):
+            webbrowser.open(_RELEASES_PAGE_URL)
 
     def _on_download_selected_version(self):
+        # On non-installable platforms this button is the 'Open Release Page'
+        # affordance — never start a download that cannot be installed.
+        if not _can_install_in_place():
+            self._open_release_page()
+            return
         label = self._selected_version.get()
         version = None
         for tag, lbl, _ in getattr(self, "_version_list", []):
@@ -314,6 +445,13 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
     # ── Download + Apply ─────────────────────────────────────────────
     def _download_in_app(self, version: str):
         """Download the update installer (does NOT run it yet)."""
+        # Defense-in-depth: the install step (apply_update) only works on a
+        # frozen Windows build. On any other platform, downloading the .exe is
+        # wasted bandwidth that ends in 'In-place update only works for frozen
+        # apps' — so redirect to the release page instead of pretending.
+        if not _can_install_in_place():
+            self._open_release_page()
+            return
         if self._busy_download:
             return
         self._busy_download = True

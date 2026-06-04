@@ -597,6 +597,143 @@ class TestLedgerMultiCurrency:
         ), warnings
 
 
+class TestExtraCurrencyCacheFirst:
+    """_fetch_extra_currency_rates must be cache-first like the USD/EUR path.
+
+    Covers:
+    - Offline path: CSV-imported (cache-seeded) GBP rate written into ledger
+      when the API returns nothing for GBP.
+    - API-wins path: fresh API data supersedes the cache value for the same
+      date, matching the USD/EUR precedence.
+    """
+
+    def _ledger(self, tmp_path, rows, name="led.xlsx"):
+        path = tmp_path / name
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Jan"
+        ws.append(["Date", "Cur", "EX Rate", "Amount"])
+        for d, ccy in rows:
+            ws.append([d, ccy, None, 1000])
+        wb.save(str(path))
+        wb.close()
+        return str(path)
+
+    def test_csv_imported_gbp_written_when_api_returns_nothing(
+        self, tmp_path, tmp_cache,
+    ):
+        """Offline path: cache-seeded GBP rate reaches the ledger even when
+        the API returns an empty list for GBP (simulates air-gapped operation
+        after a CSV import has populated rates_multi).
+        """
+        target_date = date(2025, 1, 7)
+
+        # Seed rates_multi directly (as csv_import.py would do).
+        tmp_cache.insert_multi_rates_bulk([
+            ("2025-01-07", "GBP", "buying_transfer", "42.1234"),
+        ])
+
+        path = self._ledger(tmp_path, [
+            (target_date, "USD"),
+            (target_date, "GBP"),
+        ])
+
+        # API returns USD/EUR data but nothing for GBP — simulates offline.
+        async def _rates(start, end, currency):
+            if currency == "USD":
+                return [SimpleNamespace(
+                    period="2025-01-07", currency="USD",
+                    buying_transfer=33.0, selling=33.5,
+                    buying_sight=None, mid_rate=None,
+                )]
+            if currency == "EUR":
+                return [SimpleNamespace(
+                    period="2025-01-07", currency="EUR",
+                    buying_transfer=36.0, selling=36.5,
+                    buying_sight=None, mid_rate=None,
+                )]
+            return []  # GBP — offline, no API data
+
+        api = _make_api()
+        api.get_exchange_rates = AsyncMock(side_effect=_rates)
+        api.get_holidays = AsyncMock(return_value=[])
+
+        from unittest.mock import MagicMock
+        eng = LedgerEngine(api, backup=MagicMock(), cache=tmp_cache)
+        result = asyncio.run(eng.process_ledger(path))
+        assert result == path
+
+        wb = openpyxl.load_workbook(path)
+        try:
+            ws_ex = wb["ExRate"]
+            headers = [
+                ws_ex.cell(row=1, column=c).value
+                for c in range(1, (ws_ex.max_column or 1) + 1)
+            ]
+            # GBP Rate column must exist — cache-seeded data must flow through.
+            assert "GBP Rate" in headers, f"Expected 'GBP Rate' in {headers}"
+            gbp_col = headers.index("GBP Rate") + 1
+            gbp_vals = {
+                _cell_decimal(ws_ex.cell(row=r, column=gbp_col).value)
+                for r in range(2, (ws_ex.max_row or 1) + 1)
+                if ws_ex.cell(row=r, column=gbp_col).value is not None
+            }
+            # The cache-seeded rate (not an API rate) must appear.
+            assert Decimal("42.1234") in gbp_vals, (
+                f"Cache-seeded GBP rate 42.1234 not found in ExRate; "
+                f"got {gbp_vals}"
+            )
+        finally:
+            wb.close()
+
+    def test_api_data_wins_over_cache_for_same_date(
+        self, tmp_cache,
+    ):
+        """API-wins path: when the API returns a GBP rate for a date that is
+        also present in the cache, the fresh API value supersedes the stale
+        cache value — same precedence rule as the USD/EUR path.
+
+        Exercises _fetch_extra_currency_rates directly with an empty cache so
+        the API is consulted (cache miss), then verifies the API value lands.
+        """
+        target_date = date(2025, 1, 7)
+        fresh_rate = Decimal("42.1234")
+
+        # API returns a fresh GBP rate.
+        async def _rates(start, end, currency):
+            if currency == "GBP":
+                return [SimpleNamespace(
+                    period="2025-01-07", currency="GBP",
+                    buying_transfer=float(fresh_rate), selling=43.5,
+                    buying_sight=None, mid_rate=None,
+                )]
+            return []
+
+        api = _make_api()
+        api.get_exchange_rates = AsyncMock(side_effect=_rates)
+
+        from unittest.mock import MagicMock
+        eng = LedgerEngine(api, backup=MagicMock(), cache=tmp_cache)
+
+        result = asyncio.run(eng._fetch_extra_currency_rates(
+            ["GBP"], "buying_transfer",
+            target_date, target_date,
+        ))
+        # API returned fresh_rate for 2025-01-07; it must be present.
+        assert result["GBP"][target_date] == fresh_rate, (
+            f"Expected API value {fresh_rate}, got {result['GBP'].get(target_date)}"
+        )
+
+        # Also verify the fresh API value was persisted to rates_multi so
+        # the next run can serve it from cache (cache-store contract).
+        cached = tmp_cache.get_rates_multi(
+            target_date, target_date, "GBP", "buying_transfer"
+        )
+        assert cached.get(target_date) == fresh_rate, (
+            f"API rate not stored back to rates_multi: {cached}"
+        )
+
+
 class TestRateTypeSnapshot:
     """A Settings rate_type change mid-run must NOT affect the in-flight file.
 

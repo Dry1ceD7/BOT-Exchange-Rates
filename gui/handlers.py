@@ -178,8 +178,12 @@ class BatchHandler:
                     "msg": f"Audit log: {engine.last_audit_path}",
                 })
             try:
+                # Pass dry_run through so the GUI renders simulation-specific
+                # copy and suppresses the "Show File in Folder" reveal — a dry
+                # run modifies nothing, so offering to open the "output" is a lie.
                 self.app.after(
-                    200, self.app._show_batch_complete, success, fail, errors,
+                    200, self.app._show_batch_complete,
+                    success, fail, errors, dry_run,
                 )
             except RuntimeError:
                 logger.debug("App already destroyed during completion callback")

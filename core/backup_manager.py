@@ -128,13 +128,56 @@ class BackupManager:
                 f"The file must have been processed at least once to have a backup."
             )
 
-        latest_backup = matches[0]
+        return self._restore_from(filepath, matches[0])
 
+    def restore_specific(self, filepath: str, backup_path: str) -> str:
+        """
+        Restore a SPECIFIC backup over the live file (Backup Browser path).
+
+        Unlike :meth:`restore_latest`, the caller chooses exactly which
+        timestamped backup to roll back to — enabling a browse/restore-by-date
+        undo history rather than only "revert latest". Reuses the same
+        integrity check + pre-revert snapshot machinery so a specific restore is
+        as safe as the latest one.
+
+        Args:
+            filepath:    Absolute path to the live file to overwrite.
+            backup_path: Absolute path to the chosen backup. Must be a backup
+                         that actually belongs to ``filepath`` (matched on the
+                         shared base key) — restoring an unrelated file's backup
+                         is refused.
+
+        Returns:
+            Absolute path to the backup that was used for restoration.
+
+        Raises:
+            BackupError: If the backup does not belong to the file, is missing,
+                         empty/unreadable, or the copy fails.
+        """
+        # Guard against restoring a backup that belongs to a DIFFERENT source
+        # file (e.g. a caller passing the wrong path). The embedded key must
+        # match the target file's key.
+        expected_key = self._get_backup_key(filepath)
+        backup_name = Path(backup_path).name
+        if not backup_name.startswith(f"{expected_key}__bak__"):
+            raise BackupError(
+                f"Backup '{backup_name}' does not belong to "
+                f"'{Path(filepath).name}'."
+            )
+        if not Path(backup_path).exists():
+            raise BackupError(f"Backup no longer exists: {backup_path}")
+
+        return self._restore_from(filepath, backup_path)
+
+    def _restore_from(self, filepath: str, backup_path: str) -> str:
+        """Shared restore machinery: integrity check + pre-revert snapshot +
+        copy. Used by both restore_latest and restore_specific so a chosen
+        restore is exactly as safe as the latest one."""
         # Integrity check: backup must be a readable, non-empty .xlsx.
         try:
-            if Path(latest_backup).stat().st_size <= 0:
+            if Path(backup_path).stat().st_size <= 0:
                 raise BackupError(
-                    f"Backup is empty, refusing to restore: {latest_backup}"
+                    f"Backup is empty, refusing to restore: {backup_path}"
                 )
         except OSError as e:
             raise BackupError(f"Backup not readable: {e}") from e
@@ -148,11 +191,11 @@ class BackupManager:
                 raise BackupError(f"Pre-revert snapshot failed: {e}") from e
 
         try:
-            shutil.copy2(latest_backup, filepath)
+            shutil.copy2(backup_path, filepath)
         except OSError as e:
             raise BackupError(f"Restore failed: {e}") from e
 
-        return latest_backup
+        return backup_path
 
     def cleanup_old_backups(self, max_age_days: int = 7) -> int:
         """
@@ -207,3 +250,63 @@ class BackupManager:
             (str(p) for p in Path(self.backup_dir).glob(glob_pattern)),
             reverse=True,
         )
+
+    def inspect_backups(self, filepath: str = None) -> list[dict]:
+        """List backups with lightweight metadata (NO workbook loading).
+
+        Returns a list of dicts (newest first), each carrying::
+
+            {
+                "path":       absolute path to the backup file (str),
+                "key":        base name (stem) of the original file (str),
+                "timestamp":  embedded datetime, or None if unparsable,
+                "size_bytes": file size in bytes (int), 0 if stat fails,
+            }
+
+        Featherweight by design: only ``stat()`` + filename parsing are used,
+        so it is safe to call repeatedly on a 4GB-RAM target without ever
+        opening a single .xlsx.
+
+        Args:
+            filepath: If provided, only inspect backups for this source file.
+        """
+        records = []
+        for path in self.list_backups(filepath):
+            try:
+                size = Path(path).stat().st_size
+            except OSError:
+                size = 0
+            records.append(
+                {
+                    "path": path,
+                    "key": self._key_from_backup(path),
+                    "timestamp": self._parse_backup_timestamp(path),
+                    "size_bytes": size,
+                }
+            )
+        return records
+
+    def list_grouped_backups(self) -> dict[str, list[dict]]:
+        """Group every backup by its original file's base key (newest first).
+
+        Powers the Backup Browser: one entry per original ledger, each mapping
+        to the chronological list of its timestamped backups (metadata only, no
+        workbook loading). Keys are sorted alphabetically; each value preserves
+        the newest-first ordering of :meth:`inspect_backups`.
+        """
+        grouped: dict[str, list[dict]] = {}
+        for record in self.inspect_backups():
+            grouped.setdefault(record["key"], []).append(record)
+        # Return a dict ordered by key so the browser lists files predictably.
+        return {key: grouped[key] for key in sorted(grouped)}
+
+    def _key_from_backup(self, backup_path: str) -> str:
+        """Recover the original file's base key from a backup filename.
+
+        ``ledger__bak__20260604_...`` -> ``ledger``. Falls back to the full
+        stem for any path that does not match the backup pattern.
+        """
+        stem = Path(backup_path).stem
+        marker = "__bak__"
+        idx = stem.rfind(marker)
+        return stem[:idx] if idx != -1 else stem

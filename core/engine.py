@@ -173,6 +173,100 @@ class LedgerEngine:
                 f"File too large (> {self.MAX_FILE_SIZE_MB}MB)."
             )
 
+    @classmethod
+    def preflight_file(cls, filepath: str) -> dict:
+        """Cheap, side-effect-free pre-flight check for one selected file.
+
+        Designed for the GUI to call at *selection* time (drop / browse) so an
+        oversized, unsupported, missing, or locked file is flagged immediately
+        instead of only failing mid-run after the API fetch + backup. Does NOT
+        load the workbook, hit the network, or write anything — just stats the
+        path, checks the extension, and (if the file exists) probes whether it
+        is writable in place.
+
+        Returns a dict::
+
+            {
+              "name": str,        # basename for display
+              "ok": bool,         # True when the file is safe to process
+              "exists": bool,
+              "size_ok": bool,    # within MAX_FILE_SIZE_MB (False if missing)
+              "size_mb": float,   # actual size in MB (0.0 if missing)
+              "supported": bool,  # extension is .xlsx / .xlsm
+              "writable": bool,   # in-place save would not hit a lock
+              "reason": str | None,  # human message when not ok, else None
+            }
+
+        ``reason`` reuses the round-7 ``humanize_save_error`` wording for the
+        locked-file case so selection-time and run-time messages match.
+        """
+        fp = Path(filepath)
+        name = fp.name
+        exists = fp.exists()
+        supported = filepath.lower().endswith((".xlsx", ".xlsm"))
+
+        size_mb = 0.0
+        size_ok = False
+        writable = False
+        if exists and fp.is_file():
+            size_bytes = fp.stat().st_size
+            size_mb = round(size_bytes / (1024 * 1024), 2)
+            size_ok = size_bytes <= cls.MAX_FILE_BYTES
+            writable = cls._probe_writable(fp)
+
+        reason: str | None = None
+        if not exists:
+            reason = f"{name}: File not found."
+        elif not fp.is_file():
+            reason = f"{name}: Not a file."
+        elif not supported:
+            reason = (
+                f"{name}: Unsupported format. Only .xlsx and .xlsm files "
+                "are supported."
+            )
+        elif not size_ok:
+            reason = (
+                f"{name}: File too large ({size_mb}MB > "
+                f"{cls.MAX_FILE_SIZE_MB}MB limit)."
+            )
+        elif not writable:
+            reason = (
+                f"{name}: File is open in Excel or another program. "
+                "Please close it and process again."
+            )
+
+        return {
+            "name": name,
+            "ok": reason is None,
+            "exists": exists,
+            "size_ok": size_ok,
+            "size_mb": size_mb,
+            "supported": supported,
+            "writable": writable,
+            "reason": reason,
+        }
+
+    @staticmethod
+    def _probe_writable(fp: Path) -> bool:
+        """Return False if the file cannot be opened for in-place writing.
+
+        Opens with append-binary ("ab") — this acquires a write handle WITHOUT
+        truncating any content, so it is safe to run before the real save. A
+        file held open by Excel (Windows sharing violation / WinError 32) or
+        without write permission (EACCES) raises and we report it as not
+        writable. Any unexpected error is treated as "probe inconclusive" →
+        writable, so the real save path remains the authoritative guard.
+        """
+        try:
+            with fp.open("ab"):
+                pass
+        except PermissionError:
+            return False
+        except OSError as exc:
+            winerror = getattr(exc, "winerror", None)
+            return not (winerror == 32 or exc.errno in (13, 16))
+        return True
+
     def _parse_date(self, cell_value) -> date | None:
         """Parse a date from a cell value (shared parser, full superset)."""
         return parse_date(cell_value)
@@ -435,29 +529,64 @@ class LedgerEngine:
     ) -> dict[str, dict[date, Decimal]]:
         """Fetch the selected rate type for non-USD/EUR ledger currencies.
 
+        Cache-first (mirrors the USD/EUR path in ``_preload_api_data``):
+        1. Read ``rates_multi`` for each currency — covers CSV-imported and
+           previously cached rates so the offline/air-gapped path works.
+        2. Compute which weekday dates in the window are absent from the cache.
+        3. Call the BOT API only for the missing window; API data wins for any
+           date it returns (same precedence as the USD/EUR path — fresh API
+           data supersedes stale cache).
+        4. Store fresh API hits back into ``rates_multi`` for future runs.
+
         Returns ``{ccy: {date: Decimal}}`` quantized to 4dp (Mathematical
-        Truth — never the raw API float). The BOT API client already accepts a
-        currency param, so each detected currency is fetched independently and
-        only the ``api_field`` matching the user's snapshotted rate type is
-        kept. Featherweight: sequential per-currency fetch, no extra workbook
-        loads.
+        Truth — never the raw API float). Featherweight: sequential per-
+        currency fetch, no extra workbook loads.
         """
         out: dict[str, dict[date, Decimal]] = {}
         for ccy in extra_currencies:
-            self._emit(f"Fetching {ccy} rates")
-            records = await self.api.get_exchange_rates(start_dt, end_dt, ccy)
-            by_date: dict[date, Decimal] = {}
-            for rec in records:
-                try:
-                    rec_date = datetime.strptime(
-                        rec.period, "%Y-%m-%d"
-                    ).date()
-                except (ValueError, TypeError):
-                    continue
-                val = getattr(rec, api_field, None)
-                dec = safe_to_decimal(val)
-                if dec is not None:
-                    by_date[rec_date] = dec
+            # ── Step 1: seed from cache (rates_multi) ────────────────
+            by_date: dict[date, Decimal] = self.cache.get_rates_multi(
+                start_dt, end_dt, ccy, api_field
+            )
+
+            # ── Step 2: find weekday dates missing from cache ─────────
+            all_weekdays: set[date] = set()
+            check = start_dt
+            while check <= end_dt:
+                if check.weekday() < 5:
+                    all_weekdays.add(check)
+                check += timedelta(days=1)
+            missing_dates = all_weekdays - set(by_date.keys())
+
+            # ── Step 3: API fetch for misses only ─────────────────────
+            if missing_dates:
+                fetch_start = min(missing_dates)
+                fetch_end = max(missing_dates)
+                self._emit(f"Fetching {ccy} rates ({fetch_start} to {fetch_end})")
+                records = await self.api.get_exchange_rates(
+                    fetch_start, fetch_end, ccy
+                )
+                bulk_entries: list[tuple] = []
+                for rec in records:
+                    try:
+                        rec_date = datetime.strptime(
+                            rec.period, "%Y-%m-%d"
+                        ).date()
+                    except (ValueError, TypeError):
+                        continue
+                    val = getattr(rec, api_field, None)
+                    dec = safe_to_decimal(val)
+                    if dec is not None:
+                        # API wins — overwrite any cache value for this date.
+                        by_date[rec_date] = dec
+                        bulk_entries.append(
+                            (rec.period, ccy, api_field, str(dec))
+                        )
+                if bulk_entries:
+                    self.cache.insert_multi_rates_bulk(bulk_entries)
+            else:
+                self._emit(f"{ccy} rates served from cache", )
+
             out[ccy] = by_date
         return out
 
@@ -516,6 +645,20 @@ class LedgerEngine:
         if dry_run:
             self._emit("[SIM] Backup skipped (dry run)")
         else:
+            # ── Pre-flight writability/lock check (fail fast) ───────────────
+            # Probe that the in-place save target is writable BEFORE spending a
+            # network round-trip + a backup copy. A file still open in Excel
+            # raises a sharing violation here; we re-raise it as a PermissionError
+            # so process_batch's OSError branch humanizes it via
+            # humanize_save_error ("close it in Excel and process again") instead
+            # of the user waiting through the whole API fetch only to hit the
+            # same lock at the final save.
+            if not self._probe_writable(Path(filepath)):
+                raise PermissionError(
+                    13,
+                    "The process cannot access the file because it is being "
+                    "used by another process",
+                )
             self.backup.create_backup(filepath)
             self._emit("Backup created")
 

@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "appearance": "system",
+    # v3.3.0: UI language ('en' default, 'th' Thai). Read by core/i18n.py.
+    #          Only on-screen text is translated; logs/audit CSV stay English.
+    "language": "en",
     "auto_update": True,
     "api_timeout_seconds": 10,
     # v3.1.0: Rate type for formula injection (buying_transfer, selling,
