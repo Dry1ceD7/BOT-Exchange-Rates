@@ -8,6 +8,7 @@ BatchHandler takes an injectable ``app`` (only needs an ``after`` method) and
 an injectable ``event_bus``, so it is fully testable without a Tk root.
 """
 
+import asyncio
 import threading
 import time
 
@@ -147,6 +148,53 @@ class TestBatchEvents:
         assert _wait_until(lambda: len(seen) == 1)
         queue.append("b.xlsx")  # mutate after start
         assert seen[0] == ["a.xlsx"]
+
+
+class TestAuditLogSurfacing:
+    """The GUI batch path must surface the engine-written audit CSV so the
+    auditor-facing log is no longer CLI-only (CLI/GUI parity)."""
+
+    def _run(self, handler, monkeypatch, audit_path):
+        """Drive _run_batch with a fake engine that mimics process_batch."""
+        import gui.handlers as handlers_mod
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+        class FakeEngine:
+            def __init__(self, *a, **k):
+                self.last_audit_path = audit_path
+
+            async def process_batch(self, *a, **k):
+                return (1, 0, [])
+
+        # BOTClient reads tokens from the keychain/.env at construction;
+        # CI has none, so stub it out alongside the engine.
+        monkeypatch.setattr(handlers_mod, "BOTClient", FakeClient)
+        monkeypatch.setattr(handlers_mod, "LedgerEngine", FakeEngine)
+        asyncio.run(handler._run_batch(["a.xlsx"], "2025-01-01"))
+
+    def test_audit_path_pushed_to_console(self, monkeypatch):
+        app = FakeApp()
+        bus = EventBus()
+        handler = BatchHandler(app, event_bus=bus)
+
+        self._run(handler, monkeypatch, "/tmp/data/logs/Audit_Log_X.csv")
+        msgs = [e.get("msg", "") for e in bus.drain()]
+        assert any(
+            "Audit log:" in m and "Audit_Log_X.csv" in m for m in msgs
+        ), msgs
+
+    def test_no_audit_message_when_path_missing(self, monkeypatch):
+        """A dry run (last_audit_path is None) must not announce an audit log."""
+        app = FakeApp()
+        bus = EventBus()
+        handler = BatchHandler(app, event_bus=bus)
+
+        self._run(handler, monkeypatch, None)
+        msgs = [e.get("msg", "") for e in bus.drain()]
+        assert not any("Audit log:" in m for m in msgs), msgs
 
 
 class TestRevertEvents:

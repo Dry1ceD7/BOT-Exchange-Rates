@@ -169,6 +169,14 @@ class BatchHandler:
                 "type": "success",
                 "msg": f"{label} complete: {success} succeeded, {fail} failed.",
             })
+            # Surface the auditor-facing CSV the engine wrote for this run so the
+            # GUI path is no longer audit-silent (CLI/GUI parity). Dry runs make
+            # no file (last_audit_path stays None), so nothing is shown.
+            if engine.last_audit_path:
+                self.bus.push({
+                    "type": "log",
+                    "msg": f"Audit log: {engine.last_audit_path}",
+                })
             try:
                 self.app.after(
                     200, self.app._show_batch_complete, success, fail, errors,

@@ -438,3 +438,224 @@ class TestStandardPathManualRange:
         assert not old_backup.exists()
         fresh = list(backup_dir.glob("ExRate_standalone__bak__*.xlsx"))
         assert fresh, "expected a fresh backup from the standalone run"
+
+
+# =========================================================================
+#  LEDGER MULTI-CURRENCY PATH (process_ledger end-to-end)
+# =========================================================================
+
+def _ledger_engine(per_ccy, tmp_cache):
+    """Engine wired to a per-currency mocked API + temp backup/cache.
+
+    per_ccy maps a currency code → flat (buying, selling) tuple; the side
+    effect emits one record per date in the requested range so any window
+    resolves.
+    """
+    from datetime import timedelta as _td
+
+    async def _rates(start, end, currency):
+        pair = per_ccy.get(currency)
+        if pair is None:
+            return []
+        buy, sell = pair
+        out, d = [], start
+        while d <= end:
+            out.append(SimpleNamespace(
+                period=d.strftime("%Y-%m-%d"), currency=currency,
+                buying_transfer=buy, buying_sight=None,
+                selling=sell, mid_rate=None,
+            ))
+            d += _td(days=1)
+        return out
+
+    async def _holidays(year):
+        return []
+
+    api = _make_api()
+    api.get_exchange_rates = AsyncMock(side_effect=_rates)
+    api.get_holidays = AsyncMock(side_effect=_holidays)
+    from unittest.mock import MagicMock
+    return LedgerEngine(api, backup=MagicMock(), cache=tmp_cache)
+
+
+class TestLedgerMultiCurrency:
+    """process_ledger must fill non-USD/EUR rows instead of leaving them blank.
+
+    Findings: multi-currency ledger coverage, unsupported-currency warning,
+    no-rate-available warning.
+    """
+
+    def _ledger(self, tmp_path, rows, name="led.xlsx"):
+        path = tmp_path / name
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Jan"
+        ws.append(["Date", "Cur", "EX Rate", "Amount"])
+        for d, ccy in rows:
+            ws.append([d, ccy, None, 1000])
+        wb.save(str(path))
+        wb.close()
+        return str(path)
+
+    def _collect_warnings(self, engine):
+        events: list[dict] = []
+        engine._bus = SimpleNamespace(push=events.append)
+        return events
+
+    def test_gbp_row_gets_dynamic_column_and_formula(
+        self, tmp_path, tmp_cache,
+    ):
+        path = self._ledger(tmp_path, [
+            (date(2025, 1, 7), "USD"),
+            (date(2025, 1, 7), "GBP"),
+        ])
+        engine = _ledger_engine(
+            {"USD": (33.0, 33.5), "EUR": (36.0, 36.5),
+             "GBP": (42.1234, 43.5)},
+            tmp_cache,
+        )
+        result = asyncio.run(engine.process_ledger(path))
+        assert result == path
+
+        wb = openpyxl.load_workbook(path)
+        try:
+            ws_ex = wb["ExRate"]
+            headers = [
+                ws_ex.cell(row=1, column=c).value
+                for c in range(1, (ws_ex.max_column or 1) + 1)
+            ]
+            # A GBP rate column physically exists in the master sheet.
+            assert "GBP Rate" in headers
+            gbp_col = headers.index("GBP Rate") + 1
+            # The column carries the 4dp-quantized GBP rate (Mathematical
+            # Truth, not the raw float) for the target date.
+            gbp_vals = {
+                _cell_decimal(ws_ex.cell(row=r, column=gbp_col).value)
+                for r in range(2, (ws_ex.max_row or 1) + 1)
+                if ws_ex.cell(row=r, column=gbp_col).value is not None
+            }
+            assert Decimal("42.1234") in gbp_vals
+
+            # The GBP ledger row's formula references the GBP master column.
+            gbp_formula = wb["Jan"].cell(row=3, column=3).value
+            assert isinstance(gbp_formula, str)
+            assert 'B3="GBP"' in gbp_formula
+            from openpyxl.utils import get_column_letter
+            col_letter = get_column_letter(gbp_col)
+            assert f"ExRate!${col_letter}$2" in gbp_formula
+        finally:
+            wb.close()
+
+    def test_unsupported_currency_emits_warning(self, tmp_path, tmp_cache):
+        path = self._ledger(tmp_path, [
+            (date(2025, 1, 7), "USD"),
+            (date(2025, 1, 7), "XYZ"),  # not in the supported set
+            (date(2025, 1, 8), "XYZ"),
+        ])
+        engine = _ledger_engine({"USD": (33.0, 33.5), "EUR": (36.0, 36.5)},
+                                tmp_cache)
+        events = self._collect_warnings(engine)
+        asyncio.run(engine.process_ledger(path))
+
+        warnings = [e["msg"] for e in events if e["type"] == "warning"]
+        assert any(
+            "unsupported currency XYZ" in m and "2 row" in m
+            for m in warnings
+        ), warnings
+
+    def test_no_rate_available_emits_warning(self, tmp_path, tmp_cache):
+        """A USD row dated where no rate exists (API returns nothing) is
+        flagged instead of silently blank."""
+        path = self._ledger(tmp_path, [(date(2025, 1, 7), "USD")])
+        # API returns NO USD records → the ExRate cell stays blank.
+        engine = _ledger_engine({}, tmp_cache)
+        events = self._collect_warnings(engine)
+        asyncio.run(engine.process_ledger(path))
+
+        warnings = [e["msg"] for e in events if e["type"] == "warning"]
+        assert any(
+            "no rate available" in m.lower() for m in warnings
+        ), warnings
+
+    def test_fully_resolved_ledger_emits_no_blank_warning(
+        self, tmp_path, tmp_cache,
+    ):
+        """When every row resolves, no no-rate / unsupported warning fires."""
+        path = self._ledger(tmp_path, [
+            (date(2025, 1, 7), "USD"),
+            (date(2025, 1, 7), "THB"),  # always resolves to 1
+        ])
+        engine = _ledger_engine({"USD": (33.0, 33.5), "EUR": (36.0, 36.5)},
+                                tmp_cache)
+        events = self._collect_warnings(engine)
+        asyncio.run(engine.process_ledger(path))
+
+        warnings = [e["msg"] for e in events if e["type"] == "warning"]
+        assert not any(
+            "no rate available" in m.lower() or "unsupported currency" in m
+            for m in warnings
+        ), warnings
+
+
+class TestRateTypeSnapshot:
+    """A Settings rate_type change mid-run must NOT affect the in-flight file.
+
+    process_ledger snapshots rate_type once at the start and threads it to the
+    writer instead of re-reading SettingsManager inside write().
+    """
+
+    def test_rate_type_snapshotted_at_start(
+        self, tmp_path, tmp_cache, monkeypatch,
+    ):
+        import core.engine as engine_mod
+
+        path = tmp_path / "led.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Jan"
+        ws.append(["Date", "Cur", "EX Rate", "Amount"])
+        ws.append([date(2025, 1, 7), "USD", None, 1000])
+        wb.save(str(path))
+        wb.close()
+
+        engine = _ledger_engine({"USD": (33.0, 33.5), "EUR": (36.0, 36.5)},
+                                tmp_cache)
+
+        # SettingsManager().load() yields "buying_transfer" at snapshot time,
+        # then flips to "selling" to simulate a concurrent mid-run Save. The
+        # writer must use the value captured BEFORE the flip.
+        state = {"rate_type": "buying_transfer"}
+
+        class _Settings:
+            def load(self):
+                val = state["rate_type"]
+                # After the first (snapshot) read, simulate the user saving a
+                # new rate type while this file is still being processed.
+                state["rate_type"] = "selling"
+                return {"rate_type": val}
+
+        monkeypatch.setattr(engine_mod, "SettingsManager", _Settings)
+
+        captured = {}
+        from core.exrate_updater import WorkbookWriter
+        orig_write = WorkbookWriter.write
+
+        async def _spy(self, *args, **kwargs):
+            captured["rate_type"] = kwargs.get("rate_type")
+            return await orig_write(self, *args, **kwargs)
+
+        monkeypatch.setattr(WorkbookWriter, "write", _spy)
+
+        asyncio.run(engine.process_ledger(str(path)))
+        # The snapshot (buying_transfer) reached the writer — NOT the value the
+        # concurrent save flipped to (selling).
+        assert captured["rate_type"] == "buying_transfer"
+
+        wb = openpyxl.load_workbook(str(path))
+        try:
+            formula = wb["Jan"].cell(row=2, column=3).value
+            # Buying columns are B (USD) / D (EUR); selling would be C / E.
+            assert "ExRate!$B$2" in formula
+            assert "ExRate!$C$2" not in formula
+        finally:
+            wb.close()

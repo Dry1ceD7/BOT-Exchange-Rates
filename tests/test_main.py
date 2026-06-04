@@ -107,3 +107,85 @@ def test_purge_credentials_deletes_both_tokens(monkeypatch, capsys):
     assert deleted == ["BOT_TOKEN_EXG", "BOT_TOKEN_HOL"]
     out = capsys.readouterr().out
     assert "Purged 2" in out
+
+
+def test_headless_run_not_blocked_by_running_gui(monkeypatch):
+    """A headless run proceeds even when a GUI instance is already running.
+
+    Regression: the single-instance guard used to run BEFORE the headless
+    branch, so a scheduled `--headless` run would ping the open GUI, print
+    'Another instance is already running' and exit 0 without processing any
+    files — silently breaking the unattended workflow.
+    """
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_ensure_directories", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["main.py", "--headless"])
+
+    # A GUI instance IS running — ping would succeed if it were consulted.
+    ping_calls: list = []
+
+    def _fake_ping():
+        ping_calls.append(True)
+        return True
+
+    monkeypatch.setattr("core.ipc.ping_running_instance", _fake_ping)
+
+    headless_calls: list = []
+    monkeypatch.setattr(
+        main, "_run_headless", lambda args: headless_calls.append(args),
+    )
+
+    main.main()
+
+    # Headless path ran; the IPC guard was never consulted.
+    assert len(headless_calls) == 1
+    assert headless_calls[0].headless is True
+    assert ping_calls == []
+
+
+def test_gui_launch_blocked_by_running_instance(monkeypatch):
+    """A GUI launch still defers to a running instance via the IPC guard."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_ensure_directories", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["main.py"])
+
+    monkeypatch.setattr("core.ipc.ping_running_instance", lambda: True)
+
+    # If the guard fails to short-circuit, these would be reached and blow up.
+    def _should_not_run(*args, **kwargs):
+        raise AssertionError("GUI launch proceeded past the single-instance guard")
+
+    monkeypatch.setattr(main, "_run_headless", _should_not_run)
+    monkeypatch.setattr(main, "_tokens_present", _should_not_run)
+
+    pytest = importlib.import_module("pytest")
+    with pytest.raises(SystemExit) as exc:
+        main.main()
+    assert exc.value.code == 0
+
+
+def test_gui_launch_proceeds_when_no_other_instance(monkeypatch):
+    """With no running instance, GUI launch passes the guard and checks tokens."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_ensure_directories", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["main.py"])
+
+    monkeypatch.setattr("core.ipc.ping_running_instance", lambda: False)
+
+    token_checks: list = []
+
+    def _no_tokens():
+        token_checks.append(True)
+        return False
+
+    # No tokens present and the prompt is declined → clean exit(0) without
+    # ever importing/constructing the CTk GUI app.
+    monkeypatch.setattr(main, "_tokens_present", _no_tokens)
+    monkeypatch.setattr(main, "_prompt_for_tokens", lambda: False)
+
+    pytest = importlib.import_module("pytest")
+    with pytest.raises(SystemExit) as exc:
+        main.main()
+    assert exc.value.code == 0
+    # The guard was passed (token check was reached).
+    assert token_checks == [True]

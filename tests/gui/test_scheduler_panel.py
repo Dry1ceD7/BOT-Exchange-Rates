@@ -142,6 +142,9 @@ class TestSchedulerPanelToggleOn:
 
     def test_toggle_on_sets_enable_var(self, tk_root):
         panel, _ = _make_panel(tk_root)
+        # A valid folder is required for the toggle to stay on (zero-folder
+        # guard). Without one the toggle snaps back off — covered separately.
+        panel._paths = ["/some/folder"]
         panel._enable_var.set("on")
         panel._on_toggle()
         assert panel._enable_var.get() == "on"
@@ -154,6 +157,7 @@ class TestSchedulerPanelToggleOn:
             fired.append((t, p))
 
         panel, _ = _make_panel(tk_root, on_start=on_start)
+        panel._paths = ["/some/folder"]
         panel._enable_var.set("on")
         panel._on_toggle()
 
@@ -167,6 +171,7 @@ class TestSchedulerPanelToggleOn:
             fired.append((t, p))
 
         panel, _ = _make_panel(tk_root, on_start=on_start)
+        panel._paths = ["/some/folder"]
         panel._hour_var.set("09")
         panel._minute_var.set("30")
         panel._enable_var.set("on")
@@ -194,8 +199,31 @@ class TestSchedulerPanelToggleOn:
 
     def test_toggle_on_with_no_callback_does_not_raise(self, tk_root):
         panel, _ = _make_panel(tk_root, on_start=None)
+        panel._paths = ["/some/folder"]
         panel._enable_var.set("on")
         panel._on_toggle()  # must not raise
+        panel.destroy()
+
+    def test_toggle_on_with_zero_folders_reverts_to_off(self, tk_root):
+        """Fix: flipping the toggle ON with no watch folders must refuse to
+        arm — the switch snaps back off, on_start is never called, and the
+        persisted enabled flag stays False so the scheduler is never advertised
+        as running over an empty path list.
+        """
+        fired = []
+
+        panel, mock_mgr = _make_panel(
+            tk_root, on_start=lambda t, p: fired.append((t, p))
+        )
+        panel._paths = []
+        mock_mgr.set.reset_mock()
+        panel._enable_var.set("on")
+        panel._on_toggle()
+
+        assert panel._enable_var.get() == "off"
+        assert fired == [], "on_start must NOT fire without a watch folder"
+        saved = {c.args[0]: c.args[1] for c in mock_mgr.set.call_args_list}
+        assert saved.get("scheduler_enabled") is False
         panel.destroy()
 
 
@@ -395,21 +423,37 @@ class TestSchedulerPanelStatusLabel:
 # 7. Config persistence
 # ---------------------------------------------------------------------------
 
-class TestSchedulerPanelConfigPersistence:
-    """_save_config() correctly merges keys and calls SettingsManager.save()."""
+def _set_calls(mock_mgr) -> dict:
+    """Collapse all mgr.set(key, value) calls into a {key: value} dict.
 
-    def test_save_config_calls_mgr_save(self, tk_root):
+    _save_config now persists each scheduler_* key individually via
+    SettingsManager.set() (a locked read-modify-write) instead of writing a
+    stale full-settings blob, so it never clobbers keys owned by the Settings
+    modal. Tests inspect the per-key set() calls rather than save().
+    """
+    return {c.args[0]: c.args[1] for c in mock_mgr.set.call_args_list}
+
+
+class TestSchedulerPanelConfigPersistence:
+    """_save_config() persists each scheduler_* key via SettingsManager.set()."""
+
+    def test_save_config_calls_mgr_set(self, tk_root):
         panel, mock_mgr = _make_panel(tk_root)
+        mock_mgr.set.reset_mock()
         panel._save_config()
-        mock_mgr.save.assert_called_once()
+        assert mock_mgr.set.called
+        # Must NOT write a full-blob save() that could clobber modal keys.
+        assert not mock_mgr.save.called
         panel.destroy()
 
     def test_save_config_includes_enabled_key(self, tk_root):
         panel, mock_mgr = _make_panel(tk_root)
+        panel._paths = ["/a/b"]
         panel._enable_var.set("on")
+        mock_mgr.set.reset_mock()
         panel._save_config()
 
-        saved = mock_mgr.save.call_args[0][0]
+        saved = _set_calls(mock_mgr)
         assert "scheduler_enabled" in saved
         assert saved["scheduler_enabled"] is True
         panel.destroy()
@@ -418,39 +462,60 @@ class TestSchedulerPanelConfigPersistence:
         panel, mock_mgr = _make_panel(tk_root)
         panel._hour_var.set("07")
         panel._minute_var.set("15")
+        mock_mgr.set.reset_mock()
         panel._save_config()
 
-        saved = mock_mgr.save.call_args[0][0]
+        saved = _set_calls(mock_mgr)
         assert saved.get("scheduler_time") == "07:15"
         panel.destroy()
 
     def test_save_config_includes_paths_key(self, tk_root):
         panel, mock_mgr = _make_panel(tk_root)
         panel._paths = ["/a/b", "/c/d"]
+        mock_mgr.set.reset_mock()
         panel._save_config()
 
-        saved = mock_mgr.save.call_args[0][0]
+        saved = _set_calls(mock_mgr)
         assert saved.get("scheduler_paths") == ["/a/b", "/c/d"]
         panel.destroy()
 
     def test_save_config_disabled_state(self, tk_root):
         panel, mock_mgr = _make_panel(tk_root)
         panel._enable_var.set("off")
+        mock_mgr.set.reset_mock()
         panel._save_config()
 
-        saved = mock_mgr.save.call_args[0][0]
+        saved = _set_calls(mock_mgr)
         assert saved["scheduler_enabled"] is False
         panel.destroy()
 
-    def test_toggle_persists_on_toggle(self, tk_root):
-        """Each _on_toggle() call must result in a save."""
+    def test_save_config_only_touches_scheduler_keys(self, tk_root):
+        """Fix: _save_config must write ONLY scheduler_* keys so it can never
+        clobber rate_type / appearance / anomaly_threshold owned by the
+        Settings modal.
+        """
         panel, mock_mgr = _make_panel(tk_root)
-        initial_call_count = mock_mgr.save.call_count
+        mock_mgr.set.reset_mock()
+        panel._save_config()
+
+        touched = {c.args[0] for c in mock_mgr.set.call_args_list}
+        assert touched == {
+            "scheduler_enabled",
+            "scheduler_time",
+            "scheduler_paths",
+        }
+        panel.destroy()
+
+    def test_toggle_persists_on_toggle(self, tk_root):
+        """Each _on_toggle() call must result in a persisted set()."""
+        panel, mock_mgr = _make_panel(tk_root)
+        panel._paths = ["/a/b"]
+        mock_mgr.set.reset_mock()
 
         panel._enable_var.set("on")
         panel._on_toggle()
 
-        assert mock_mgr.save.call_count > initial_call_count
+        assert mock_mgr.set.called
         panel.destroy()
 
 
@@ -497,4 +562,88 @@ class TestSchedulerPanelGetConfig:
         cfg = panel.get_config()
         cfg["paths"].append("/injected")
         assert "/injected" not in panel._paths
+        panel.destroy()
+
+
+# ---------------------------------------------------------------------------
+# 9. Persisted-enabled scheduler ARMS on launch (findings #1 / #2)
+# ---------------------------------------------------------------------------
+
+class TestSchedulerPanelArmsOnLaunch:
+    """A persisted scheduler_enabled=True with a valid folder must actually
+    start the background scheduler when the panel loads — not merely restore
+    the toggle visual and 'Next run' status while the AutoScheduler stays dead.
+    """
+
+    def test_persisted_enabled_with_valid_folder_arms_on_launch(
+        self, tk_root, tmp_path
+    ):
+        folder = tmp_path / "ledgers"
+        folder.mkdir()
+        fired = []
+
+        settings = {
+            "scheduler_enabled": True,
+            "scheduler_time": "08:30",
+            "scheduler_paths": [str(folder)],
+        }
+        panel, _ = _make_panel(
+            tk_root,
+            settings=settings,
+            on_start=lambda t, p: fired.append((t, p)),
+        )
+
+        assert len(fired) == 1, "on_start must fire once on persisted launch"
+        time_arg, paths_arg = fired[0]
+        assert time_arg == "08:30"
+        assert paths_arg == [str(folder)]
+        assert panel._enable_var.get() == "on"
+        panel.destroy()
+
+    def test_persisted_disabled_does_not_arm(self, tk_root, tmp_path):
+        folder = tmp_path / "ledgers"
+        folder.mkdir()
+        fired = []
+
+        settings = {
+            "scheduler_enabled": False,
+            "scheduler_time": "08:30",
+            "scheduler_paths": [str(folder)],
+        }
+        panel, _ = _make_panel(
+            tk_root,
+            settings=settings,
+            on_start=lambda t, p: fired.append((t, p)),
+        )
+
+        assert fired == [], "disabled scheduler must not arm on launch"
+        assert panel._enable_var.get() == "off"
+        panel.destroy()
+
+    def test_persisted_enabled_no_valid_folder_repairs_to_off(
+        self, tk_root, tmp_path
+    ):
+        """Fix: persisted-enabled but the only watch folder is now missing.
+        The panel must NOT arm and must repair the on-disk flag to disabled
+        rather than advertising a 'Next run' over an empty path list.
+        """
+        missing = tmp_path / "gone"  # never created
+        fired = []
+
+        settings = {
+            "scheduler_enabled": True,
+            "scheduler_time": "23:00",
+            "scheduler_paths": [str(missing)],
+        }
+        panel, mock_mgr = _make_panel(
+            tk_root,
+            settings=settings,
+            on_start=lambda t, p: fired.append((t, p)),
+        )
+
+        assert fired == [], "must not arm when no valid folder survives"
+        assert panel._enable_var.get() == "off"
+        # On-disk flag repaired to False via per-key set().
+        saved = {c.args[0]: c.args[1] for c in mock_mgr.set.call_args_list}
+        assert saved.get("scheduler_enabled") is False
         panel.destroy()

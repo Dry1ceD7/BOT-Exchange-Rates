@@ -21,7 +21,12 @@ from decimal import Decimal
 
 import openpyxl
 
-from core.constants import SKIP_SHEET_NAMES, parse_date
+from core.constants import (
+    LEDGER_HOME_CURRENCY,
+    LEDGER_SUPPORTED_CURRENCIES,
+    SKIP_SHEET_NAMES,
+    parse_date,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +84,9 @@ def prescan_target_dates(
 ) -> set[date]:
     """Scan a workbook in read-only mode to extract all target dates.
 
-    Opens the workbook in read-only mode, scans all non-skipped sheets for
-    the source date column, and returns a set of all parsed dates. The
-    workbook is properly closed and garbage-collected after scanning.
+    Thin backward-compatible wrapper around
+    :func:`prescan_target_dates_and_currencies` that returns only the date set
+    (existing callers expect a ``set[date]``).
 
     Args:
         filepath: Path to the .xlsx/.xlsm workbook.
@@ -93,10 +98,42 @@ def prescan_target_dates(
     Returns:
         Set of all parsed dates found in the source date column.
     """
+    dates, _currencies = prescan_target_dates_and_currencies(
+        filepath, target_cols, parse_date_fn=parse_date_fn, emit_fn=emit_fn,
+    )
+    return dates
+
+
+def prescan_target_dates_and_currencies(
+    filepath: str,
+    target_cols: dict[str, str],
+    parse_date_fn: Callable[[object], date | None] = parse_date,
+    emit_fn: Callable[[str], None] | None = None,
+) -> tuple[set[date], set[str]]:
+    """Scan a workbook once for both target dates AND distinct currency codes.
+
+    Opens the workbook in read-only mode, scans all non-skipped sheets for the
+    source date + currency columns, and returns ``(dates, currencies)``. The
+    currency set powers the multi-currency ledger path: the engine fetches a
+    rate column per detected currency rather than silently leaving non-USD/EUR
+    rows blank. The workbook is closed + garbage-collected after scanning.
+
+    Args:
+        filepath: Path to the .xlsx/.xlsm workbook.
+        target_cols: Column-name mapping; ``target_cols["source_date"]`` and
+            ``target_cols["currency"]`` are the header labels scanned.
+        parse_date_fn: Cell-value → date parser (defaults to shared parser).
+        emit_fn: Optional status callback ``emit(msg)``.
+
+    Returns:
+        ``(set of parsed dates, set of upper-cased currency codes)``.
+    """
     if emit_fn is not None:
         emit_fn("Scanning dates from workbook")
     all_target_dates: set[date] = set()
+    all_currencies: set[str] = set()
     source_label = target_cols["source_date"]
+    currency_label = target_cols.get("currency")
 
     wb_scan = None
     try:
@@ -117,32 +154,46 @@ def prescan_target_dates(
                 ]
                 if source_label in row_strs:
                     header_row_idx = row_idx
-                    # A duplicate source-date column is resolved
+                    # A duplicate source-date/currency column is resolved
                     # deterministically to the FIRST occurrence (not last-wins,
                     # which silently depends on column order). Warn so the
                     # operator can correct the sheet.
                     for ci, val in enumerate(row_strs):
-                        if val == source_label:
-                            if "source" in col_indices:
-                                logger.warning(
-                                    "Sheet '%s': duplicate '%s' header column "
-                                    "— using the first occurrence.",
-                                    sheet_name, source_label,
-                                )
-                            else:
-                                col_indices["source"] = ci
+                        for key, label in (
+                            ("source", source_label),
+                            ("currency", currency_label),
+                        ):
+                            if label is not None and val == label:
+                                if key in col_indices:
+                                    logger.warning(
+                                        "Sheet '%s': duplicate '%s' header "
+                                        "column — using the first occurrence.",
+                                        sheet_name, label,
+                                    )
+                                else:
+                                    col_indices[key] = ci
                     break
 
             if header_row_idx is None or "source" not in col_indices:
                 continue
 
             src_idx = col_indices["source"] + 1
+            cur_idx = (
+                col_indices["currency"] + 1
+                if "currency" in col_indices else None
+            )
             for row_idx in range(header_row_idx + 1, (ws.max_row or 0) + 1):
                 parsed_date = parse_date_fn(
                     ws.cell(row=row_idx, column=src_idx).value
                 )
                 if parsed_date:
                     all_target_dates.add(parsed_date)
+                if cur_idx is not None:
+                    cur_val = ws.cell(row=row_idx, column=cur_idx).value
+                    if cur_val is not None:
+                        code = str(cur_val).strip().upper()
+                        if code:
+                            all_currencies.add(code)
     except (ValueError, TypeError, KeyError,
             openpyxl.utils.exceptions.InvalidFileException):
         raise
@@ -154,4 +205,34 @@ def prescan_target_dates(
             wb_scan = None
         gc.collect()
 
-    return all_target_dates
+    return all_target_dates, all_currencies
+
+
+def classify_currencies(
+    currencies: set[str],
+) -> tuple[list[str], list[str]]:
+    """Split scanned ledger currencies into (extra-supported, unsupported).
+
+    The home currency (THB) and the two fixed master-sheet currencies
+    (USD/EUR) are filtered out — they are always handled by the core IFS
+    branches. The first list holds supported NON-USD/EUR codes the engine
+    should fetch a dynamic column for (sorted for deterministic column order);
+    the second holds codes the tool cannot fill, which must be surfaced as a
+    warning rather than left silently blank.
+
+    Args:
+        currencies: Distinct upper-cased currency codes found in the ledger.
+
+    Returns:
+        ``(extra_supported_sorted, unsupported_sorted)``.
+    """
+    extra: set[str] = set()
+    unsupported: set[str] = set()
+    for code in currencies:
+        if code in (LEDGER_HOME_CURRENCY, "USD", "EUR"):
+            continue
+        if code in LEDGER_SUPPORTED_CURRENCIES:
+            extra.add(code)
+        else:
+            unsupported.add(code)
+    return sorted(extra), sorted(unsupported)

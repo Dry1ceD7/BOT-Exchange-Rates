@@ -228,14 +228,22 @@ def main():
         _purge_credentials()
         sys.exit(0)
 
+    # Headless batch runs must NOT be blocked by a running GUI. They are
+    # stateless and coordinate file safety via per-file backups + the batch
+    # lock — not the IPC restore channel. Running the single-instance guard
+    # here would make scheduled (cron / Task Scheduler) runs ping the open
+    # GUI, print the restore message, and exit 0 without processing anything,
+    # silently breaking the advertised unattended workflow.
+    if args.headless:
+        _run_headless(args)
+        return
+
+    # GUI launch only: if another GUI instance is already running, signal it
+    # to restore from the tray and exit instead of opening a second window.
     from core.ipc import ping_running_instance
     if ping_running_instance():
         print("Another instance is already running. Signal sent to restore.")
         sys.exit(0)
-
-    if args.headless:
-        _run_headless(args)
-        return
 
     if not _tokens_present() and not _prompt_for_tokens():
         sys.exit(0)
@@ -311,10 +319,7 @@ def _run_headless(args: argparse.Namespace) -> None:
     # Run async batch
     async def _run():
         from core.api_client import BOTClient
-        from core.audit_logger import AuditLogger, cleanup_old_audit_logs
         from core.engine import LedgerEngine
-
-        audit = AuditLogger()
 
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -328,22 +333,19 @@ def _run_headless(args: argparse.Namespace) -> None:
                 else:
                     print(f"  [{idx}/{total}] {fname} — OK")
 
+            # Let the engine own the audit log exactly like the GUI handler
+            # does (gui/handlers.py): when no AuditLogger is injected on a real
+            # run, process_batch creates, populates per-cell records, summarizes,
+            # finalizes, and prunes its OWN CSV. Surfacing engine.last_audit_path
+            # below points the user at that single populated file — passing our
+            # own logger here would orphan the real log and advertise a hollow one.
             success, fail, errors = await engine.process_batch(
                 files, start_date=start_date, progress_cb=progress_cb,
             )
 
-        audit.log_batch_summary(
-            total_files=len(files),
-            success=success,
-            failed=fail,
-            anomalies_detected=engine.last_batch_anomaly_count,
-        )
-        audit_path = audit.finalize()
-        # Prune accumulated per-batch audit logs (one is written every run).
-        cleanup_old_audit_logs()
-
         print(f"\nResults: {success} succeeded, {fail} failed")
-        print(f"Audit log: {audit_path}")
+        if engine.last_audit_path:
+            print(f"Audit log: {engine.last_audit_path}")
         if errors:
             print("Errors:")
             for e in errors:

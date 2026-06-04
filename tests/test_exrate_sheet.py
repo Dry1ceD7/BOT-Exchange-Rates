@@ -333,3 +333,96 @@ class TestUpdateMasterExrateSheet:
         # Exactly the 3-day manual window — nothing up to today().
         assert written == {start, date(2025, 3, 11), end}
         wb.close()
+
+
+# =========================================================================
+#  EXTRA-CURRENCY COLUMNS (multi-currency ledger master sheet)
+# =========================================================================
+
+class TestExtraCurrencyColumns:
+    """update_master_exrate_sheet appends a column per extra currency and
+    returns the {ccy: column_letter} map for the ledger formula."""
+
+    def test_extra_columns_appended_after_eur_before_holidays(self):
+        wb = openpyxl.Workbook()
+        d = date(2025, 3, 10)  # Monday
+        col_map = update_master_exrate_sheet(
+            wb,
+            usd_buying_rates={d: Decimal("33.5")},
+            usd_selling_rates={d: Decimal("33.6")},
+            eur_buying_rates={d: Decimal("37.0")},
+            eur_selling_rates={d: Decimal("37.1")},
+            holidays_list=[],
+            holidays_names={},
+            start_date=d,
+            end_date=d,
+            extra_currency_rates={
+                "GBP": {d: Decimal("42.1234")},
+                "JPY": {d: Decimal("0.2155")},
+            },
+        )
+        ws = wb["ExRate"]
+        headers = [
+            ws.cell(row=1, column=c).value
+            for c in range(1, (ws.max_column or 1) + 1)
+        ]
+        # Date, USD x2, EUR x2, then extra cols (dict order), then Holidays.
+        assert headers == [
+            "Date", "USD Buying TT Rate", "USD Selling Rate",
+            "EUR Buying TT Rate", "EUR Selling Rate",
+            "GBP Rate", "JPY Rate", "Holidays/Weekend",
+        ]
+        # Column map points the ledger formula at F (GBP) and G (JPY).
+        assert col_map == {"GBP": "F", "JPY": "G"}
+        # USD/EUR are NOT in the map (fixed B-E columns).
+        assert "USD" not in col_map and "EUR" not in col_map
+        wb.close()
+
+    def test_extra_currency_value_exact_decimal(self):
+        wb = openpyxl.Workbook()
+        d = date(2025, 3, 10)
+        update_master_exrate_sheet(
+            wb,
+            usd_buying_rates={}, usd_selling_rates={},
+            eur_buying_rates={}, eur_selling_rates={},
+            holidays_list=[], holidays_names={},
+            start_date=d, end_date=d,
+            extra_currency_rates={"GBP": {d: Decimal("42.1234")}},
+        )
+        ws = wb["ExRate"]
+        cell = ws.cell(row=2, column=6)  # F = GBP
+        assert cell.value == Decimal("42.1234")
+        assert cell.number_format == "0.0000"
+        wb.close()
+
+    def test_extra_currency_weekend_carry_forward(self):
+        """A GBP weekend row carries Friday's rate forward (rollback rule)."""
+        fri = date(2025, 3, 7)   # Friday
+        sat = date(2025, 3, 8)   # Saturday
+        merged = _merge_rate_data(
+            {fri, sat}, {}, set(), {},
+            {}, {}, {}, {},
+            {"GBP": {fri: Decimal("42.5000")}},
+        )
+        assert merged[fri]["extra:GBP"] == Decimal("42.5000")
+        assert merged[sat]["extra:GBP"] == Decimal("42.5000")
+
+    def test_no_extra_currencies_keeps_six_column_layout(self):
+        """Backward compat: omitting extra rates keeps the legacy 6 columns and
+        returns an empty map."""
+        wb = openpyxl.Workbook()
+        d = date(2025, 3, 10)
+        col_map = update_master_exrate_sheet(
+            wb,
+            usd_buying_rates={d: Decimal("33.5")},
+            usd_selling_rates={d: Decimal("33.6")},
+            eur_buying_rates={d: Decimal("37.0")},
+            eur_selling_rates={d: Decimal("37.1")},
+            holidays_list=[], holidays_names={},
+            start_date=d, end_date=d,
+        )
+        ws = wb["ExRate"]
+        assert ws.max_column == 6
+        assert ws.cell(row=1, column=6).value == "Holidays/Weekend"
+        assert col_map == {}
+        wb.close()

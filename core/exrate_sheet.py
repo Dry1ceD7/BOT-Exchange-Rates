@@ -13,6 +13,7 @@ from decimal import Decimal
 
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 from core.constants import bot_today
 from core.constants import parse_date as _shared_parse_date
@@ -34,12 +35,14 @@ def update_master_exrate_sheet(
     holidays_names: dict[date, str],
     start_date: date,
     end_date: date | None = None,
-) -> None:
+    extra_currency_rates: dict[str, dict[date, Decimal]] | None = None,
+) -> dict[str, str]:
     """
     Creates or updates a unified "ExRate" master tab.
 
     Columns: Date | USD Buying TT Rate | USD Selling Rate |
-             EUR Buying TT Rate | EUR Selling Rate | Holidays/Weekend
+             EUR Buying TT Rate | EUR Selling Rate |
+             [<CCY> Rate ...extra...] | Holidays/Weekend
 
     Holiday/Weekend Overlap Rule (semicolon separator):
       - Weekend only → "Weekend"
@@ -51,14 +54,40 @@ def update_master_exrate_sheet(
             date (bot_today, Asia/Bangkok) when None so the standard ledger
             path keeps its prior behavior; the GUI manual-range path passes the
             user's explicit end date.
+        extra_currency_rates: Optional ``{ccy: {date: Decimal}}`` for non-USD/
+            EUR currencies. Each gets ONE appended column (the user's selected
+            rate type) inserted between EUR Selling and Holidays, with the same
+            10-day weekend/holiday carry-forward. Iterated in dict order, so
+            callers pass an order-stable mapping (e.g. built from sorted codes).
+
+    Returns:
+        ``{ccy: column_letter}`` for every appended extra currency so the
+        caller can wire those columns into the ledger XLOOKUP formula
+        (``inject_xlookup_formulas(exrate_col_map=...)``). USD/EUR are NOT in
+        the map — they occupy the fixed B-E columns the formula already knows.
     """
     SHEET_NAME = "ExRate"
     HEADER_ROW = 1
     DATA_START_ROW = 2
+    extra_rates = extra_currency_rates or {}
+    # Deterministic, dict-order column list for the extra currencies.
+    extra_codes = list(extra_rates.keys())
     HEADERS = [
         "Date", "USD Buying TT Rate", "USD Selling Rate",
-        "EUR Buying TT Rate", "EUR Selling Rate", "Holidays/Weekend"
+        "EUR Buying TT Rate", "EUR Selling Rate",
     ]
+    HEADERS.extend(f"{ccy} Rate" for ccy in extra_codes)
+    HEADERS.append("Holidays/Weekend")
+
+    # Column index (1-based) of each appended extra currency + the trailing
+    # Holidays column. Extra columns start at 6 (after E=EUR Selling).
+    extra_col_index = {
+        ccy: 6 + offset for offset, ccy in enumerate(extra_codes)
+    }
+    holidays_col = len(HEADERS)
+    exrate_col_map = {
+        ccy: get_column_letter(idx) for ccy, idx in extra_col_index.items()
+    }
 
     # ── Get or create the sheet ──────────────────────────────────────
     ws = wb[SHEET_NAME] if SHEET_NAME in wb.sheetnames else wb.create_sheet(SHEET_NAME)
@@ -86,7 +115,9 @@ def update_master_exrate_sheet(
     ws.column_dimensions["C"].width = 16
     ws.column_dimensions["D"].width = 18
     ws.column_dimensions["E"].width = 16
-    ws.column_dimensions["F"].width = 40
+    for ccy in extra_codes:
+        ws.column_dimensions[exrate_col_map[ccy]].width = 16
+    ws.column_dimensions[get_column_letter(holidays_col)].width = 40
 
     # ── Read existing data from the sheet ────────────────────────────
     existing_data = _read_existing_data(ws, DATA_START_ROW)
@@ -102,19 +133,25 @@ def update_master_exrate_sheet(
         all_dates, existing_data, holidays_set, holidays_names,
         usd_buying_rates, usd_selling_rates,
         eur_buying_rates, eur_selling_rates,
+        extra_rates,
     )
 
     # ── Write data ───────────────────────────────────────────────────
-    # Clear any legacy/helper columns beyond our 6-column layout
-    if ws.max_column and ws.max_column > 6:
+    # Clear any legacy/helper columns beyond our current layout
+    total_cols = len(HEADERS)
+    if ws.max_column and ws.max_column > total_cols:
         for row_idx in range(1, (ws.max_row or 1) + 1):
-            for col in range(7, ws.max_column + 1):
+            for col in range(total_cols + 1, ws.max_column + 1):
                 ws.cell(row=row_idx, column=col).value = None
 
     if ws.max_row and ws.max_row >= DATA_START_ROW:
         ws.delete_rows(DATA_START_ROW, ws.max_row - DATA_START_ROW + 1)
 
-    _write_merged_data(ws, merged, holidays_set, thin_border, DATA_START_ROW)
+    _write_merged_data(
+        ws, merged, holidays_set, thin_border, DATA_START_ROW,
+        extra_col_index, holidays_col,
+    )
+    return exrate_col_map
 
 
 def _read_existing_data(ws, data_start_row: int) -> dict[date, dict]:
@@ -157,6 +194,7 @@ def _merge_rate_data(
     all_dates, existing_data, holidays_set, holidays_names,
     usd_buying_rates, usd_selling_rates,
     eur_buying_rates, eur_selling_rates,
+    extra_currency_rates: dict[str, dict[date, Decimal]] | None = None,
 ) -> dict[date, dict]:
     """Merge API rates with existing sheet data (API priority).
 
@@ -166,12 +204,19 @@ def _merge_rate_data(
     rule inside the formula path we carry forward the prior TRADING-DAY rate
     into each weekend/holiday row, bounded to ``_MAX_ROLLBACK_DAYS`` (mirrors
     resolve_rate in core/logic.py). Beyond the window the cell stays blank.
+
+    ``extra_currency_rates`` ({ccy: {date: Decimal}}) gets the IDENTICAL
+    carry-forward treatment under per-currency keys ``f"extra:{ccy}"`` so a
+    GBP/JPY weekend row resolves to the prior trading-day rate just like USD.
     """
+    extra_currency_rates = extra_currency_rates or {}
+    extra_keys = {ccy: f"extra:{ccy}" for ccy in extra_currency_rates}
     rate_keys = ("usd_buy", "usd_sell", "eur_buy", "eur_sell")
+    all_keys = list(rate_keys) + list(extra_keys.values())
     # Per-column last seen trading-day value + the date it came from, used to
     # bound the carry-forward to the rollback window.
     last_trading: dict[str, tuple[date, Decimal] | None] = {
-        key: None for key in rate_keys
+        key: None for key in all_keys
     }
 
     merged: dict[date, dict] = {}
@@ -190,6 +235,8 @@ def _merge_rate_data(
             "eur_buy": eur_buying_rates.get(d),
             "eur_sell": eur_selling_rates.get(d),
         }
+        for ccy, key in extra_keys.items():
+            row_rates[key] = extra_currency_rates[ccy].get(d)
 
         holiday_label = ""
         if is_weekend and is_holiday:
@@ -200,8 +247,10 @@ def _merge_rate_data(
             holiday_label = holidays_names.get(d, "Holiday")
 
         entry: dict = {}
-        for key in rate_keys:
+        for key in all_keys:
             # API value wins; otherwise fall back to whatever was on the sheet.
+            # Extra-currency columns are appended fresh each run, so existing
+            # sheet data only ever backs the fixed USD/EUR keys.
             value = (
                 row_rates[key]
                 if row_rates[key] is not None
@@ -224,8 +273,19 @@ def _merge_rate_data(
     return merged
 
 
-def _write_merged_data(ws, merged, holidays_set, thin_border, start_row):
-    """Write the merged rate data to the worksheet."""
+def _write_merged_data(
+    ws, merged, holidays_set, thin_border, start_row,
+    extra_col_index: dict[str, int] | None = None,
+    holidays_col: int = 6,
+):
+    """Write the merged rate data to the worksheet.
+
+    Args:
+        extra_col_index: ``{ccy: 1-based column}`` for appended extra
+            currencies (their merged-entry key is ``f"extra:{ccy}"``).
+        holidays_col: 1-based column of the trailing Holidays/Weekend label.
+    """
+    extra_col_index = extra_col_index or {}
     data_font = Font(name="Calibri", size=10)
     date_align = Alignment(horizontal="center")
     num_align = Alignment(horizontal="right")
@@ -248,28 +308,33 @@ def _write_merged_data(ws, merged, holidays_set, thin_border, start_row):
         cell_date.alignment = date_align
         cell_date.border = thin_border
 
-        for col, key, fmt in [
-            (2, "usd_buy", "0.0000"), (3, "usd_sell", "0.0000"),
-            (4, "eur_buy", "0.0000"), (5, "eur_sell", "0.0000"),
-        ]:
+        rate_cols = [
+            (2, "usd_buy"), (3, "usd_sell"),
+            (4, "eur_buy"), (5, "eur_sell"),
+        ]
+        rate_cols.extend(
+            (col, f"extra:{ccy}") for ccy, col in extra_col_index.items()
+        )
+        for col, key in rate_cols:
             cell = ws.cell(row=current_row, column=col, value=entry[key])
             if entry[key] is not None:
-                cell.number_format = fmt
+                cell.number_format = "0.0000"
             cell.font = data_font
             cell.alignment = num_align
             cell.border = thin_border
 
         cell_hw = ws.cell(
-            row=current_row, column=6, value=entry["holidays_weekend"]
+            row=current_row, column=holidays_col,
+            value=entry["holidays_weekend"],
         )
         cell_hw.font = data_font
         cell_hw.border = thin_border
 
         if is_holiday:
-            for col in range(1, 7):
+            for col in range(1, holidays_col + 1):
                 ws.cell(row=current_row, column=col).fill = holiday_fill
         elif is_weekend:
-            for col in range(1, 7):
+            for col in range(1, holidays_col + 1):
                 ws.cell(row=current_row, column=col).fill = weekend_fill
 
         current_row += 1

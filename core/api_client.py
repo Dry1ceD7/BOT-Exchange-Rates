@@ -245,6 +245,55 @@ class BOTTransientServerError(Exception):
     pass
 
 # -------------------------------------------------------------------------
+# LIGHTWEIGHT CREDENTIAL PROBE (first-run "Test Keys")
+# -------------------------------------------------------------------------
+
+# Lightweight EXG-rate endpoint used purely to verify a key is accepted.
+_PING_URL = (
+    "https://gateway.api.bot.or.th"
+    "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
+    "?start_period=2025-01-01&end_period=2025-01-02&currency=USD"
+)
+
+
+def ping_token(token: str | None, *, timeout: float = 8.0) -> tuple[bool, str]:
+    """Probe an *entered* (not yet stored) BOT API key against the gateway.
+
+    Used by the first-run token registration dialog so a user can verify a key
+    before committing it. A blocking httpx call — callers MUST run it off the
+    Tk thread.
+
+    Returns a ``(ok, message)`` tuple where ``ok`` is True only on an
+    authenticated 200. The message distinguishes the three states the audit
+    requires: success / invalid-token (401/403) / unreachable.
+
+    SECURITY: the returned message never embeds the token or request URL.
+    """
+    clean = (token or "").removeprefix("Bearer ").strip()
+    if not clean:
+        return False, "Enter a key first, then test."
+
+    headers = {
+        "X-IBM-Client-Id": clean,
+        "Authorization": f"Bearer {clean}",
+        "accept": "application/json",
+    }
+    try:
+        resp = httpx.get(_PING_URL, headers=headers, timeout=timeout)
+    except (httpx.RequestError, OSError):
+        # Network/DNS/TLS failure — do NOT surface the exception text, which
+        # httpx builds from the request URL (token-free here, but the URL is
+        # noise for the user and keeps the message channel clean).
+        return False, "✗ Could not reach the BOT API. Check your connection."
+
+    if resp.status_code == 200:
+        return True, "✓ Key accepted — connection verified."
+    if resp.status_code in (401, 403):
+        return False, "✗ Key rejected. Check the key and try again."
+    return False, f"✗ BOT API returned HTTP {resp.status_code}."
+
+
+# -------------------------------------------------------------------------
 # ASYNC API CLIENT
 # -------------------------------------------------------------------------
 
@@ -345,9 +394,21 @@ class BOTClient:
                 await asyncio.sleep(wait_time)
                 continue
 
+            # Authentication failure → a rejected/expired/revoked API key.
+            # Raise a clear, actionable BOTAPIError that tells the user what to
+            # do, instead of letting raise_for_status() surface a raw httpx
+            # message (status URL + MDN link) that a non-technical accountant
+            # cannot act on. SECURITY: the message intentionally embeds neither
+            # the request URL nor the token — only the status code.
+            if response.status_code in (401, 403):
+                raise BOTAPIError(
+                    f"Your BOT API key was rejected ({response.status_code}). "
+                    "Open Settings → Manage API Keys and re-enter your keys."
+                )
+
             # Transient 5xx → raise a retryable error so tenacity backs off
             # and retries (raise_for_status would raise a non-retryable
-            # HTTPStatusError). 4xx still fails fast below.
+            # HTTPStatusError). Other 4xx still fail fast below.
             if 500 <= response.status_code < 600:
                 raise BOTTransientServerError(
                     f"BOT API server error {response.status_code}."

@@ -26,6 +26,7 @@ from pathlib import Path
 
 import openpyxl
 
+from core.audit_logger import AuditCollector, AuditRecord
 from core.constants import BACKUP_MAX_AGE_DAYS, MIN_DISK_SPACE_MB, bot_today
 from core.excel_io import (
     build_exrate_index,
@@ -65,11 +66,27 @@ class WorkbookWriter:
         master_holidays_set,
         holidays_names,
         computed_start,
+        rate_type: str | None = None,
+        extra_currency_rates: dict | None = None,
+        unsupported_currencies: list[str] | None = None,
+        audit: AuditCollector | None = None,
     ) -> str:
         try:
             wb = openpyxl.load_workbook(filepath)
         except (OSError, openpyxl.utils.exceptions.InvalidFileException):
             raise
+
+        # rate_type is snapshotted by process_ledger at the start of this
+        # file's run and threaded through here, so a Settings "Save" mid-batch
+        # cannot change the rate basis for an in-flight file. Only fall back to
+        # SettingsManager when a caller did not pass one (backward compat).
+        if rate_type is None:
+            from core.config_manager import SettingsManager
+            rate_type = SettingsManager().load().get(
+                "rate_type", "buying_transfer"
+            )
+        extra_currency_rates = extra_currency_rates or {}
+        unsupported_currencies = unsupported_currencies or []
 
         # try/finally guarantees the OS file handle is released and gc runs on
         # BOTH the success and error exits (the standalone paths do the same).
@@ -80,13 +97,27 @@ class WorkbookWriter:
             sheet_maps = scan_sheet_headers(wb, self._engine.target_cols)
 
             # ── STEP 1: Build ExRate master sheet ────────────────────────
-            update_master_exrate_sheet(
+            # Returns {ccy: column_letter} for the appended extra currencies so
+            # their columns can be wired into the ledger XLOOKUP formula.
+            exrate_col_map = update_master_exrate_sheet(
                 wb, usd_buying, usd_selling, eur_buying, eur_selling,
                 list(master_holidays_set), holidays_names, computed_start,
+                extra_currency_rates=extra_currency_rates,
             )
 
             # ── STEP 2: Build in-memory ExRate lookup index ──────────────
-            build_exrate_index(wb)
+            # Pass the extra-currency column map so the index also carries the
+            # appended GBP/JPY/etc. columns for the unfilled-row check below.
+            exrate_index = build_exrate_index(wb, exrate_col_map)
+
+            # ── STEP 2b: Snapshot original EX Rate cells for the audit trail ─
+            # inject_xlookup_formulas overwrites the EX Rate column with the IFS
+            # formula, so the pre-edit value must be captured FIRST. Cheap: a
+            # dict of {(sheet, row): original_value} only built when auditing.
+            originals = (
+                self._snapshot_out_rate_cells(wb, sheet_maps)
+                if audit is not None else {}
+            )
 
             # ── STEP 3: Inject XLOOKUP formulas into monthly tabs ────────
             exrate_last_row = 2
@@ -94,20 +125,34 @@ class WorkbookWriter:
                 ws_ex = wb["ExRate"]
                 exrate_last_row = max(ws_ex.max_row or 2, 2)
 
-            # Load user's rate type preference from settings
-            from core.config_manager import SettingsManager
-            _settings = SettingsManager()
-            rate_type_setting = _settings.load().get(
-                "rate_type", "buying_transfer"
-            )
-
             inject_xlookup_formulas(
                 wb, sheet_maps, exrate_last_row,
                 parse_date_fn=self._engine._parse_date,
                 emit_fn=self._engine._emit,
                 dry_run=dry_run,
-                rate_type=rate_type_setting,
+                rate_type=rate_type,
+                exrate_col_map=exrate_col_map,
             )
+
+            # ── STEP 4: Surface rows the formula cannot fill ─────────────
+            # Blank EX Rate cells are otherwise silent. Count both
+            # unavailable-rate rows (date beyond the rollback / no API data)
+            # and unsupported-currency rows, and emit per-file warnings so the
+            # accountant is told instead of filing empty rates.
+            self._warn_unfilled_rows(
+                wb, sheet_maps, exrate_index, exrate_col_map,
+                rate_type, unsupported_currencies, Path(filepath).name,
+            )
+
+            # ── STEP 5: Record per-cell changes into the audit trail ─────
+            # Every EX Rate cell that resolved to a rate is logged with its
+            # before/after value, currency, date, and holiday-rollback flag so
+            # the auditor-facing CSV is no longer a hollow header (#1).
+            if audit is not None:
+                self._collect_audit_records(
+                    wb, sheet_maps, exrate_index, exrate_col_map, rate_type,
+                    originals, Path(filepath).name, master_holidays_set, audit,
+                )
 
             # ── Save ─────────────────────────────────────────────────────
             if dry_run:
@@ -134,6 +179,222 @@ class WorkbookWriter:
 
         self._engine._emit("File saved and memory cleaned", etype="success")
         return filepath
+
+    def _warn_unfilled_rows(
+        self,
+        wb,
+        sheet_maps: dict,
+        exrate_index: dict,
+        exrate_col_map: dict[str, str],
+        rate_type: str,
+        unsupported_currencies: list[str],
+        fname: str,
+    ) -> None:
+        """Emit per-file warnings for ledger rows that resolve to a blank rate.
+
+        Mirrors the ledger IFS formula's resolution so the count matches what
+        Excel will actually leave blank:
+          - THB always resolves (literal 1),
+          - USD/EUR/extra currencies resolve when the row's date is present in
+            the ExRate index with a non-empty value for the chosen rate column,
+          - any other currency is unsupported and never resolves.
+
+        Counts are reported but the file still saves: a visible warning beats a
+        hard failure on what may be a single stray row in a large ledger.
+        """
+        # USD/EUR fixed columns vary by rate type (B/D buying, C/E selling).
+        if rate_type == "selling":
+            fixed = {"USD": "usd_selling", "EUR": "eur_selling"}
+        else:
+            fixed = {"USD": "usd_buying", "EUR": "eur_buying"}
+
+        no_rate = 0
+        unsupported_seen: dict[str, int] = {}
+        unsupported_set = set(unsupported_currencies)
+
+        for sheet_name, mapping in sheet_maps.items():
+            cols = mapping["columns"]
+            cur_idx = cols.get("currency")
+            src_idx = cols["source"] + 1
+            if cur_idx is None:
+                continue
+            cur_col = cur_idx + 1
+            ws = wb[sheet_name]
+            for row_idx in range(mapping["header_row"] + 1, ws.max_row + 1):
+                cur_val = ws.cell(row=row_idx, column=cur_col).value
+                if cur_val is None:
+                    continue
+                ccy = str(cur_val).strip().upper()
+                if not ccy:
+                    continue
+                if ccy == "THB":
+                    continue
+                row_date = self._engine._parse_date(
+                    ws.cell(row=row_idx, column=src_idx).value
+                )
+                if ccy in unsupported_set:
+                    unsupported_seen[ccy] = unsupported_seen.get(ccy, 0) + 1
+                    continue
+                if row_date is None:
+                    continue
+                if not self._rate_available(
+                    ccy, row_date, exrate_index, exrate_col_map, fixed,
+                ):
+                    no_rate += 1
+
+        if no_rate:
+            self._engine._emit(
+                f"{fname}: {no_rate} row(s) had no rate available "
+                "(date beyond the 10-day rollback) — EX Rate left blank",
+                etype="warning",
+            )
+        for ccy, count in sorted(unsupported_seen.items()):
+            self._engine._emit(
+                f"{fname}: {count} row(s) with unsupported currency {ccy} "
+                "left blank",
+                etype="warning",
+            )
+
+    def _snapshot_out_rate_cells(
+        self, wb, sheet_maps: dict,
+    ) -> dict[tuple[str, int], object]:
+        """Capture each monthly tab's EX Rate cell value BEFORE injection.
+
+        Returns ``{(sheet_name, row_idx): original_value}``. Only the EX Rate
+        (out_rate) column is snapshotted, because inject_xlookup_formulas
+        overwrites exactly those cells; everything else is left untouched.
+        """
+        originals: dict[tuple[str, int], object] = {}
+        for sheet_name, mapping in sheet_maps.items():
+            cols = mapping["columns"]
+            out_idx = cols.get("out_rate")
+            if out_idx is None:
+                continue
+            out_col = out_idx + 1
+            ws = wb[sheet_name]
+            for row_idx in range(mapping["header_row"] + 1, ws.max_row + 1):
+                originals[(sheet_name, row_idx)] = ws.cell(
+                    row=row_idx, column=out_col
+                ).value
+        return originals
+
+    def _collect_audit_records(
+        self,
+        wb,
+        sheet_maps: dict,
+        exrate_index: dict,
+        exrate_col_map: dict[str, str],
+        rate_type: str,
+        originals: dict[tuple[str, int], object],
+        fname: str,
+        holidays_set,
+        audit: "AuditCollector",
+    ) -> None:
+        """Append one ``AuditRecord`` per EX Rate cell that resolved to a rate.
+
+        Mirrors the IFS formula's resolution (THB→1, USD/EUR→fixed columns,
+        extra currencies→exrate_col_map) so ``new_value`` matches what Excel
+        will display. ``original_value`` is the pre-injection cell snapshot.
+        Rows that cannot resolve (no rate / unsupported currency) are skipped —
+        those are surfaced separately by ``_warn_unfilled_rows`` and would only
+        clutter the per-cell change trail with empty "after" values.
+        """
+        if rate_type == "selling":
+            fixed = {"USD": "usd_selling", "EUR": "eur_selling"}
+        else:
+            fixed = {"USD": "usd_buying", "EUR": "eur_buying"}
+        holiday_dates = set(holidays_set or ())
+
+        for sheet_name, mapping in sheet_maps.items():
+            cols = mapping["columns"]
+            cur_idx = cols.get("currency")
+            out_idx = cols.get("out_rate")
+            src_idx = cols["source"] + 1
+            if cur_idx is None or out_idx is None:
+                continue
+            cur_col = cur_idx + 1
+            ws = wb[sheet_name]
+            for row_idx in range(mapping["header_row"] + 1, ws.max_row + 1):
+                cur_val = ws.cell(row=row_idx, column=cur_col).value
+                if cur_val is None:
+                    continue
+                ccy = str(cur_val).strip().upper()
+                if not ccy:
+                    continue
+                row_date = self._engine._parse_date(
+                    ws.cell(row=row_idx, column=src_idx).value
+                )
+                resolved = self._resolve_rate_value(
+                    ccy, row_date, exrate_index, exrate_col_map, fixed,
+                )
+                if resolved is None:
+                    continue
+                audit.add(AuditRecord(
+                    filename=fname,
+                    sheet=sheet_name,
+                    row=row_idx,
+                    cell_date=row_date.strftime("%Y-%m-%d") if row_date else "",
+                    currency=ccy,
+                    original_value=self._fmt_value(
+                        originals.get((sheet_name, row_idx))
+                    ),
+                    new_value=self._fmt_value(resolved),
+                    rate_source="Cache/API",
+                    holiday_rollback=(
+                        row_date is not None and row_date in holiday_dates
+                    ),
+                ))
+
+    @staticmethod
+    def _resolve_rate_value(
+        ccy: str,
+        row_date,
+        exrate_index: dict,
+        exrate_col_map: dict[str, str],
+        fixed: dict[str, str],
+    ):
+        """Return the resolved rate for (ccy, date), or None if unresolved.
+
+        THB always resolves to 1 (the formula's literal). USD/EUR read the
+        rate-type column; extra currencies read their appended column.
+        """
+        if ccy == "THB":
+            return 1
+        if row_date is None:
+            return None
+        row = exrate_index.get(row_date)
+        if row is None:
+            return None
+        if ccy in fixed:
+            return row.get(fixed[ccy])
+        if ccy in exrate_col_map:
+            return row.get(f"extra:{ccy}")
+        return None
+
+    @staticmethod
+    def _fmt_value(value) -> str:
+        """Render a cell value for the audit CSV (blank cells → empty string)."""
+        if value is None:
+            return ""
+        return str(value)
+
+    @staticmethod
+    def _rate_available(
+        ccy: str,
+        row_date,
+        exrate_index: dict,
+        exrate_col_map: dict[str, str],
+        fixed: dict[str, str],
+    ) -> bool:
+        """True if the ExRate sheet has a non-empty rate for (ccy, date)."""
+        row = exrate_index.get(row_date)
+        if row is None:
+            return False
+        if ccy in fixed:
+            return row.get(fixed[ccy]) is not None
+        if ccy in exrate_col_map:
+            return row.get(f"extra:{ccy}") is not None
+        return False
 
 
 class StandaloneExRateUpdater:

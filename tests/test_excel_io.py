@@ -250,6 +250,37 @@ class TestBuildExrateIndex:
         assert date(2025, 1, 7) in idx
         wb.close()
 
+    def test_extra_currency_columns_indexed(self):
+        """With an exrate_col_map, extra-currency columns are indexed under
+        'extra:<CCY>' so callers can detect blank multi-currency rows."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "ExRate"
+        # A=Date, B-E=USD/EUR, F=GBP Rate, G=JPY Rate, H=Holidays.
+        ws.append(["Date", "USD B", "USD S", "EUR B", "EUR S",
+                   "GBP Rate", "JPY Rate", "Hol"])
+        ws.append([date(2025, 1, 7), 33.1, 33.5, 36.1, 36.5,
+                   42.12, None, ""])
+        idx = build_exrate_index(wb, {"GBP": "F", "JPY": "G"})
+        row = idx[date(2025, 1, 7)]
+        assert row["extra:GBP"] == 42.12
+        # JPY cell is empty → indexed as None (a blank-resolving row).
+        assert row["extra:JPY"] is None
+        wb.close()
+
+    def test_no_col_map_omits_extra_keys(self):
+        """Backward compat: without a map only the fixed USD/EUR keys exist."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "ExRate"
+        ws.append(["Date", "USD B", "USD S", "EUR B", "EUR S", "Hol"])
+        ws.append([date(2025, 1, 7), 33.1, 33.5, 36.1, 36.5, ""])
+        row = build_exrate_index(wb)[date(2025, 1, 7)]
+        assert set(row) == {
+            "usd_buying", "usd_selling", "eur_buying", "eur_selling",
+        }
+        wb.close()
+
 
 # =========================================================================
 #  scan_sheet_headers

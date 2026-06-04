@@ -4,11 +4,17 @@
 import atexit
 import csv
 import os
+import threading
 from datetime import datetime, timedelta
 
 import pytest
 
-from core.audit_logger import AuditLogger, cleanup_old_audit_logs
+from core.audit_logger import (
+    AuditCollector,
+    AuditLogger,
+    AuditRecord,
+    cleanup_old_audit_logs,
+)
 
 
 class TestAuditLogger:
@@ -130,6 +136,80 @@ class TestAuditLogger:
             audit.log_batch_summary(
                 total_files=1, success=1, failed=0, anomalies_detected=0,
             )
+
+
+class TestAuditCollector:
+    """AuditCollector buffers AuditRecords and drains them thread-safely."""
+
+    def test_add_and_drain(self):
+        col = AuditCollector()
+        col.add(AuditRecord(
+            filename="a.xlsx", sheet="Jan", row=2, cell_date="2025-01-02",
+            currency="USD", original_value="", new_value="35.1000",
+        ))
+        col.add(AuditRecord(
+            filename="a.xlsx", sheet="Jan", row=3, cell_date="2025-01-03",
+            currency="EUR", original_value="", new_value="38.0000",
+        ))
+        records = col.drain()
+        assert [r.row for r in records] == [2, 3]
+        # Drain empties the buffer.
+        assert col.drain() == []
+
+    def test_drain_is_thread_safe(self):
+        col = AuditCollector()
+
+        def _worker():
+            for i in range(100):
+                col.add(AuditRecord(
+                    filename="a.xlsx", sheet="Jan", row=i,
+                    cell_date="2025-01-01", currency="USD",
+                    original_value="", new_value="1",
+                ))
+
+        threads = [threading.Thread(target=_worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(col.drain()) == 400
+
+
+class TestLogRecords:
+    """AuditLogger.log_records flushes a collector's records as CSV rows."""
+
+    def test_log_records_writes_every_record(self, tmp_path):
+        audit = AuditLogger(log_dir=str(tmp_path))
+        audit.log_records([
+            AuditRecord(
+                filename="ledger.xlsx", sheet="Jan", row=2,
+                cell_date="2025-01-02", currency="USD",
+                original_value="", new_value="35.1000",
+                rate_source="Cache/API", holiday_rollback=True,
+            ),
+            AuditRecord(
+                filename="ledger.xlsx", sheet="Jan", row=3,
+                cell_date="2025-01-03", currency="THB",
+                original_value="", new_value="1",
+            ),
+        ])
+        assert audit.row_count == 2
+        path = audit.finalize()
+        with open(path, encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            next(reader)  # headers
+            rows = list(reader)
+        assert rows[0][1] == "ledger.xlsx"
+        assert rows[0][5] == "USD"
+        assert rows[0][7] == "35.1000"
+        assert rows[0][9] == "Yes"   # holiday_rollback
+        assert rows[1][5] == "THB"
+        assert rows[1][7] == "1"
+
+    def test_empty_records_no_rows(self, tmp_path):
+        audit = AuditLogger(log_dir=str(tmp_path))
+        audit.log_records([])
+        assert audit.row_count == 0
 
 
 class TestAtexitUnregister:

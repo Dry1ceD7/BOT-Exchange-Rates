@@ -13,11 +13,13 @@ SFFB: Strict < 200 lines.
 import contextlib
 import logging
 import os
+import threading
 import webbrowser
 from pathlib import Path
 
 import customtkinter as ctk
 
+from core.api_client import ping_token
 from core.paths import get_project_root
 from core.secure_tokens import _keyring_available, set_token
 from gui.theme import MONO_FONT, get_theme
@@ -51,10 +53,12 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
 
         self.activated = False
         self._env_path = env_path or str(Path(get_project_root()) / ".env")
+        self._busy_test = False
+        self._destroyed = False
 
         t = get_theme()
         self.title("BOT Exchange Rate — API Registration")
-        self.geometry("520x520")
+        self.geometry("520x560")
         self.resizable(False, False)
         self.configure(fg_color=t["modal_bg"])
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -75,7 +79,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
 
     def _center(self):
         self.update_idletasks()
-        w, h = 520, 520
+        w, h = 520, 560
         sx = (self.winfo_screenwidth() - w) // 2
         sy = (self.winfo_screenheight() - h) // 2
         self.geometry(f"{w}x{h}+{sx}+{sy}")
@@ -152,6 +156,18 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         )
         self._lbl_status.pack(pady=(12, 4))
 
+        # ── Test Keys Button ─────────────────────────────────────────
+        # Lets a first-run user verify the entered keys reach + authenticate
+        # against the BOT API before committing them via Activate.
+        self._btn_test = ctk.CTkButton(
+            self, text="Test Keys",
+            fg_color=t["btn_secondary"], hover_color=t["btn_secondary_hover"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            corner_radius=10, height=38,
+            command=self._on_test_keys,
+        )
+        self._btn_test.pack(padx=30, fill="x", pady=(0, 8))
+
         # ── Activate Button ──────────────────────────────────────────
         ctk.CTkButton(
             self, text="Activate",
@@ -178,6 +194,72 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         char = "" if self._show_keys else "•"
         self._entry_exg.configure(show=char)
         self._entry_hol.configure(show=char)
+
+    def _safe_after(self, delay_ms, callback, *args):
+        """Schedule ``callback`` on the Tk thread, skipping if destroyed.
+
+        The Test Keys worker runs on a background thread; by the time it
+        finishes the user may have closed the dialog. Guard the after() call
+        so a late result never touches a torn-down widget.
+        """
+        if self._destroyed:
+            return
+        with contextlib.suppress(Exception):
+            self.after(delay_ms, lambda: callback(*args))
+
+    def _on_test_keys(self):
+        """Verify the entered keys against the BOT API off the Tk thread."""
+        t = get_theme()
+        if self._busy_test:
+            return
+
+        exg = self._entry_exg.get().strip()
+        hol = self._entry_hol.get().strip()
+        if not exg or not hol:
+            self._lbl_status.configure(
+                text="Enter both keys before testing.",
+                text_color=t["error_text"],
+            )
+            return
+
+        self._busy_test = True
+        self._btn_test.configure(state="disabled")
+        self._lbl_status.configure(
+            text="Testing keys…", text_color=t["modal_muted"],
+        )
+        self.update_idletasks()
+
+        def _worker():
+            # The exchange key is the one every batch run depends on; verify it
+            # first so a bad EXG key is reported even if HOL happens to pass.
+            exg_ok, exg_msg = ping_token(exg)
+            if not exg_ok:
+                self._safe_after(0, self._test_done, False, exg_msg)
+                return
+            hol_ok, hol_msg = ping_token(hol)
+            if not hol_ok:
+                # Distinguish which key failed for an actionable message.
+                self._safe_after(
+                    0, self._test_done, False,
+                    f"Holiday key: {hol_msg}",
+                )
+                return
+            self._safe_after(
+                0, self._test_done, True,
+                "✓ Both keys accepted — connection verified.",
+            )
+
+        threading.Thread(target=_worker, daemon=True, name="TokenTest").start()
+
+    def _test_done(self, ok: bool, message: str):
+        t = get_theme()
+        self._busy_test = False
+        with contextlib.suppress(Exception):
+            self._btn_test.configure(state="normal")
+        self._lbl_status.configure(
+            text=message,
+            text_color=t["modal_success"] if ok else t["error_text"],
+        )
 
     def _on_activate(self):
         t = get_theme()
@@ -224,6 +306,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
             logger.info("API tokens activated and stored in OS keychain.")
         else:
             logger.info("API tokens activated and saved to .env (no keychain available).")
+        self._destroyed = True
         self.grab_release()
         self.destroy()
 
@@ -263,5 +346,6 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
 
     def _on_close(self):
         self.activated = False
+        self._destroyed = True
         self.grab_release()
         self.destroy()

@@ -341,12 +341,12 @@ class TestBOTClient:
         assert not issubclass(BOTTransientServerError, BOTAPIError)
 
     def test_4xx_fails_fast_without_retry(self, bot_client, mock_http_client):
-        """A 4xx client error fails fast (no transient-retry classification)."""
+        """A non-auth 4xx client error fails fast (no transient-retry)."""
         client_error = MagicMock()
-        client_error.status_code = 403
+        client_error.status_code = 400
         client_error.raise_for_status = MagicMock(
             side_effect=httpx.HTTPStatusError(
-                "forbidden", request=MagicMock(), response=MagicMock(),
+                "bad request", request=MagicMock(), response=MagicMock(),
             )
         )
         mock_http_client.get = AsyncMock(return_value=client_error)
@@ -355,6 +355,132 @@ class TestBOTClient:
             asyncio.run(bot_client.get_holidays(2025))
         # No retry — single attempt.
         assert mock_http_client.get.call_count == 1
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_auth_failure_raises_actionable_message(
+        self, status, bot_client, mock_http_client,
+    ):
+        """401/403 → a clear, actionable BOTAPIError (not a raw httpx URL).
+
+        Regression for the audit finding: a non-technical accountant must be
+        told their key was rejected and where to re-enter it, never shown the
+        raw status URL / MDN link from raise_for_status().
+        """
+        auth_error = MagicMock()
+        auth_error.status_code = status
+        # If the code path ever fell through to raise_for_status() this would
+        # surface the raw httpx message — assert it does NOT get called.
+        auth_error.raise_for_status = MagicMock(
+            side_effect=AssertionError("raise_for_status must not run for auth errors")
+        )
+        mock_http_client.get = AsyncMock(return_value=auth_error)
+
+        with pytest.raises(BOTAPIError) as exc_info:
+            asyncio.run(bot_client.get_holidays(2025))
+
+        msg = str(exc_info.value)
+        assert str(status) in msg
+        assert "re-enter your keys" in msg.lower()
+        # SECURITY: the message must not leak the request URL or any token.
+        assert "http" not in msg.lower()
+        assert "gateway.api.bot.or.th" not in msg
+        assert bot_client.token_hol not in msg
+        # Auth failure fails fast — no retry.
+        assert mock_http_client.get.call_count == 1
+
+    def test_auth_failure_propagates_through_get_exchange_rates(
+        self, bot_client, mock_http_client,
+    ):
+        """The actionable auth message reaches the exchange-rate caller too."""
+        auth_error = MagicMock()
+        auth_error.status_code = 401
+        auth_error.raise_for_status = MagicMock()
+        mock_http_client.get = AsyncMock(return_value=auth_error)
+
+        with pytest.raises(BOTAPIError, match="rejected"):
+            asyncio.run(bot_client.get_exchange_rates(
+                date(2025, 3, 10), date(2025, 3, 10), "USD",
+            ))
+
+
+# =========================================================================
+#  ping_token() — first-run credential probe
+# =========================================================================
+
+class TestPingToken:
+    """ping_token() distinguishes accepted / rejected / unreachable keys."""
+
+    def test_empty_token_short_circuits(self):
+        from core.api_client import ping_token
+
+        ok, msg = ping_token("")
+        assert ok is False
+        assert "enter a key" in msg.lower()
+
+    def test_accepted_key_returns_ok(self, monkeypatch):
+        from core import api_client
+
+        resp = MagicMock()
+        resp.status_code = 200
+        monkeypatch.setattr(api_client.httpx, "get", lambda *a, **k: resp)
+
+        ok, msg = api_client.ping_token("VALIDKEY123")
+        assert ok is True
+        assert "verified" in msg.lower()
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_rejected_key_returns_not_ok(self, status, monkeypatch):
+        from core import api_client
+
+        resp = MagicMock()
+        resp.status_code = status
+        monkeypatch.setattr(api_client.httpx, "get", lambda *a, **k: resp)
+
+        ok, msg = api_client.ping_token("BADKEY12345")
+        assert ok is False
+        assert "rejected" in msg.lower()
+
+    def test_other_status_reports_http_code(self, monkeypatch):
+        from core import api_client
+
+        resp = MagicMock()
+        resp.status_code = 500
+        monkeypatch.setattr(api_client.httpx, "get", lambda *a, **k: resp)
+
+        ok, msg = api_client.ping_token("SOMEKEY1234")
+        assert ok is False
+        assert "500" in msg
+
+    def test_network_failure_is_friendly_and_tokenless(self, monkeypatch):
+        from core import api_client
+
+        def _boom(*a, **k):
+            raise httpx.ConnectError("getaddrinfo failed for SECRETTOKEN999")
+
+        monkeypatch.setattr(api_client.httpx, "get", _boom)
+
+        ok, msg = api_client.ping_token("SECRETTOKEN999")
+        assert ok is False
+        assert "could not reach" in msg.lower()
+        # SECURITY: never echo the token or the raw exception text.
+        assert "SECRETTOKEN999" not in msg
+        assert "getaddrinfo" not in msg
+
+    def test_token_is_bearer_stripped_in_headers(self, monkeypatch):
+        from core import api_client
+
+        captured = {}
+
+        def _capture(url, *, headers, timeout):
+            captured["headers"] = headers
+            resp = MagicMock()
+            resp.status_code = 200
+            return resp
+
+        monkeypatch.setattr(api_client.httpx, "get", _capture)
+        api_client.ping_token("Bearer  RAWKEY123 ")
+        assert captured["headers"]["X-IBM-Client-Id"] == "RAWKEY123"
+        assert captured["headers"]["Authorization"] == "Bearer RAWKEY123"
 
 
 # =========================================================================

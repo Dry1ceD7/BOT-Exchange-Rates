@@ -22,7 +22,7 @@ from datetime import date, datetime
 
 from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 
 from core.constants import PREFORMAT_BUFFER_ROWS, SKIP_SHEET_NAMES
 
@@ -54,17 +54,29 @@ def zero_touch_write(ws, row: int, col: int, value) -> None:
     cell.value = value
 
 
-def build_exrate_index(wb) -> dict[date, dict]:
+def build_exrate_index(
+    wb,
+    exrate_col_map: dict[str, str] | None = None,
+) -> dict[date, dict]:
     """
     Build an in-memory ExRate lookup index from the ExRate sheet.
 
-    Reads dates from column A and rate values from columns B-E.
-    Returns a dict mapping date → {usd_buying, usd_selling,
-    eur_buying, eur_selling}.
+    Reads dates from column A and rate values from columns B-E. When
+    ``exrate_col_map`` ({ccy: column_letter}) is supplied, the value of each
+    extra-currency column is also indexed under the key ``f"extra:{ccy}"`` so
+    callers can tell whether a multi-currency row will resolve or stay blank.
+
+    Returns a dict mapping date → {usd_buying, usd_selling, eur_buying,
+    eur_selling[, "extra:<CCY>" ...]}.
     """
     exrate_index: dict[date, dict] = {}
     if "ExRate" not in wb.sheetnames:
         return exrate_index
+
+    extra_cols = {
+        ccy: column_index_from_string(col)
+        for ccy, col in (exrate_col_map or {}).items()
+    }
 
     ws_exrate = wb["ExRate"]
     for row_idx in range(2, (ws_exrate.max_row or 1) + 1):
@@ -75,7 +87,7 @@ def build_exrate_index(wb) -> dict[date, dict]:
         elif isinstance(cell_val, date):
             row_date = cell_val
         if row_date:
-            exrate_index[row_date] = {
+            entry = {
                 "usd_buying": ws_exrate.cell(
                     row=row_idx, column=2
                 ).value,
@@ -89,6 +101,11 @@ def build_exrate_index(wb) -> dict[date, dict]:
                     row=row_idx, column=5
                 ).value,
             }
+            for ccy, col_idx in extra_cols.items():
+                entry[f"extra:{ccy}"] = ws_exrate.cell(
+                    row=row_idx, column=col_idx
+                ).value
+            exrate_index[row_date] = entry
 
     return exrate_index
 

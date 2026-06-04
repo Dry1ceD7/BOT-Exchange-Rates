@@ -205,19 +205,51 @@ class SchedulerPanel(ctk.CTkFrame):
         self._paths = [p for p in paths if Path(p).is_dir()]
         self._refresh_path_list()
 
-        # Set toggle (triggers _on_toggle which shows/hides content)
-        if enabled:
+        # Set toggle (triggers _on_toggle which shows/hides content).
+        #
+        # A persisted "on" state is only honored when at least one valid watch
+        # folder survives the is_dir() filter above. Without a folder the
+        # scheduler can never process anything, so we force the toggle back off
+        # and re-persist (mirrors the zero-folder guard in _on_toggle) rather
+        # than showing a "Next run" that silently fires over an empty list.
+        if enabled and self._paths:
             self._enable_var.set("on")
             self._content.pack(fill="x", pady=(0, 4))
             self._update_status()
+            # CRITICAL: actually arm the background scheduler on launch.
+            # Restoring the toggle visual + status alone left the feature
+            # silently dead across restarts — the AutoScheduler was never
+            # started, so the scheduled batch never fired.
+            if self._on_start:
+                self._on_start(
+                    f"{self._hour_var.get()}:{self._minute_var.get()}",
+                    list(self._paths),
+                )
         else:
             self._enable_var.set("off")
+            if enabled and not self._paths:
+                # Persisted-enabled but every watch folder is now missing:
+                # repair the on-disk flag so we don't keep advertising a
+                # scheduler that cannot run.
+                self._content.pack(fill="x", pady=(0, 4))
+                self._update_status()
+                self._save_config()
 
     def _on_toggle(self):
         """Handle enable/disable toggle."""
         enabled = self._enable_var.get() == "on"
         if enabled:
+            # Refuse to arm with zero watch folders: the scheduler would
+            # "start" and persist scheduler_enabled=True but could never
+            # process anything (it scans an empty path list night after
+            # night). Reveal the content so the warning is visible, snap the
+            # switch back off, and do NOT persist an enabled state.
             self._content.pack(fill="x", pady=(0, 4))
+            if not self._paths:
+                self._enable_var.set("off")
+                self._update_status()
+                self._save_config()
+                return
             self._update_status()
             if self._on_start:
                 self._on_start(
@@ -307,13 +339,27 @@ class SchedulerPanel(ctk.CTkFrame):
             )
 
     def _save_config(self):
-        """Persist current scheduler config to settings.json."""
-        self._settings["scheduler_enabled"] = self._enable_var.get() == "on"
-        self._settings["scheduler_time"] = (
-            f"{self._hour_var.get()}:{self._minute_var.get()}"
-        )
-        self._settings["scheduler_paths"] = list(self._paths)
-        self._mgr.save(self._settings)
+        """Persist current scheduler config to settings.json.
+
+        Writes ONLY the three scheduler_* keys via SettingsManager.set(),
+        which does a locked read-modify-write against the current on-disk
+        state. The panel previously called mgr.save(self._settings) with a
+        stale full-blob snapshot taken at construction — so if the Settings
+        modal changed (e.g.) rate_type after this panel loaded, the next
+        scheduler toggle/time/folder change silently reverted that edit. By
+        touching only our own keys we never clobber settings owned elsewhere.
+        """
+        scheduler_keys = {
+            "scheduler_enabled": self._enable_var.get() == "on",
+            "scheduler_time": (
+                f"{self._hour_var.get()}:{self._minute_var.get()}"
+            ),
+            "scheduler_paths": list(self._paths),
+        }
+        for key, value in scheduler_keys.items():
+            self._mgr.set(key, value)
+        # Keep our local snapshot consistent for any later reads in this panel.
+        self._settings.update(scheduler_keys)
 
     def get_config(self) -> dict:
         """Return current scheduler config for external use."""
