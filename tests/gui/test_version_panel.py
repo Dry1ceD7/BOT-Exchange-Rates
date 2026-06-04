@@ -467,3 +467,55 @@ class TestVersionPanelVersionSelection:
         assert panel._on_restart is restart_cb
         assert panel._on_error is error_cb
         panel.destroy()
+
+
+# ---------------------------------------------------------------------------
+# 9. _do_restart install-failure surfacing (never silent)
+# ---------------------------------------------------------------------------
+
+class TestVersionPanelInstallFailure:
+    """A failed installer must surface an error via callback OR messagebox."""
+
+    def test_install_failure_calls_on_error(self, tk_root):
+        error_cb = MagicMock()
+        panel = _make_panel(tk_root, on_error=error_cb)
+        panel._pending_installer = "/tmp/installer.exe"
+        panel._pending_sha256 = "abc123"
+
+        fake_toplevel = MagicMock()
+
+        with (
+            patch.object(panel, "winfo_toplevel", return_value=fake_toplevel),
+            patch("pathlib.Path.is_file", return_value=True),
+            patch("core.auto_updater.apply_update",
+                  return_value={"success": False, "error": "checksum mismatch"}),
+        ):
+            panel._do_restart()
+
+        error_cb.assert_called_once()
+        assert "checksum mismatch" in error_cb.call_args[0][0]
+        panel.destroy()
+
+    def test_install_failure_falls_back_to_messagebox_when_no_callback(
+        self, tk_root
+    ):
+        """When on_error is None, a native error popup must still fire."""
+        panel = _make_panel(tk_root, on_error=None)
+        panel._pending_installer = "/tmp/installer.exe"
+        panel._pending_sha256 = "abc123"
+
+        fake_toplevel = MagicMock()
+
+        with (
+            patch.object(panel, "winfo_toplevel", return_value=fake_toplevel),
+            patch("pathlib.Path.is_file", return_value=True),
+            patch("core.auto_updater.apply_update",
+                  return_value={"success": False, "error": "boom"}),
+            patch("tkinter.messagebox.showerror") as mock_box,
+        ):
+            panel._do_restart()
+
+        mock_box.assert_called_once()
+        # Message text carries the underlying error so it is never silent
+        assert "boom" in mock_box.call_args[0][1]
+        panel.destroy()

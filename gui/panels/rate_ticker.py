@@ -55,7 +55,7 @@ class RateTicker(SafePanel, ctk.CTkFrame):
         self.usd_frame.pack(side="left", padx=12, pady=4)
 
         self.lbl_usd_title = ctk.CTkLabel(
-            self.usd_frame, text="🇺🇸 USD",
+            self.usd_frame, text="USD",
             font=ctk.CTkFont(weight="bold", size=13), text_color=t["ticker_value"]
         )
         self.lbl_usd_title.pack(side="left", padx=(0, 8))
@@ -93,7 +93,7 @@ class RateTicker(SafePanel, ctk.CTkFrame):
         self.eur_frame.pack(side="left", padx=12, pady=4)
 
         self.lbl_eur_title = ctk.CTkLabel(
-            self.eur_frame, text="🇪🇺 EUR",
+            self.eur_frame, text="EUR",
             font=ctk.CTkFont(weight="bold", size=13), text_color=t["ticker_value"]
         )
         self.lbl_eur_title.pack(side="left", padx=(0, 8))

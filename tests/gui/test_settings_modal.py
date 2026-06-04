@@ -361,6 +361,56 @@ class TestSaveAndClose:
 
 
 # ---------------------------------------------------------------------------
+# Anomaly threshold input
+# ---------------------------------------------------------------------------
+
+class TestAnomalyThreshold:
+    """Anomaly-threshold entry loads, persists, and validates positive floats."""
+
+    def test_anomaly_var_attribute_exists(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        assert hasattr(modal, "_anomaly_threshold_var")
+        modal.destroy()
+
+    def test_anomaly_default_from_settings(self, tk_root):
+        modal, _ = _make_modal(tk_root, settings={"anomaly_threshold_pct": 7.5})
+        assert modal._anomaly_threshold_var.get() == "7.5"
+        modal.destroy()
+
+    def test_anomaly_default_when_not_set(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        # DEFAULT_SETTINGS uses 5.0; helper omits it so the .get() default fires
+        assert modal._anomaly_threshold_var.get() == "5.0"
+        modal.destroy()
+
+    def test_save_persists_anomaly_threshold(self, tk_root):
+        modal, mock_mgr = _make_modal(tk_root)
+        modal._anomaly_threshold_var.set("12.5")
+        modal._save_and_close()
+        saved = mock_mgr.save.call_args[0][0]
+        assert saved["anomaly_threshold_pct"] == 12.5
+
+    def test_save_keeps_previous_on_invalid_input(self, tk_root):
+        modal, mock_mgr = _make_modal(
+            tk_root, settings={"anomaly_threshold_pct": 5.0}
+        )
+        modal._anomaly_threshold_var.set("not-a-number")
+        modal._save_and_close()
+        saved = mock_mgr.save.call_args[0][0]
+        # Invalid input must not overwrite or zero out the guardrail
+        assert saved["anomaly_threshold_pct"] == 5.0
+
+    def test_save_keeps_previous_on_non_positive(self, tk_root):
+        modal, mock_mgr = _make_modal(
+            tk_root, settings={"anomaly_threshold_pct": 5.0}
+        )
+        modal._anomaly_threshold_var.set("0")
+        modal._save_and_close()
+        saved = mock_mgr.save.call_args[0][0]
+        assert saved["anomaly_threshold_pct"] == 5.0
+
+
+# ---------------------------------------------------------------------------
 # Keyboard shortcuts
 # ---------------------------------------------------------------------------
 

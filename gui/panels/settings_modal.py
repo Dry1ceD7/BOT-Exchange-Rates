@@ -116,6 +116,23 @@ class SettingsModal(ctk.CTkToplevel):
             font=ctk.CTkFont(size=12),
         ).pack(padx=30, pady=(4, 16), fill="x")
 
+        # ── Anomaly Threshold ─────────────────────────────────────────
+        ctk.CTkLabel(
+            self, text="ANOMALY THRESHOLD (%)",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=t["modal_muted"],
+        ).pack(anchor="w", padx=30)
+
+        self._anomaly_threshold_var = ctk.StringVar(
+            value=str(self._settings.get("anomaly_threshold_pct", 5.0))
+        )
+        self._anomaly_entry = ctk.CTkEntry(
+            self,
+            textvariable=self._anomaly_threshold_var,
+            font=ctk.CTkFont(size=13),
+        )
+        self._anomaly_entry.pack(padx=30, pady=(4, 16), fill="x")
+
         # ── Auto-Update ──────────────────────────────────────────────
         self._auto_update_var = ctk.StringVar(
             value="on" if self._settings.get("auto_update", True) else "off"
@@ -190,5 +207,13 @@ class SettingsModal(ctk.CTkToplevel):
         self._settings["rate_type"] = self._rate_type_map.get(
             selected_label, "buying_transfer"
         )
+        # Anomaly threshold — keep the prior value on a non-positive/invalid
+        # entry so a typo can't silently disable the guardrail.
+        try:
+            threshold = float(self._anomaly_threshold_var.get())
+            if threshold > 0:
+                self._settings["anomaly_threshold_pct"] = threshold
+        except (TypeError, ValueError):
+            logger.debug("Invalid anomaly threshold input — keeping previous")
         self._mgr.save(self._settings)
         self.destroy()

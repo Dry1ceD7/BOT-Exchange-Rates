@@ -133,6 +133,7 @@ class TestCheckForUpdates:
             patch("core.config_manager.SettingsManager") as MockSM,
             patch("core.auto_updater.check_for_update") as mock_check,
             patch("gui.panels.update_banner.threading.Thread", _SyncThread),
+            patch("gui.panels.update_banner.sys.platform", "win32"),
         ):
             MockSM.return_value.load.return_value = {"auto_update": True}
             mock_check.return_value = {
@@ -170,6 +171,7 @@ class TestCheckForUpdates:
             patch("core.config_manager.SettingsManager") as MockSM,
             patch("core.auto_updater.check_for_update") as mock_check,
             patch("gui.panels.update_banner.threading.Thread", _SyncThread),
+            patch("gui.panels.update_banner.sys.platform", "win32"),
         ):
             MockSM.return_value.load.return_value = {"auto_update": True}
             mock_check.return_value = {"update_available": False}

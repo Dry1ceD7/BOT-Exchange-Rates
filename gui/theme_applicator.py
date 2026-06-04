@@ -156,9 +156,12 @@ def apply_theme_to_app(app) -> None:
         app.scheduler_panel.apply_theme(t)
 
     # ── Footer ──────────────────────────────────────────────────
+    # Recolor with the same tokens used at build (app._build_footer):
+    # footer_bg for the bar, text_muted for the label. Using header_bg /
+    # header_sub here made the footer visibly shift on first Settings open.
     if hasattr(app, "footer_frame"):
-        app.footer_frame.configure(fg_color=t["header_bg"])
+        app.footer_frame.configure(fg_color=t["footer_bg"])
     if hasattr(app, "lbl_footer"):
-        app.lbl_footer.configure(text_color=t["header_sub"])
+        app.lbl_footer.configure(text_color=t["text_muted"])
 
     logger.debug("Theme applied: %s mode", ctk.get_appearance_mode())
