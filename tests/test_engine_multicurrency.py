@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock
 import openpyxl
 import pytest
 
-import core.engine as engine_mod
+import core.workbook_io as workbook_io_mod
 from core.backup_manager import BackupManager
 from core.engine import LedgerEngine
 
@@ -308,7 +308,7 @@ class TestCustomMultiCurrency:
 
         # Force the disk-space check to report a tiny free space.
         monkeypatch.setattr(
-            engine_mod.shutil, "disk_usage",
+            workbook_io_mod.shutil, "disk_usage",
             lambda _path: _DiskUsage(total=10**12, used=10**12, free=0),
         )
 

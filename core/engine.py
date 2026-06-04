@@ -11,11 +11,8 @@ Slim orchestrator. Heavy logic extracted to:
 """
 
 import asyncio
-import contextlib
-import gc
 import logging
 import os
-import shutil
 import threading
 import traceback
 from collections.abc import Callable
@@ -33,18 +30,11 @@ from core.constants import (
     BACKUP_MAX_AGE_DAYS,
     DEFAULT_ANOMALY_THRESHOLD_PCT,
     MAX_FILE_SIZE_MB,
-    MIN_DISK_SPACE_MB,
     SKIP_SHEET_NAMES,
     parse_date,
 )
 from core.database import CacheDB
-from core.excel_io import (
-    build_exrate_index,
-    inject_xlookup_formulas,
-    scan_sheet_headers,
-    write_custom_exrate_data,
-)
-from core.exrate_sheet import update_master_exrate_sheet
+from core.exrate_updater import StandaloneExRateUpdater, WorkbookWriter
 from core.ledger_processing import (
     prescan_target_dates,
     run_anomaly_check,
@@ -515,82 +505,11 @@ class LedgerEngine:
         self._emit("Processing sheets with openpyxl engine")
         logger.info("Processing with openpyxl engine.")
 
-        try:
-            wb = openpyxl.load_workbook(filepath)
-        except (OSError, openpyxl.utils.exceptions.InvalidFileException):
-            raise
-
-        try:
-            # Scan monthly tabs for header/column mappings
-            sheet_maps = scan_sheet_headers(wb, self.target_cols)
-
-            # ── STEP 1: Build ExRate master sheet ────────────────────────
-            update_master_exrate_sheet(
-                wb, usd_buying, usd_selling, eur_buying, eur_selling,
-                list(master_holidays_set), holidays_names, computed_start,
-            )
-
-            # ── STEP 2: Build in-memory ExRate lookup index ──────────────
-            build_exrate_index(wb)
-
-            # ── STEP 3: Inject XLOOKUP formulas into monthly tabs ────────
-            exrate_last_row = 2
-            if "ExRate" in wb.sheetnames:
-                ws_ex = wb["ExRate"]
-                exrate_last_row = max(ws_ex.max_row or 2, 2)
-
-            # Load user's rate type preference from settings
-            from core.config_manager import SettingsManager
-            _settings = SettingsManager()
-            rate_type_setting = _settings.load().get(
-                "rate_type", "buying_transfer"
-            )
-
-            inject_xlookup_formulas(
-                wb, sheet_maps, exrate_last_row,
-                parse_date_fn=self._parse_date,
-                emit_fn=self._emit,
-                dry_run=dry_run,
-                rate_type=rate_type_setting,
-            )
-
-            # ── Save & Cleanup ───────────────────────────────────────────
-            if dry_run:
-                self._emit(
-                    "[SIM] File NOT saved (dry run) "
-                    f"— {Path(filepath).name}"
-                )
-            else:
-                # ERR-03: Check disk space before saving
-                drive_stat = shutil.disk_usage(Path(filepath).parent)
-                free_mb = drive_stat.free // (1024 * 1024)
-                if free_mb < MIN_DISK_SPACE_MB:
-                    raise OSError(
-                        f"Insufficient disk space ({free_mb}MB free, "
-                        f"need {MIN_DISK_SPACE_MB}MB). File NOT saved."
-                    )
-                wb.save(filepath)
-                logger.info(
-                    "Overwritten in-place: %s",
-                    Path(filepath).name,
-                )
-            wb.close()
-            del wb  # release file handle immediately
-            wb = None
-        except (OSError, ValueError, KeyError,
-                openpyxl.utils.exceptions.InvalidFileException):
-            # On ANY error, close the workbook to release the file lock
-            if wb is not None:
-                try:
-                    wb.close()
-                except OSError:
-                    logger.debug("Failed to close workbook during error handling")
-                del wb
-                wb = None
-            raise
-        gc.collect()
-        self._emit("File saved and memory cleaned", etype="success")
-        return filepath
+        return await WorkbookWriter(self).write(
+            filepath, dry_run,
+            usd_buying, usd_selling, eur_buying, eur_selling,
+            master_holidays_set, holidays_names, computed_start,
+        )
 
     # ================================================================== #
     #  BATCH PROCESSING
@@ -679,220 +598,6 @@ class LedgerEngine:
         Returns:
             Path to the saved file.
         """
-
-
-
-
-        # ── Defaults ──────────────────────────────────────────────────
-        if not currencies:
-            currencies = ["USD", "EUR"]
-        if not rate_types:
-            rate_types = {
-                "Buying TT": "buying_transfer",
-                "Selling": "selling",
-            }
-
-        # If standard USD+EUR with Buying TT + Selling, use the original
-        # function for backward compatibility with ledger processing.
-        is_standard = (
-            set(currencies) == {"USD", "EUR"}
-            and set(rate_types.values()) == {"buying_transfer", "selling"}
+        return await StandaloneExRateUpdater(self).run(
+            filepath, progress_cb, currencies, rate_types, date_range,
         )
-
-        def _status(msg: str):
-            if progress_cb:
-                progress_cb(msg)
-            self._emit(msg)
-
-        # ── Fail-safe preconditions (mirror process_ledger) ───────────
-        # Every in-place overwrite path must enforce the size guardrail and
-        # create a pre-edit backup BEFORE load_workbook. If the file does not
-        # yet exist this is a creation path — skip backup, but the loaded
-        # save below would fail anyway, so a missing file is still an error.
-        # noqa: PTH100 — keep os.path.abspath (no symlink resolution) so the
-        # in-place save target string stays identical to the legacy behavior.
-        filepath = os.path.abspath(filepath)  # noqa: PTH100
-        self._check_memory_guardrail(filepath)
-        _status("Size check passed")
-        if Path(filepath).exists():
-            self.backup.create_backup(filepath)
-            _status("Backup created")
-
-        _status("Opening ExRate file...")
-        wb = openpyxl.load_workbook(filepath)
-
-        if "ExRate" not in wb.sheetnames:
-            wb.close()
-            del wb
-            gc.collect()
-            raise ValueError("No ExRate sheet found in the selected file.")
-
-        # ── Standard path (backward compatible) ───────────────────────
-        if is_standard:
-            from core.exrate_sheet import update_master_exrate_sheet
-
-            # try/finally guarantees the OS file handle is released and gc
-            # runs even if API fetch / write / save raises (mirrors
-            # process_ledger). Otherwise an exception would leak the handle.
-            try:
-                ws_ex = wb["ExRate"]
-                existing_dates = set()
-                for row_idx in range(2, (ws_ex.max_row or 1) + 1):
-                    cell_val = ws_ex.cell(row=row_idx, column=1).value
-                    parsed = self._parse_date(cell_val)
-                    if parsed:
-                        existing_dates.add(parsed)
-
-                target_year = min(existing_dates).year if existing_dates else date.today().year
-
-                # Override with manual date_range if provided
-                if date_range:
-                    dr_start, dr_end = date_range
-                    target_year = dr_start.year
-                    all_target_dates = {dr_start, dr_end, date.today()}
-                    start_date_str = f"{dr_start.year - 1}-12-20"
-                else:
-                    start_date_str = f"{target_year - 1}-12-20"
-                    all_target_dates = existing_dates | {date.today()}
-
-                _status("Fetching exchange rates from BOT API...")
-                (
-                    logic_engine, usd_selling, eur_selling,
-                    usd_buying, eur_buying, _usd_data, _eur_data,
-                ) = await self._preload_api_data(
-                    all_target_dates, start_date_str
-                )
-
-                computed_start = compute_year_start_date(
-                    target_year, logic_engine.holidays
-                )
-
-                master_holidays_set, holidays_names = build_holiday_lookup(
-                    self.cache, all_target_dates, computed_start, logic_engine,
-                )
-
-                _status("Writing exchange rate data...")
-                update_master_exrate_sheet(
-                    wb, usd_buying, usd_selling, eur_buying, eur_selling,
-                    sorted(master_holidays_set), holidays_names,
-                    computed_start,
-                )
-                # ERR-03: Check disk space before saving
-                drive_stat = shutil.disk_usage(Path(filepath).parent)
-                free_mb = drive_stat.free // (1024 * 1024)
-                if free_mb < MIN_DISK_SPACE_MB:
-                    raise OSError(
-                        f"Insufficient disk space ({free_mb}MB free, "
-                        f"need {MIN_DISK_SPACE_MB}MB). File NOT saved."
-                    )
-                wb.save(filepath)
-                _status(f"✓ ExRate updated: {Path(filepath).name}")
-                return filepath
-            finally:
-                try:
-                    wb.close()
-                except OSError:
-                    logger.debug("Failed to close workbook (standard path)")
-                del wb
-                gc.collect()
-
-        # ── Custom path (any currencies / rate types) ─────────────────
-        # try/finally guarantees handle release + gc on any error below.
-        try:
-            _status(f"Fetching rates for {', '.join(currencies)}...")
-
-            # Fetch from API for each currency
-            if date_range:
-                start_dt, end_dt = date_range
-            else:
-                target_year = date.today().year
-                start_dt = date(target_year - 1, 12, 20)
-                end_dt = date.today()
-
-            # rate_data[currency][api_field][date] = value
-            rate_data: dict[str, dict[str, dict[date, float]]] = {}
-
-            for ccy in currencies:
-                _status(f"Fetching {ccy} rates...")
-                raw_results = await self.api.get_exchange_rates(
-                    start_dt, end_dt, ccy,
-                )
-                rate_data[ccy] = {}
-                for _label, api_field in rate_types.items():
-                    rate_data[ccy][api_field] = {}
-
-                for rec in raw_results:
-                    try:
-                        rec_date = datetime.strptime(
-                            rec.period, "%Y-%m-%d"
-                        ).date()
-                    except (ValueError, TypeError):
-                        continue
-                    for _label, api_field in rate_types.items():
-                        val = getattr(rec, api_field, None)
-                        if val is not None:
-                            # Mathematical Truth: quantize to 4dp Decimal, same
-                            # discipline as the standard USD/EUR path — never
-                            # write the raw API float.
-                            rate_data[ccy][api_field][rec_date] = safe_to_decimal(val)
-
-            # Fetch holidays
-            _status("Fetching holidays...")
-            all_target_dates = {date.today()}
-            (
-                logic_engine, _, _, _, _, _, _,
-            ) = await self._preload_api_data(all_target_dates, str(start_dt))
-
-            holidays_set = set(logic_engine.holidays)
-            holidays_names_map: dict[date, str] = {}
-            for year in {start_dt.year, end_dt.year}:
-                for h_str, h_name in self.cache.get_holidays(year):
-                    with contextlib.suppress(ValueError, TypeError):
-                        holidays_names_map[
-                            datetime.strptime(h_str, "%Y-%m-%d").date()
-                        ] = h_name
-
-            # Build column headers: Date + (CCY RateType)... + Holidays
-            headers = ["Date"]
-            col_specs = []  # (currency, api_field) per data column
-            for ccy in currencies:
-                for label, api_field in rate_types.items():
-                    headers.append(f"{ccy} {label}")
-                    col_specs.append((ccy, api_field))
-            headers.append("Holidays/Weekend")
-
-            # Build date range
-            all_dates = []
-            d = start_dt
-            while d <= end_dt:
-                all_dates.append(d)
-                d += timedelta(days=1)
-            all_dates.sort()
-
-            # ── Write to sheet ────────────────────────────────────────
-            ws = wb["ExRate"]
-            _status("Writing custom ExRate data...")
-
-            write_custom_exrate_data(
-                ws, rate_data, col_specs, headers,
-                all_dates, holidays_set, holidays_names_map,
-            )
-
-            # ERR-03: Check disk space before saving
-            drive_stat = shutil.disk_usage(Path(filepath).parent)
-            free_mb = drive_stat.free // (1024 * 1024)
-            if free_mb < MIN_DISK_SPACE_MB:
-                raise OSError(
-                    f"Insufficient disk space ({free_mb}MB free, "
-                    f"need {MIN_DISK_SPACE_MB}MB). File NOT saved."
-                )
-            wb.save(filepath)
-            _status(f"✓ ExRate created: {Path(filepath).name}")
-            return filepath
-        finally:
-            try:
-                wb.close()
-            except OSError:
-                logger.debug("Failed to close workbook (custom path)")
-            del wb
-            gc.collect()
