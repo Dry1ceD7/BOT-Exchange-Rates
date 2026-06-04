@@ -25,6 +25,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from core.i18n import tr
+
 pytestmark = pytest.mark.gui
 
 
@@ -57,8 +59,10 @@ def _make_app(batch_running=False, file_queue=None):
         # notification + auto-restore branch.
         _scheduled_run_active=False,
         _revert_running=False,
+        _exrate_running=False,
         _tray=None,
         _failed_box=None,
+        dnd_enabled=False,
         file_queue=file_queue if file_queue is not None else [],
         last_processed_path=None,
         btn_process=_btn(),
@@ -78,6 +82,13 @@ def _make_app(batch_running=False, file_queue=None):
     app._flash_busy_status = lambda: BOTExrateApp._flash_busy_status(app)
     app._unlock_ui_after_batch = lambda: BOTExrateApp._unlock_ui_after_batch(app)
     app._lock_ui_for_batch = lambda: BOTExrateApp._lock_ui_for_batch(app)
+    app._settle_progressbar = lambda value: BOTExrateApp._settle_progressbar(app, value)
+    app._last_succeeded_path = (
+        lambda errors: BOTExrateApp._last_succeeded_path(app, errors)
+    )
+    app._reset_queue_after_run = (
+        lambda: BOTExrateApp._reset_queue_after_run(app)
+    )
     return app
 
 
@@ -97,7 +108,10 @@ class TestQueueGuardsWhileRunning:
         app.btn_process.configure.assert_not_called()
         # The operator is told the UI is busy rather than silently ignored.
         app.lbl_status.configure.assert_called_once()
-        assert "Busy" in app.lbl_status.configure.call_args.kwargs["text"]
+        assert (
+            app.lbl_status.configure.call_args.kwargs["text"]
+            == tr("main.status_busy")
+        )
 
     def test_set_queue_updates_when_idle(self):
         from gui.app import BOTExrateApp
@@ -121,7 +135,10 @@ class TestQueueGuardsWhileRunning:
 
         assert called["set_queue"] is False
         assert app.file_queue == ["old.xlsx"]
-        assert "Busy" in app.lbl_status.configure.call_args.kwargs["text"]
+        assert (
+            app.lbl_status.configure.call_args.kwargs["text"]
+            == tr("main.status_busy")
+        )
 
     def test_browse_files_ignored_while_batch_running(self):
         from gui.app import BOTExrateApp
@@ -135,7 +152,10 @@ class TestQueueGuardsWhileRunning:
 
         # The file dialog must never even open while a batch is running.
         picker.assert_not_called()
-        assert "Busy" in app.lbl_status.configure.call_args.kwargs["text"]
+        assert (
+            app.lbl_status.configure.call_args.kwargs["text"]
+            == tr("main.status_busy")
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -320,3 +340,263 @@ class TestScheduledBatchLocksUI:
         # Must not clobber an in-flight manual run's locked state nor dispatch.
         app.batch_handler.start_batch.assert_not_called()
         app.lbl_status.configure.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# round-6 #2 — reveal points at a SUCCEEDING file, never a failed/skipped one
+# ---------------------------------------------------------------------------
+
+class TestRevealTargetsSucceededFile:
+    def test_reveal_hidden_when_last_file_failed(self):
+        from gui.app import BOTExrateApp
+
+        # Batch of three; the LAST file failed (backup failed / no-rate). The
+        # reveal must point at the last SUCCEEDING file, not the failed one.
+        app = _make_app(
+            batch_running=True,
+            file_queue=["jan.xlsx", "feb.xlsx", "mar.xlsx"],
+        )
+        app._render_failed_files = MagicMock()
+        errors = ["mar.xlsx: <ERROR: No Rate>"]
+
+        BOTExrateApp._show_batch_complete(app, success=2, fail=1, errors=errors)
+
+        # feb.xlsx is the last file that actually got written.
+        assert app.last_processed_path == "feb.xlsx"
+        app.btn_reveal.pack.assert_called_once()
+
+    def test_reveal_hidden_when_all_failed(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(batch_running=True, file_queue=["jan.xlsx"])
+        app._render_failed_files = MagicMock()
+        errors = ["jan.xlsx: BACKUP FAILED — skipped (disk full)"]
+
+        BOTExrateApp._show_batch_complete(app, success=0, fail=1, errors=errors)
+
+        # Nothing was written — the reveal must be hidden and target cleared.
+        assert app.last_processed_path is None
+        app.btn_reveal.pack_forget.assert_called()
+        app.btn_reveal.pack.assert_not_called()
+
+    def test_last_succeeded_path_skips_failed_basenames(self):
+
+        app = _make_app(file_queue=["/a/jan.xlsx", "/a/feb.xlsx", "/a/mar.xlsx"])
+        # mar failed; the reveal target is the deepest path whose basename is
+        # not in the failed set — feb.xlsx (full path preserved).
+        result = app._last_succeeded_path(["mar.xlsx: <ERROR: No Rate>"])
+        assert result == "/a/feb.xlsx"
+
+    def test_last_succeeded_path_none_when_queue_empty(self):
+
+        app = _make_app(file_queue=[])
+        assert app._last_succeeded_path([]) is None
+
+
+# ---------------------------------------------------------------------------
+# round-6 #3 — a completed manual batch clears the queue + disables Process
+# ---------------------------------------------------------------------------
+
+class TestQueueClearedAfterRun:
+    def test_successful_manual_run_clears_queue_and_disables_process(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(batch_running=True, file_queue=["a.xlsx", "b.xlsx"])
+        app._render_failed_files = MagicMock()
+
+        BOTExrateApp._show_batch_complete(app, success=2, fail=0, errors=[])
+
+        # Queue emptied and Process disabled until a fresh selection is made,
+        # so a stray re-click cannot silently reprocess the same files.
+        assert app.file_queue == []
+        app.btn_process.configure.assert_any_call(state="disabled")
+        # Drop-zone copy reset to its idle prompt.
+        idle_text = app.dz_text.configure.call_args.kwargs["text"]
+        assert "Click to select files" in idle_text or "Drop Excel" in idle_text
+
+    def test_scheduled_run_does_not_clear_interactive_queue(self):
+        from gui.app import BOTExrateApp
+
+        # A scheduled fire uses its own snapshot; completing it must not wipe the
+        # user's pending interactive selection in self.file_queue.
+        app = _make_app(batch_running=True, file_queue=["pending.xlsx"])
+        app._scheduled_run_active = True
+        app._render_failed_files = MagicMock()
+        app._announce_scheduled_run = MagicMock()
+
+        BOTExrateApp._show_batch_complete(app, success=1, fail=0, errors=[])
+
+        assert app.file_queue == ["pending.xlsx"]
+
+
+# ---------------------------------------------------------------------------
+# round-6 #4 — a dry run reports SIMULATION and never offers a reveal
+# ---------------------------------------------------------------------------
+
+class TestDryRunCompletionCopy:
+    def test_dry_run_reports_simulation_and_suppresses_reveal(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(batch_running=True, file_queue=["a.xlsx", "b.xlsx"])
+        app._render_failed_files = MagicMock()
+
+        BOTExrateApp._show_batch_complete(
+            app, success=2, fail=0, errors=[], dry_run=True,
+        )
+
+        # Compare against the i18n-rendered string for the active language so
+        # the assertion survives a Thai/English toggle rather than pinning a
+        # raw English literal (the simulation copy now routes through tr()).
+        from core.i18n import plural, tr
+
+        status = app.lbl_status.configure.call_args.kwargs["text"]
+        assert status == tr(
+            "main.status_simulation", count=2, plural=plural(2),
+        )
+        # No reveal of an unmodified file, and the queue is NOT cleared (nothing
+        # was processed — the operator may still want to run for real).
+        app.btn_reveal.pack.assert_not_called()
+        app.btn_reveal.pack_forget.assert_called()
+        assert app.file_queue == ["a.xlsx", "b.xlsx"]
+
+
+# ---------------------------------------------------------------------------
+# round-6 #7 — the progress bar pulses during the first-file network wait
+# ---------------------------------------------------------------------------
+
+class TestProgressPulseDuringFetch:
+    def test_lock_starts_indeterminate_pulse(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(batch_running=False)
+        BOTExrateApp._lock_ui_for_batch(app)
+
+        # Bar switched to indeterminate AND animated so it never looks frozen.
+        app.progressbar.configure.assert_any_call(mode="indeterminate")
+        app.progressbar.start.assert_called_once()
+
+    def test_first_progress_event_settles_to_determinate(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(batch_running=True)
+        BOTExrateApp._update_progress(app, idx=1, total=3, fname="a.xlsx", error=None)
+
+        # Pulse stopped, mode flipped back to determinate, real fraction set.
+        app.progressbar.stop.assert_called_once()
+        app.progressbar.configure.assert_any_call(mode="determinate")
+        app.progressbar.set.assert_called_with(1 / 3)
+
+
+# ---------------------------------------------------------------------------
+# engine-preflight seam — selection-time feedback for oversized/locked files
+# ---------------------------------------------------------------------------
+
+class TestPreflightWarnSeam:
+    """The engine exposed LedgerEngine.preflight_file for selection-time
+    feedback; these lock in that _preflight_warn actually wires it into the
+    drop/browse path so an oversized or locked file is flagged immediately
+    rather than only failing mid-run."""
+
+    def _app(self):
+        from gui.app import BOTExrateApp
+
+        app = SimpleNamespace()
+        app._preflight_warn = lambda files: BOTExrateApp._preflight_warn(app, files)
+        return app
+
+    def test_oversized_file_triggers_warning(self, tmp_path):
+        from core.engine import LedgerEngine
+        from gui.app import BOTExrateApp
+
+        big = tmp_path / "big.xlsx"
+        big.write_bytes(b"\0" * (LedgerEngine.MAX_FILE_BYTES + 1))
+
+        app = self._app()
+        with pytest.MonkeyPatch.context() as mp:
+            warn = MagicMock()
+            mp.setattr("gui.app.messagebox.showwarning", warn)
+            BOTExrateApp._preflight_warn(app, [str(big)])
+
+        warn.assert_called_once()
+        body = warn.call_args.args[1]
+        assert "big.xlsx" in body
+
+    def test_healthy_file_no_warning(self, tmp_path):
+        from gui.app import BOTExrateApp
+
+        # A small, writable .xlsx is fine — preflight must stay silent.
+        ok = tmp_path / "ok.xlsx"
+        ok.write_bytes(b"\0" * 1024)
+
+        app = self._app()
+        with pytest.MonkeyPatch.context() as mp:
+            warn = MagicMock()
+            mp.setattr("gui.app.messagebox.showwarning", warn)
+            BOTExrateApp._preflight_warn(app, [str(ok)])
+
+        warn.assert_not_called()
+
+    def test_unsupported_extension_not_double_warned(self, tmp_path):
+        """_on_drop already warns about unsupported extensions via
+        resolve_excel_files; _preflight_warn must not duplicate it."""
+        from gui.app import BOTExrateApp
+
+        bad = tmp_path / "ledger.txt"
+        bad.write_bytes(b"\0" * 1024)
+
+        app = self._app()
+        with pytest.MonkeyPatch.context() as mp:
+            warn = MagicMock()
+            mp.setattr("gui.app.messagebox.showwarning", warn)
+            BOTExrateApp._preflight_warn(app, [str(bad)])
+
+        warn.assert_not_called()
+
+    def test_on_drop_runs_preflight_before_set_queue(self, tmp_path):
+        """The drop path must call _preflight_warn on the resolved Excel files
+        and still populate the queue (advisory, non-blocking)."""
+        from gui.app import BOTExrateApp
+
+        f = tmp_path / "a.xlsx"
+        f.write_bytes(b"\0" * 1024)
+
+        order = []
+        app = SimpleNamespace(_batch_running=False)
+        app._preflight_warn = lambda files: order.append(("preflight", list(files)))
+        app._set_queue = lambda files: order.append(("set_queue", list(files)))
+
+        event = SimpleNamespace(data=str(f))
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gui.app.parse_drop_data", lambda data, tk_root=None: [str(f)]
+            )
+            mp.setattr(
+                "gui.app.resolve_excel_files",
+                lambda paths, collect_rejected=False: ([str(f)], []),
+            )
+            BOTExrateApp._on_drop(app, event)
+
+        assert order == [
+            ("preflight", [str(f)]),
+            ("set_queue", [str(f)]),
+        ]
+
+    def test_probe_error_does_not_block_selection(self, tmp_path):
+        """A probe blowing up must never stop the file from being queued."""
+        from gui.app import BOTExrateApp
+
+        f = tmp_path / "a.xlsx"
+        f.write_bytes(b"\0" * 1024)
+
+        app = self._app()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "core.engine.LedgerEngine.preflight_file",
+                MagicMock(side_effect=RuntimeError("boom")),
+            )
+            warn = MagicMock()
+            mp.setattr("gui.app.messagebox.showwarning", warn)
+            # Must not raise.
+            BOTExrateApp._preflight_warn(app, [str(f)])
+
+        warn.assert_not_called()

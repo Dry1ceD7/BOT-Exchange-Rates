@@ -34,6 +34,7 @@ import customtkinter as ctk
 
 from core.backup_manager import BackupManager
 from core.config_manager import SettingsManager
+from core.i18n import plural, tr
 from core.version import __version__ as APP_VERSION
 from core.workers.event_bus import EventBus
 from gui.handlers import BatchHandler
@@ -132,7 +133,14 @@ class BOTExrateApp(ctk.CTk):
         super().__init__()
 
         self.title(f"BOT Exchange Rate Processor  |  V{APP_VERSION}")
-        self.geometry("740x960")
+        # A 960px-tall default overflows a 1366x768 legacy laptop (title bar +
+        # taskbar push the footer/console off-screen). Cap the default height to
+        # the usable screen height and give the window a hard floor so dragging
+        # the bottom edge up can't collapse the card/console into a sliver (#6).
+        self._win_width = 740
+        self._win_height = self._fit_default_height(960)
+        self.geometry(f"{self._win_width}x{self._win_height}")
+        self.minsize(740, 640)
         self.resizable(False, True)
         self.configure(fg_color=_get_colors()["bg"])
 
@@ -157,6 +165,11 @@ class BOTExrateApp(ctk.CTk):
         # to avoid two threads touching the same .xlsx (#3). Set in
         # _on_revert_click, cleared on every revert terminal path.
         self._revert_running = False
+        # True while the standalone ExRate worker (exrate_dialog) is in flight.
+        # The dialog only re-enables btn_export_exrate itself, so app.py owns the
+        # symmetric lock on Process/Revert and polls the export button's state to
+        # release them when the worker finishes (round-6 finding #1).
+        self._exrate_running = False
         # Holds the always-visible "Failed files" summary box, built lazily on
         # the first batch that reports failures (#2).
         self._failed_box = None
@@ -170,11 +183,13 @@ class BOTExrateApp(ctk.CTk):
             self, event_bus=self.event_bus, registry=self.thread_registry,
         )
 
-        # Center window
+        # Center window using the fitted height (#6) so the offset is computed
+        # against the actual window size, never a hardcoded 960 that pushed the
+        # window off the top of a short screen.
         self.update_idletasks()
-        w, h = 740, 960
+        w, h = self._win_width, self._win_height
         sx = (self.winfo_screenwidth() - w) // 2
-        sy = (self.winfo_screenheight() - h) // 2
+        sy = max(0, (self.winfo_screenheight() - h) // 2)
         self.geometry(f"{w}x{h}+{sx}+{sy}")
 
         # DnD injection
@@ -209,6 +224,20 @@ class BOTExrateApp(ctk.CTk):
         from gui.panels.tray_manager import TrayManager
         self._tray = TrayManager(self)
         self._tray.setup()
+
+    def _fit_default_height(self, desired: int) -> int:
+        """Clamp the desired window height to what fits on the current screen (#6).
+
+        Reserves ~80px for the title bar + taskbar and never returns less than
+        the 640px minimum the window can usefully render at, so the footer and
+        live console stay on-screen on a 1366x768 legacy laptop.
+        """
+        try:
+            screen_h = self.winfo_screenheight()
+        except (RuntimeError, tkinter.TclError):
+            return desired
+        usable = max(640, screen_h - 80)
+        return min(desired, usable)
 
     def _set_app_icon(self):
         """Load and set the application window icon (works in source + frozen mode)."""
@@ -272,7 +301,7 @@ class BOTExrateApp(ctk.CTk):
         inner.pack(pady=(10, 8))
 
         self.lbl_header_title = ctk.CTkLabel(
-            inner, text="Bank of Thailand  —  Ledger Processor",
+            inner, text=tr("main.header_title"),
             font=ctk.CTkFont(size=22, weight="bold"), text_color=t["header_text"]
         )
         self.lbl_header_title.pack()
@@ -280,14 +309,14 @@ class BOTExrateApp(ctk.CTk):
         sub_row = ctk.CTkFrame(inner, fg_color="transparent")
         sub_row.pack(pady=(2, 0))
         self.lbl_header_sub = ctk.CTkLabel(
-            sub_row, text="Enterprise Desktop Edition",
+            sub_row, text=tr("main.header_sub"),
             font=ctk.CTkFont(size=11), text_color=t["header_sub"]
         )
         self.lbl_header_sub.pack(side="left")
 
         # Settings button — visible, proper button styling
         self._btn_settings = ctk.CTkButton(
-            sub_row, text="⚙  Settings", width=90, height=26,
+            sub_row, text=tr("main.settings_btn"), width=90, height=26,
             fg_color=t["settings_btn"], hover_color=t["settings_btn_hover"],
             text_color=t["settings_btn_text"],
             font=ctk.CTkFont(size=11, weight="bold"), corner_radius=6,
@@ -332,7 +361,7 @@ class BOTExrateApp(ctk.CTk):
 
         # ── 1. DATE SECTION ──────────────────────────────────────────────
         self.lbl_date_section = ctk.CTkLabel(
-            self.card, text="RATE EXTRACTION DATE",
+            self.card, text=tr("main.date_section"),
             font=ctk.CTkFont(size=12, weight="bold"), text_color=t["text_secondary"]
         )
         self.lbl_date_section.pack(pady=(20, 0))
@@ -343,7 +372,7 @@ class BOTExrateApp(ctk.CTk):
 
         self.auto_detect_var = ctk.StringVar(value="on")
         self.toggle_auto = ctk.CTkSwitch(
-            auto_row, text="  Auto-Detect Date Range from Ledger",
+            auto_row, text=tr("main.auto_detect_toggle"),
             variable=self.auto_detect_var, onvalue="on", offvalue="off",
             command=self._on_auto_detect_changed,
             font=ctk.CTkFont(size=13, weight="bold"), text_color=t["text_primary"],
@@ -356,7 +385,7 @@ class BOTExrateApp(ctk.CTk):
 
         self.lbl_auto_hint = ctk.CTkLabel(
             self.card,
-            text="Start date will be read from your Excel files automatically.",
+            text=tr("main.auto_hint"),
             font=ctk.CTkFont(size=11), text_color=t["trust_blue"]
         )
         self.lbl_auto_hint.pack(pady=(4, 4))
@@ -371,7 +400,7 @@ class BOTExrateApp(ctk.CTk):
 
         self.use_today_var = ctk.StringVar(value="on")
         self.toggle_today = ctk.CTkSwitch(
-            toggle_row, text="  Use Today's Date",
+            toggle_row, text=tr("main.use_today_toggle"),
             variable=self.use_today_var, onvalue="on", offvalue="off",
             command=self._on_toggle_changed,
             font=ctk.CTkFont(size=12), text_color=t["text_secondary"],
@@ -382,7 +411,7 @@ class BOTExrateApp(ctk.CTk):
 
         self.lbl_toggle_hint = ctk.CTkLabel(
             self.manual_date_frame,
-            text=f"Rates will be extracted up to: {date.today().strftime('%d %b %Y')}",
+            text=tr("main.today_hint", date=date.today().strftime("%d %b %Y")),
             font=ctk.CTkFont(size=11), text_color=t["success"]
         )
         self.lbl_toggle_hint.pack(pady=(4, 4))
@@ -393,14 +422,14 @@ class BOTExrateApp(ctk.CTk):
         current_year = date.today().year
         self._combo_widgets = []
 
-        for label_text, width, values, default, attr in [
-            ("Year",  100, [str(y) for y in range(2020, current_year + 1)], "2025", "combo_year"),
-            ("Month",  80, [f"{m:02d}" for m in range(1, 13)],              "01",   "combo_month"),
-            ("Day",    80, [f"{d:02d}" for d in range(1, 32)],              "01",   "combo_day"),
+        for label_key, width, values, default, attr in [
+            ("main.label_year",  100, [str(y) for y in range(2020, current_year + 1)], "2025", "combo_year"),
+            ("main.label_month",  80, [f"{m:02d}" for m in range(1, 13)],              "01",   "combo_month"),
+            ("main.label_day",    80, [f"{d:02d}" for d in range(1, 32)],              "01",   "combo_day"),
         ]:
             grp = ctk.CTkFrame(date_row, fg_color="transparent")
             grp.pack(side="left", padx=8)
-            ctk.CTkLabel(grp, text=label_text.upper(),
+            ctk.CTkLabel(grp, text=tr(label_key).upper(),
                          font=ctk.CTkFont(size=10, weight="bold"),
                          text_color=t["text_secondary"]).pack()
             combo = ctk.CTkComboBox(
@@ -422,7 +451,7 @@ class BOTExrateApp(ctk.CTk):
 
         # ── 2. DROP ZONE ─────────────────────────────────────────────────
         self.lbl_input_section = ctk.CTkLabel(
-            self.card, text="LEDGER INPUT",
+            self.card, text=tr("main.input_section"),
             font=ctk.CTkFont(size=12, weight="bold"), text_color=t["text_secondary"]
         )
         self.lbl_input_section.pack(pady=(14, 0))
@@ -437,13 +466,16 @@ class BOTExrateApp(ctk.CTk):
         dz_inner = ctk.CTkFrame(self.drop_zone, fg_color="transparent")
         dz_inner.place(relx=0.5, rely=0.5, anchor="center")
 
-        dnd_hint = "Drop Excel files or folders here" if self.dnd_enabled else "Click to select files"
+        dnd_hint = (
+            tr("main.drop_hint_dnd") if self.dnd_enabled
+            else tr("main.drop_hint_click")
+        )
         self.dz_text = ctk.CTkLabel(
             dz_inner, text=dnd_hint,
             font=ctk.CTkFont(size=14, weight="bold"), text_color=t["text_secondary"]
         )
         self.dz_text.pack()
-        self.dz_sub = ctk.CTkLabel(dz_inner, text="or click to browse",
+        self.dz_sub = ctk.CTkLabel(dz_inner, text=tr("main.drop_sub"),
                                     font=ctk.CTkFont(size=11), text_color=t["text_muted"])
         self.dz_sub.pack(pady=(2, 0))
 
@@ -479,7 +511,7 @@ class BOTExrateApp(ctk.CTk):
         btn_row.pack(pady=(16, 0))
 
         self.btn_process = ctk.CTkButton(
-            btn_row, text="Process Batch",
+            btn_row, text=tr("main.btn_process"),
             height=48, width=240,
             fg_color=t["trust_blue"], hover_color=t["blue_hover"],
             font=ctk.CTkFont(size=15, weight="bold"),
@@ -488,7 +520,7 @@ class BOTExrateApp(ctk.CTk):
         self.btn_process.pack(side="left", padx=(0, 12))
 
         self.btn_revert = ctk.CTkButton(
-            btn_row, text="Revert Previous Edit",
+            btn_row, text=tr("main.btn_revert"),
             height=48, width=200,
             fg_color=t["revert_bg"], hover_color=t["revert_hover"],
             font=ctk.CTkFont(size=14, weight="bold"),
@@ -496,11 +528,23 @@ class BOTExrateApp(ctk.CTk):
         )
         self.btn_revert.pack(side="left", padx=(0, 12))
 
+        # Browse all timestamped backups (not just the latest) so the operator
+        # can restore an EARLIER good copy — turns the backup store into a
+        # user-facing undo history rather than a hidden, latest-only revert.
+        self.btn_backups = ctk.CTkButton(
+            btn_row, text=tr("main.btn_backups"),
+            height=48, width=160,
+            fg_color=t["btn_secondary"], hover_color=t["btn_secondary_hover"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            corner_radius=10, command=self._open_backup_browser,
+        )
+        self.btn_backups.pack(side="left", padx=(0, 12))
+
         # ── v3.2.0: Dry-Run Simulation Toggle ────────────────────────
         sim_row = ctk.CTkFrame(self.card, fg_color="transparent")
         sim_row.pack(pady=(8, 0))
         self.toggle_dryrun = ctk.CTkSwitch(
-            sim_row, text="  Simulation Mode (Dry Run)",
+            sim_row, text=tr("main.dryrun_toggle"),
             variable=self._dry_run_var, onvalue="on", offvalue="off",
             font=ctk.CTkFont(size=11), text_color=t["text_secondary"],
             progress_color=t["warning"], button_color=t["switch_thumb"],
@@ -508,13 +552,13 @@ class BOTExrateApp(ctk.CTk):
         )
         self.toggle_dryrun.pack()
         self.lbl_dryrun_hint = ctk.CTkLabel(
-            sim_row, text="Preview changes in the Processing Log without modifying files.",
+            sim_row, text=tr("main.dryrun_hint"),
             font=ctk.CTkFont(size=10), text_color=t["text_muted"],
         )
         self.lbl_dryrun_hint.pack(pady=(2, 0))
 
         self.btn_export_exrate = ctk.CTkButton(
-            btn_row, text="ExRate Sheet",
+            btn_row, text=tr("main.btn_exrate"),
             height=48, width=160,
             fg_color=t["accent_indigo"], hover_color=t["accent_indigo_hover"],
             font=ctk.CTkFont(size=14, weight="bold"),
@@ -530,7 +574,7 @@ class BOTExrateApp(ctk.CTk):
         status_box.pack(pady=(16, 0), padx=50, fill="x", ipady=8)
 
         self.lbl_status = ctk.CTkLabel(
-            status_box, text="Status:  Ready  —  Backups enabled",
+            status_box, text=tr("main.status_ready"),
             font=ctk.CTkFont(size=13), text_color=t["text_secondary"]
         )
         self.lbl_status.pack(pady=(8, 4))
@@ -544,7 +588,7 @@ class BOTExrateApp(ctk.CTk):
 
         # ── 5. REVEAL BUTTON (hidden by default) ────────────────────────
         self.btn_reveal = ctk.CTkButton(
-            self.card, text="Show File in Folder",
+            self.card, text=tr("main.btn_reveal"),
             height=40, width=220,
             fg_color=t["warning"], hover_color=t["warning_hover"],
             font=ctk.CTkFont(size=13, weight="bold"),
@@ -569,12 +613,12 @@ class BOTExrateApp(ctk.CTk):
         if is_auto:
             self.manual_date_frame.pack_forget()
             self.lbl_auto_hint.configure(
-                text="Start date will be read from your Excel files automatically.",
+                text=tr("main.auto_hint"),
                 text_color=_get_colors()["trust_blue"]
             )
         else:
             self.lbl_auto_hint.configure(
-                text="Manual override — select a start date below.",
+                text=tr("main.manual_hint"),
                 text_color=_get_colors()["warning"]
             )
             # Show the manual section right after the auto-hint label
@@ -589,12 +633,15 @@ class BOTExrateApp(ctk.CTk):
         self._lock_date_dropdowns(locked=is_today)
         if is_today:
             self.lbl_toggle_hint.configure(
-                text=f"Rates will be extracted up to: {date.today().strftime('%d %b %Y')}",
+                text=tr(
+                    "main.today_hint",
+                    date=date.today().strftime("%d %b %Y"),
+                ),
                 text_color=_get_colors()["success"]
             )
         else:
             self.lbl_toggle_hint.configure(
-                text="Select a custom historical start date below.",
+                text=tr("main.custom_date_hint"),
                 text_color=_get_colors()["trust_blue"]
             )
 
@@ -610,9 +657,8 @@ class BOTExrateApp(ctk.CTk):
             datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError:
             messagebox.showerror(
-                "Invalid Date",
-                f"The selected date '{date_str}' is not valid.\n\n"
-                f"Please select a valid calendar date."
+                tr("main.invalid_date_title"),
+                tr("main.invalid_date_body", date=date_str),
             )
             return None
         return date_str
@@ -629,18 +675,22 @@ class BOTExrateApp(ctk.CTk):
         if rejected:
             names = ", ".join(Path(f).name for f in rejected)
             messagebox.showwarning(
-                "Format Warning",
-                f"These files use an unsupported format:\n{names}\n\n"
-                f"Please save them as .xlsx or .xlsm first."
+                tr("main.format_warning_title"),
+                tr("main.format_warning_body", names=names),
             )
         if excel_files:
+            self._preflight_warn(excel_files)
             self._set_queue(excel_files)
         elif rejected:
-            messagebox.showwarning("No Valid Files",
-                                   "No supported Excel files found.")
+            messagebox.showwarning(
+                tr("main.no_valid_files_title"),
+                tr("main.no_valid_files_unsupported"),
+            )
         else:
-            messagebox.showwarning("No Valid Files",
-                                   "No Excel files found in the dropped items.")
+            messagebox.showwarning(
+                tr("main.no_valid_files_title"),
+                tr("main.no_valid_files_empty"),
+            )
 
     def _browse_files(self):
         if self._batch_running:
@@ -654,7 +704,50 @@ class BOTExrateApp(ctk.CTk):
             ]
         )
         if paths:
-            self._set_queue(list(paths))
+            files = list(paths)
+            self._preflight_warn(files)
+            self._set_queue(files)
+
+    def _preflight_warn(self, files: list[str]):
+        """Selection-time pre-flight feedback for the engine seam.
+
+        Calls the side-effect-free ``LedgerEngine.preflight_file`` on each newly
+        selected/dropped file and, if any are oversized or locked, surfaces a
+        single warning immediately — instead of letting the operator discover
+        the failure only mid-run after the API fetch + backup. This is advisory:
+        the files still enter the queue and the run-time guard stays the
+        authoritative check, so a transient lock that clears before processing
+        is not falsely blocked.
+
+        Unsupported-extension and empty-drop cases are already handled upstream
+        in ``_on_drop`` (via ``resolve_excel_files``), so they are skipped here
+        to avoid a duplicate warning. ``preflight_file`` does no I/O beyond a
+        stat + a non-truncating write probe — safe to run on the UI thread.
+        """
+        from core.engine import LedgerEngine
+
+        reasons: list[str] = []
+        for path in files:
+            try:
+                report = LedgerEngine.preflight_file(path)
+            except Exception as exc:  # never let a probe error block selection
+                logger.debug("preflight_file failed for %s: %s", path, exc)
+                continue
+            # Skip the unsupported-extension case — _on_drop already warned.
+            if report["ok"] or not report["supported"]:
+                continue
+            reason = report.get("reason")
+            if reason:
+                reasons.append(reason)
+
+        if reasons:
+            messagebox.showwarning(
+                tr("main.preflight_warning_title"),
+                tr(
+                    "main.preflight_warning_body",
+                    reasons="\n".join(f"  - {r}" for r in reasons),
+                ),
+            )
 
     def _set_queue(self, files: list[str]):
         # A batch in flight owns the queue/selection — never mutate it or
@@ -670,9 +763,9 @@ class BOTExrateApp(ctk.CTk):
             self.dz_text.configure(text=Path(files[0]).name, text_color=_get_colors()["trust_blue"])
         else:
             self.dz_text.configure(text=f"{count} ledgers loaded", text_color=_get_colors()["trust_blue"])
-        self.dz_sub.configure(text="Click to change selection")
+        self.dz_sub.configure(text=tr("main.drop_change"))
         self.lbl_queue.configure(
-            text=f"Ready to process {count} ledger{'s' if count != 1 else ''}.",
+            text=tr("main.queue_ready", count=count, plural=plural(count)),
             text_color=_get_colors()["success"]
         )
         self.btn_process.configure(state="normal")
@@ -683,7 +776,7 @@ class BOTExrateApp(ctk.CTk):
         click/drop. Used by the drop zone / browse / queue guards (#1)."""
         if hasattr(self, "lbl_status"):
             self.lbl_status.configure(
-                text="Busy:  a batch is already running — please wait.",
+                text=tr("main.status_busy"),
                 text_color=_get_colors()["warning"],
             )
 
@@ -699,8 +792,12 @@ class BOTExrateApp(ctk.CTk):
         self.btn_revert.configure(state="disabled")
         self.btn_export_exrate.configure(state="disabled")
         self.btn_reveal.pack_forget()
-        self.progressbar.configure(mode="determinate")
-        self.progressbar.set(0)
+        # Pulse the bar during the unavoidable first-file network wait (prescan +
+        # two get_exchange_rates + holidays, each with tenacity retries) so the
+        # window doesn't look frozen at a dead 0% (#7). The first _update_progress
+        # call flips it back to determinate.
+        self.progressbar.configure(mode="indeterminate")
+        self.progressbar.start()
 
     def _unlock_ui_after_batch(self):
         """Re-enable the controls locked by _lock_ui_for_batch and clear the
@@ -711,7 +808,13 @@ class BOTExrateApp(ctk.CTk):
         self.btn_export_exrate.configure(state="normal")
 
     def _on_process_click(self):
-        if not self.file_queue or self._batch_running:
+        if not self.file_queue or self._batch_running or self._revert_running:
+            return
+        # An ExRate worker already owns the cache/API — don't spin a second
+        # engine over it (#1). The button is disabled while it runs, but guard
+        # in case a stray event slips through during the release window.
+        if self._exrate_running:
+            self._flash_busy_status()
             return
         # Snapshot the selection at click time so a selection change during
         # the background prescan can't desync what actually gets processed (#2).
@@ -778,8 +881,22 @@ class BOTExrateApp(ctk.CTk):
                 queue_snapshot, start_date_str, dry_run=dry_run,
             )
 
+    def _settle_progressbar(self, value: float):
+        """Stop any pulse animation and pin the bar to a determinate value (#7).
+
+        Idempotent: stop() on an already-stopped bar is a no-op, so this is safe
+        to call from the first _update_progress as well as the terminal paths."""
+        try:
+            self.progressbar.stop()
+        except (RuntimeError, tkinter.TclError) as e:
+            logger.debug("progressbar.stop() failed: %s", e)
+        self.progressbar.configure(mode="determinate")
+        self.progressbar.set(value)
+
     def _update_progress(self, idx: int, total: int, fname: str, error):
-        self.progressbar.set(idx / total)
+        # First progress event arrives once the first file's API fetch is done —
+        # leave the pulse behind and switch to a real determinate fraction (#7).
+        self._settle_progressbar(idx / total)
         if error:
             self.lbl_status.configure(
                 text=f"Warning:  {idx} of {total}  |  {fname} — skipped",
@@ -791,37 +908,106 @@ class BOTExrateApp(ctk.CTk):
                 text_color=_get_colors()["process_text"]
             )
 
-    def _show_batch_complete(self, success: int, fail: int, errors: list[str]):
-        self.progressbar.set(1)
+    def _show_batch_complete(
+        self, success: int, fail: int, errors: list[str], dry_run: bool = False,
+    ):
+        # Settle the pulse started in _lock_ui_for_batch and pin the bar full (#7).
+        self._settle_progressbar(1)
         # Capture whether this was a scheduler-fired run BEFORE unlock clears
         # nothing (it doesn't touch the flag) — done here so the notification
         # path below fires exactly once and only for scheduled runs (#1).
         was_scheduled = self._scheduled_run_active
         self._scheduled_run_active = False
         self._unlock_ui_after_batch()
+        if dry_run:
+            # A simulation wrote nothing — say so plainly, keep the dry-run
+            # warning colour, never offer a reveal of an unmodified file (#4).
+            self.lbl_status.configure(
+                text=tr(
+                    "main.status_simulation",
+                    count=success, plural=plural(success),
+                ),
+                text_color=_get_colors()["warning"],
+            )
+            self._render_failed_files(errors or [])
+            self.btn_reveal.pack_forget()
+            self.update_idletasks()
+            return
         if fail == 0:
             self.lbl_status.configure(
-                text=f"Complete:  All {success} ledger{'s' if success != 1 else ''} processed successfully.",
+                text=tr(
+                    "main.status_complete_all",
+                    count=success, plural=plural(success),
+                ),
                 text_color=_get_colors()["success"]
             )
             self._render_failed_files([])
         else:
             self.lbl_status.configure(
-                text=f"Complete:  {success} succeeded, {fail} failed.  See failed files below.",
+                text=tr(
+                    "main.status_complete_partial",
+                    success=success, fail=fail,
+                ),
                 text_color=_get_colors()["warning"]
             )
             # Surface WHICH files failed and WHY so the operator can act on
             # them — the bare count alone hides actionable detail (#2).
             self._render_failed_files(errors or [])
-        if self.file_queue:
-            self.last_processed_path = self.file_queue[-1]
+        # Only reveal a file that was ACTUALLY written. The reveal must never
+        # point at the last queued file when that file failed/was skipped (#2),
+        # so resolve the last SUCCEEDING path from the queue minus the failures.
+        revealable = self._last_succeeded_path(errors)
+        if revealable is not None:
+            self.last_processed_path = revealable
             self.btn_reveal.pack(pady=(12, 14))
+        else:
+            self.last_processed_path = None
+            self.btn_reveal.pack_forget()
+        # Clear the processed queue so a stray second click can't silently
+        # reprocess the same files (fresh backups + re-injected formulas). The
+        # operator must make a new selection before Process Batch re-enables (#3).
+        # Only for a MANUAL run — a scheduled fire uses its own file snapshot and
+        # must not wipe the user's pending interactive selection.
+        if success > 0 and not was_scheduled:
+            self._reset_queue_after_run()
         # A scheduler-fired run may have completed while minimised to the tray;
         # surface the outcome so it is never invisible (#1).
         if was_scheduled:
             self._announce_scheduled_run(success, fail)
         # Force UI refresh so the user sees the updated state immediately
         self.update_idletasks()
+
+    def _last_succeeded_path(self, errors: list[str]) -> str | None:
+        """Return the last file in the queue that did NOT fail this batch (#2).
+
+        Engine failure entries are ``"<filename>: <reason>"`` strings, so the
+        failed set is the basenames before the first ``": "``. We walk the queue
+        in reverse and return the first path whose basename isn't in that set —
+        the freshly-written file the reveal button should open. None when every
+        queued file failed (or the queue is empty)."""
+        if not self.file_queue:
+            return None
+        failed_names = {
+            entry.split(":", 1)[0].strip() for entry in (errors or []) if entry
+        }
+        for path in reversed(self.file_queue):
+            if Path(path).name not in failed_names:
+                return path
+        return None
+
+    def _reset_queue_after_run(self):
+        """Clear the queue + reset the drop zone to its idle prompt and disable
+        Process Batch so a fresh selection is required before another run (#3)."""
+        self.file_queue = []
+        t = _get_colors()
+        idle = (
+            tr("main.drop_hint_dnd")
+            if self.dnd_enabled else tr("main.drop_hint_click")
+        )
+        self.dz_text.configure(text=idle, text_color=t["text_secondary"])
+        self.dz_sub.configure(text=tr("main.drop_sub"))
+        self.lbl_queue.configure(text="", text_color=t["text_secondary"])
+        self.btn_process.configure(state="disabled")
 
     def _announce_scheduled_run(self, success: int, fail: int) -> None:
         """Surface the outcome of a scheduler-fired batch (#1).
@@ -897,7 +1083,7 @@ class BOTExrateApp(ctk.CTk):
         box.pack(pady=(8, 0), padx=50, fill="x")
         ctk.CTkLabel(
             box,
-            text=f"Failed files ({len(errors)}) — fix and re-run:",
+            text=tr("main.failed_files_header", count=len(errors)),
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=t["error_text"],
             anchor="w",
@@ -916,7 +1102,8 @@ class BOTExrateApp(ctk.CTk):
         self._failed_box = box
 
     def _show_error(self, msg: str):
-        self.progressbar.set(0)
+        # Settle the pulse (#7) before showing the error at a dead-zero bar.
+        self._settle_progressbar(0)
         self.lbl_status.configure(text=f"Error:  {msg}", text_color=_get_colors()["error_text"])
         # A scheduler-fired run that errored out (e.g. network down overnight)
         # must still surface — otherwise the failure is invisible (#1).
@@ -957,20 +1144,118 @@ class BOTExrateApp(ctk.CTk):
     #  EXRATE SHEET — delegated to gui/panels/exrate_dialog.py
     # ================================================================== #
     def _on_export_exrate(self):
-        """Show an options dialog for creating a new ExRate sheet."""
+        """Show an options dialog for creating a new ExRate sheet.
+
+        Symmetric concurrency guard (#1): a batch or a revert already owns the
+        cache/API, so refuse to spin up a second engine + asyncio loop. While the
+        ExRate worker runs, lock Process/Revert (the dialog only toggles
+        btn_export_exrate itself) and poll that button's state to release them
+        once the worker re-enables it on completion."""
+        if self._batch_running or self._revert_running or self._exrate_running:
+            self._flash_busy_status()
+            return
+        self._exrate_running = True
+        self.btn_process.configure(state="disabled")
+        self.btn_revert.configure(state="disabled")
         from gui.panels.exrate_dialog import show_exrate_dialog
         show_exrate_dialog(self)
+        # The dialog may be cancelled at the file picker (no worker spawned), in
+        # which case btn_export_exrate is never disabled — poll handles both: it
+        # releases the lock as soon as the export button is back to "normal".
+        self._poll_exrate_done()
+
+    def _poll_exrate_done(self):
+        """Release the Process/Revert lock once the ExRate flow has finished (#1).
+
+        The standalone ExRate path lives in exrate_dialog: the options dialog
+        holds a grab while the user configures it, then a background worker
+        disables btn_export_exrate for the duration of the API+save. We hold the
+        sibling lock while EITHER is in progress:
+          * the dialog still holds the grab (user configuring), OR
+          * btn_export_exrate is disabled (worker running).
+        When neither is true the flow is over (created OR cancelled), so the
+        sibling buttons are released. Polls via after() — never blocks Tk."""
+        if not self._exrate_running:
+            return
+        dialog_open = False
+        try:
+            dialog_open = self.grab_current() not in (None, self)
+        except (RuntimeError, tkinter.TclError):
+            dialog_open = False
+        try:
+            worker_busy = str(self.btn_export_exrate.cget("state")) == "disabled"
+        except (RuntimeError, tkinter.TclError):
+            worker_busy = False
+        if dialog_open or worker_busy:
+            # Still configuring or still writing — re-check shortly without
+            # touching the network or blocking the Tk thread.
+            self.after(150, self._poll_exrate_done)
+            return
+        self._exrate_running = False
+        # Only re-enable Process if there is something queued to process; the
+        # idle-state contract (#3) keeps it disabled until a selection exists.
+        self.btn_process.configure(
+            state="normal" if self.file_queue else "disabled"
+        )
+        self.btn_revert.configure(state="normal")
 
     # ================================================================== #
     #  REVERT
     # ================================================================== #
     def _on_revert_click(self):
-        """Opens a file dialog to select the file to revert, then restores it."""
-        path = filedialog.askopenfilename(
-            title="Select the file to revert",
-            filetypes=[("Excel workbooks", "*.xlsx")]
-        )
+        """Pick a ledger and restore its latest backup — after confirmation.
+
+        Guides the operator (#5): the picker defaults to the just-processed
+        file's folder, .xlsm files the app fully supports are selectable (#8),
+        and before anything is overwritten a confirmation names the file AND the
+        backup timestamp it will be restored from. Refuses to run while a batch,
+        another revert, or the ExRate worker holds the cache/file (#1, #3)."""
+        if self._batch_running or self._revert_running or self._exrate_running:
+            self._flash_busy_status()
+            return
+        # Default the picker to the folder/file of the most recently processed
+        # ledger so the operator lands on the file they likely want to undo (#5).
+        dialog_kwargs = {
+            "title": "Select the file to revert",
+            # .xlsm is accepted everywhere else in the app — don't hide the very
+            # macro-enabled ledger the operator needs to restore (#8).
+            "filetypes": [
+                ("Excel workbooks", "*.xlsx *.xlsm"),
+                ("All files", "*.*"),
+            ],
+        }
+        last = self.last_processed_path
+        if last and Path(last).exists():
+            dialog_kwargs["initialdir"] = str(Path(last).parent)
+            dialog_kwargs["initialfile"] = Path(last).name
+        path = filedialog.askopenfilename(**dialog_kwargs)
         if not path:
+            return
+
+        # Look up the available backups FIRST so the confirmation can name the
+        # exact backup (and timestamp) that will overwrite the live file (#5).
+        try:
+            backups = self.backup_mgr.list_backups(path)
+        except (OSError, ValueError) as e:
+            logger.debug("list_backups failed for %s: %s", path, e)
+            backups = []
+        if not backups:
+            messagebox.showwarning(
+                "No Backup Found",
+                f"No backup exists for '{Path(path).name}'.\n\n"
+                f"A file must have been processed at least once to have a "
+                f"backup to restore from.",
+            )
+            return
+        latest_backup = backups[0]
+        ts = self.backup_mgr._parse_backup_timestamp(latest_backup)
+        when = ts.strftime("%d %b %Y %H:%M") if ts is not None else "the latest backup"
+        if not messagebox.askyesno(
+            "Confirm Revert",
+            f"Restore '{Path(path).name}' from backup dated {when}?\n\n"
+            f"This OVERWRITES the current file with the backup. The current "
+            f"version is snapshotted first (.pre-revert) so this is recoverable.",
+        ):
             return
 
         # Raise the busy flag BEFORE spawning the worker so a scheduler fire
@@ -1010,6 +1295,20 @@ class BOTExrateApp(ctk.CTk):
         self.lbl_status.configure(text=f"Error:  {msg}", text_color=_get_colors()["error_text"])
         self.btn_revert.configure(state="normal")
         self.btn_process.configure(state="normal")
+
+    def _open_backup_browser(self):
+        """Open the Backup Browser so the operator can restore a SPECIFIC
+        timestamped backup, not only the most recent one.
+
+        Refuses while a batch, another revert, or the ExRate worker holds the
+        cache/file (#1, #3): the browser's own restore reuses the revert busy
+        flag and the same _show_revert_success/_error callbacks, so two threads
+        must never touch one .xlsx."""
+        if self._batch_running or self._revert_running or self._exrate_running:
+            self._flash_busy_status()
+            return
+        from gui.panels.backup_browser import show_backup_browser
+        show_backup_browser(self)
 
     # ================================================================== #
     #  FILE REVEAL
@@ -1076,7 +1375,13 @@ class BOTExrateApp(ctk.CTk):
     # ================================================================== #
     #  V3.1.0: AUTO-SCHEDULER CALLBACKS
     # ================================================================== #
-    def _on_scheduler_start(self, time_str: str, paths: list):
+    def _on_scheduler_start(
+        self,
+        time_str: str,
+        paths: list,
+        skip_weekends: bool = False,
+        skip_holidays: bool = False,
+    ):
         """Start or update the background scheduler."""
         from core.scheduler import AutoScheduler
         if not hasattr(self, "_auto_scheduler"):
@@ -1107,8 +1412,13 @@ class BOTExrateApp(ctk.CTk):
             time_str=time_str,
             watch_paths=paths,
             callback=_scheduler_callback,
+            skip_weekends=skip_weekends,
+            skip_holidays=skip_holidays,
         )
-        logger.info("Scheduler started: %s, %d paths", time_str, len(paths))
+        logger.info(
+            "Scheduler started: %s, %d paths, skip_weekends=%s, skip_holidays=%s",
+            time_str, len(paths), skip_weekends, skip_holidays,
+        )
 
     def _begin_scheduled_batch(self, scheduled: list[str], start_str: str):
         """UI-thread entry point for a scheduler-fired batch (#3).
