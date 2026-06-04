@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.dynamic]
@@ -14,6 +14,8 @@ dynamic = ["version"]
 description = "BOT Exchange Rate Processor — Enterprise Desktop Application"
 requires-python = ">=3.12"
 readme = "README.md"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
 dependencies = [
     "customtkinter>=5.2.2",
     "openpyxl>=3.1.5",
@@ -25,14 +27,15 @@ dependencies = [
     "packaging>=24.0",
     "keyring>=25.7.0",
     "pystray>=0.19.5; sys_platform == 'win32'",
-    "Pillow>=10.0.0; sys_platform == 'win32'",
+    "Pillow>=12.2.0; sys_platform == 'win32'",
     "sentry-sdk>=2.5.1",
 ]
 
 [dependency-groups]
 dev = [
     "ruff>=0.15.0",
-    "pytest>=8.0.0",
+    "pytest>=9.0.0",
+    "pip-audit>=2.7.0",
 ]
 
 [tool.ruff]
@@ -41,7 +44,7 @@ line-length = 120
 exclude = ["scripts/", "data/", ".venv/"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "SIM", "PTH"]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "PTH", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 # PTH (pathlib) is enforced on all production code (core/, gui/, main.py).
@@ -50,7 +53,11 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "PTH"]
 # on os.path-derived strings. Converting them adds churn and risk of altering
 # assertion semantics (e.g. os.path.basename vs Path.name on trailing-sep
 # paths) with zero runtime benefit. Production behavior is unchanged.
-"tests/**" = ["PTH"]
+"tests/**" = ["PTH", "S101", "S105", "S106", "S108"]
+# S101 (assert) is the idiom pytest is built on. S105/S106 (hardcoded
+# "password" strings/args) are dummy tokens in fixtures, never real secrets.
+# S108 (hardcoded /tmp paths) appears in throwaway temp-path fixtures. None of
+# these run on the featherweight target; flagging them adds pure noise.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

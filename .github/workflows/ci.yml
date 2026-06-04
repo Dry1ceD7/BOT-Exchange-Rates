@@ -10,10 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
 
       - name: Install Python 3.12
         run: uv python install 3.12
@@ -28,15 +28,19 @@ jobs:
         run: uv run pytest tests/
 
   security-audit:
-    name: Dependency Audit (non-blocking)
+    name: Dependency Audit
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
+
+      # Audit the locked project environment (not an ephemeral uvx env).
+      # Blocking: a vulnerable transitive/runtime pin fails CI.
+      - name: Sync dependencies (incl. dev)
+        run: uv sync --dev
 
       - name: pip-audit
-        run: uvx pip-audit
+        run: uv run pip-audit

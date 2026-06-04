@@ -3,3 +3,4 @@
 
 ruff>=0.15.0
 pytest>=9.0.0
+pip-audit>=2.7.0
