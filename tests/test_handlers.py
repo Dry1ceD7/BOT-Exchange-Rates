@@ -158,6 +158,10 @@ class TestAuditLogSurfacing:
         """Drive _run_batch with a fake engine that mimics process_batch."""
         import gui.handlers as handlers_mod
 
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
         class FakeEngine:
             def __init__(self, *a, **k):
                 self.last_audit_path = audit_path
@@ -165,6 +169,9 @@ class TestAuditLogSurfacing:
             async def process_batch(self, *a, **k):
                 return (1, 0, [])
 
+        # BOTClient reads tokens from the keychain/.env at construction;
+        # CI has none, so stub it out alongside the engine.
+        monkeypatch.setattr(handlers_mod, "BOTClient", FakeClient)
         monkeypatch.setattr(handlers_mod, "LedgerEngine", FakeEngine)
         asyncio.run(handler._run_batch(["a.xlsx"], "2025-01-01"))
 
