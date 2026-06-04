@@ -4,7 +4,7 @@
 
 **Enterprise Desktop Application for Bank of Thailand Exchange Rate Automation**
 
-Version 3.2.8  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
+Version 3.3.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
@@ -19,6 +19,19 @@ Version 3.2.8  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Rele
 The **BOT Exchange Rate Processor** is a standalone desktop application that automates the extraction, resolution, and embedding of official Bank of Thailand (BOT) exchange rates into financial accounting ledgers (`.xlsx`).
 
 It replaces a fragmented, error-prone multi-script workflow with a single, production-grade GUI application — built for **zero-downtime corporate environments**, legacy office hardware (4GB RAM, low-resolution monitors), and strict Thai accounting compliance.
+
+### What's New in V3.3.0 (Security Hardening & Engine Decomposition)
+
+| Feature | Description |
+|---------|-------------|
+| **IPC Hardening** | Single-instance IPC channel rebuilt on JSON + nonce/HMAC — removed pickle deserialization (RCE class) from the socket path. |
+| **Updater Integrity** | Self-update now enforces a GitHub-only SSRF allowlist and mandatory SHA-256 verification of every downloaded installer. |
+| **Token-Leak Closure** | API tokens can no longer reach logs: retry `before_sleep` logs only exception class + wait time, backed by a runtime redaction filter. |
+| **Mathematical Truth** | All write paths (including multi-currency custom ranges) quantize to 4dp `Decimal` — float contamination eliminated. |
+| **Engine Decomposition** | `engine.py` reduced to a cache-first orchestrator; write pipeline and standalone ExRate updater extracted to `core/exrate_updater.py` with a centralized disk-space guard (`core/workbook_io.py`). |
+| **SafePanel Lifecycle** | Shared `SafePanel` mixin guards every panel's `after()` scheduling against post-destroy callbacks (teardown crash class removed). |
+| **GUI Widget Test Lane** | New `tests/gui/` suite drives real CustomTkinter widgets behind a display-guarded fixture — suite grew 349 → 703 tests. |
+| **CI Quality Gate** | `ci.yml` runs ruff + full pytest on every push/PR plus a non-blocking `pip-audit` dependency scan. |
 
 ### What's New in V3.2.8 (Enterprise UI Stabilization & Core Architecture)
 - **MCP Build Warnings Resolved**: Fully suppressed PyInstaller warnings related to missing Model Context Protocol (MCP) telemetry modules (`mcp`, `fastmcp`, `mcp.server`, `pydantic_ai.mcp`) triggered by Sentry SDK integrations, ensuring a cleaner, production-ready build output.
@@ -248,7 +261,7 @@ Two GitHub Actions workflows:
 
 ```bash
 # To trigger a release:
-git tag v3.2.8
+git tag v3.3.0
 git push origin main --tags
 ```
 
@@ -280,6 +293,6 @@ This project is developed for internal enterprise use. All rights reserved.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.2.8*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.3.0*
 
 </div>
