@@ -120,13 +120,25 @@ def scan_sheet_headers(
             ]
             if target_cols["source_date"] in row_strs:
                 header_row_idx = row_idx
+                # Duplicate headers (e.g. two "EX Rate" columns) are resolved
+                # deterministically to the FIRST occurrence — never last-wins,
+                # which silently depends on column order. Warn so the operator
+                # can fix the sheet.
                 for ci, val in enumerate(row_strs):
-                    if val == target_cols["source_date"]:
-                        col_indices_local["source"] = ci
-                    elif val == target_cols["currency"]:
-                        col_indices_local["currency"] = ci
-                    elif val == target_cols["out_rate"]:
-                        col_indices_local["out_rate"] = ci
+                    for key, label in (
+                        ("source", target_cols["source_date"]),
+                        ("currency", target_cols["currency"]),
+                        ("out_rate", target_cols["out_rate"]),
+                    ):
+                        if val == label:
+                            if key in col_indices_local:
+                                logger.warning(
+                                    "Sheet '%s': duplicate '%s' header column "
+                                    "— using the first occurrence.",
+                                    sheet_name, label,
+                                )
+                            else:
+                                col_indices_local[key] = ci
                 break
 
         if header_row_idx is None or "source" not in col_indices_local:

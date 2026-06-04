@@ -26,7 +26,7 @@ from pathlib import Path
 
 import openpyxl
 
-from core.constants import MIN_DISK_SPACE_MB
+from core.constants import BACKUP_MAX_AGE_DAYS, MIN_DISK_SPACE_MB, bot_today
 from core.excel_io import (
     build_exrate_index,
     inject_xlookup_formulas,
@@ -39,6 +39,7 @@ from core.logic import (
     compute_year_start_date,
     safe_to_decimal,
 )
+from core.workbook_io import atomic_save as _atomic_save
 from core.workbook_io import ensure_disk_space
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,10 @@ class WorkbookWriter:
         except (OSError, openpyxl.utils.exceptions.InvalidFileException):
             raise
 
+        # try/finally guarantees the OS file handle is released and gc runs on
+        # BOTH the success and error exits (the standalone paths do the same).
+        # The previous except-and-reraise structure left the trailing
+        # gc.collect() unreachable on the error path.
         try:
             # Scan monthly tabs for header/column mappings
             sheet_maps = scan_sheet_headers(wb, self._engine.target_cols)
@@ -104,7 +109,7 @@ class WorkbookWriter:
                 rate_type=rate_type_setting,
             )
 
-            # ── Save & Cleanup ───────────────────────────────────────────
+            # ── Save ─────────────────────────────────────────────────────
             if dry_run:
                 self._engine._emit(
                     "[SIM] File NOT saved (dry run) "
@@ -113,26 +118,20 @@ class WorkbookWriter:
             else:
                 # ERR-03: Check disk space before saving
                 ensure_disk_space(Path(filepath).parent, MIN_DISK_SPACE_MB)
-                wb.save(filepath)
+                _atomic_save(wb, filepath)
                 logger.info(
                     "Overwritten in-place: %s",
                     Path(filepath).name,
                 )
-            wb.close()
+        finally:
+            # Release the file handle + reclaim memory on EVERY exit.
+            try:
+                wb.close()
+            except OSError:
+                logger.debug("Failed to close workbook (ledger write path)")
             del wb  # release file handle immediately
-            wb = None
-        except (OSError, ValueError, KeyError,
-                openpyxl.utils.exceptions.InvalidFileException):
-            # On ANY error, close the workbook to release the file lock
-            if wb is not None:
-                try:
-                    wb.close()
-                except OSError:
-                    logger.debug("Failed to close workbook during error handling")
-                del wb
-                wb = None
-            raise
-        gc.collect()
+            gc.collect()
+
         self._engine._emit("File saved and memory cleaned", etype="success")
         return filepath
 
@@ -189,6 +188,12 @@ class StandaloneExRateUpdater:
         if Path(filepath).exists():
             self._engine.backup.create_backup(filepath)
             _status("Backup created")
+            # Prune stale backups on the standalone path too — the engine only
+            # runs the 7-day cleanup inside process_batch, so without this the
+            # standalone updater would never reclaim old backup disk space.
+            self._engine.backup.cleanup_old_backups(
+                max_age_days=BACKUP_MAX_AGE_DAYS
+            )
 
         _status("Opening ExRate file...")
         wb = openpyxl.load_workbook(filepath)
@@ -215,17 +220,18 @@ class StandaloneExRateUpdater:
                     if parsed:
                         existing_dates.add(parsed)
 
-                target_year = min(existing_dates).year if existing_dates else date.today().year
+                target_year = min(existing_dates).year if existing_dates else bot_today().year
 
                 # Override with manual date_range if provided
                 if date_range:
                     dr_start, dr_end = date_range
                     target_year = dr_start.year
-                    all_target_dates = {dr_start, dr_end, date.today()}
+                    all_target_dates = {dr_start, dr_end, bot_today()}
                     start_date_str = f"{dr_start.year - 1}-12-20"
                 else:
+                    dr_start = dr_end = None
                     start_date_str = f"{target_year - 1}-12-20"
-                    all_target_dates = existing_dates | {date.today()}
+                    all_target_dates = existing_dates | {bot_today()}
 
                 _status("Fetching exchange rates from BOT API...")
                 (
@@ -244,14 +250,18 @@ class StandaloneExRateUpdater:
                 )
 
                 _status("Writing exchange rate data...")
+                # Manual range → honor the user's exact (dr_start, dr_end).
+                # No range → prior-year-December computed_start, end defaults
+                # to today() inside update_master_exrate_sheet.
+                sheet_start = dr_start if dr_start is not None else computed_start
                 update_master_exrate_sheet(
                     wb, usd_buying, usd_selling, eur_buying, eur_selling,
                     sorted(master_holidays_set), holidays_names,
-                    computed_start,
+                    sheet_start, end_date=dr_end,
                 )
                 # ERR-03: Check disk space before saving
                 ensure_disk_space(Path(filepath).parent, MIN_DISK_SPACE_MB)
-                wb.save(filepath)
+                _atomic_save(wb, filepath)
                 _status(f"✓ ExRate updated: {Path(filepath).name}")
                 return filepath
             finally:
@@ -271,9 +281,9 @@ class StandaloneExRateUpdater:
             if date_range:
                 start_dt, end_dt = date_range
             else:
-                target_year = date.today().year
+                target_year = bot_today().year
                 start_dt = date(target_year - 1, 12, 20)
-                end_dt = date.today()
+                end_dt = bot_today()
 
             # rate_data[currency][api_field][date] = value
             rate_data: dict[str, dict[str, dict[date, float]]] = {}
@@ -304,7 +314,7 @@ class StandaloneExRateUpdater:
 
             # Fetch holidays
             _status("Fetching holidays...")
-            all_target_dates = {date.today()}
+            all_target_dates = {bot_today()}
             (
                 logic_engine, _, _, _, _, _, _,
             ) = await self._engine._preload_api_data(all_target_dates, str(start_dt))
@@ -346,7 +356,7 @@ class StandaloneExRateUpdater:
 
             # ERR-03: Check disk space before saving
             ensure_disk_space(Path(filepath).parent, MIN_DISK_SPACE_MB)
-            wb.save(filepath)
+            _atomic_save(wb, filepath)
             _status(f"✓ ExRate created: {Path(filepath).name}")
             return filepath
         finally:

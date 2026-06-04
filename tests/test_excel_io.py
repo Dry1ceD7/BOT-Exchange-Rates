@@ -288,6 +288,26 @@ class TestScanSheetHeaders:
         assert "Jan" not in maps
         wb.close()
 
+    def test_duplicate_header_uses_first_occurrence(self, caplog):
+        """Two 'EX Rate' columns resolve deterministically to the first."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Jan"
+        # Columns: A=Date, B=Cur, C=EX Rate (first), D=EX Rate (duplicate).
+        ws.append(["Date", "Cur", "EX Rate", "EX Rate"])
+        ws.append([date(2025, 1, 7), "USD", None, None])
+        with caplog.at_level("WARNING"):
+            maps = scan_sheet_headers(wb, TARGET_COLS)
+        cols = maps["Jan"]["columns"]
+        # First "EX Rate" is column index 2 (C), never the duplicate at 3 (D).
+        assert cols["out_rate"] == 2
+        # The collision is logged so the operator can fix the sheet.
+        assert any(
+            "duplicate" in r.message.lower() and "EX Rate" in r.message
+            for r in caplog.records
+        )
+        wb.close()
+
 
 # =========================================================================
 #  write_custom_exrate_data
