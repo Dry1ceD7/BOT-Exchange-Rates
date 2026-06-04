@@ -16,7 +16,6 @@ from datetime import date, timedelta
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 from tenacity import (
-    before_sleep_log,
     retry,
     retry_if_exception_type,
     stop_after_attempt,
@@ -79,6 +78,35 @@ def install_token_redaction_filter() -> None:
         # Avoid attaching duplicates
         if not any(isinstance(f, TokenRedactionFilter) for f in handler.filters):
             handler.addFilter(filt)
+
+
+# -------------------------------------------------------------------------
+# SECURE TENACITY RETRY CALLBACK
+# -------------------------------------------------------------------------
+
+def _safe_before_sleep(retry_state) -> None:
+    """Log a retry attempt without exposing exception details or request context.
+
+    Emits only: attempt count, exception class name, and wait time.
+    Intentionally suppresses the exception message, which may embed a token
+    (e.g. httpx.ConnectError with the full request URL in its str()).
+    This eliminates the token-exposure vector present in tenacity's built-in
+    before_sleep_log(), which logs ``str(exception)`` verbatim.
+    """
+    if retry_state.outcome is not None and retry_state.outcome.failed:
+        ex_class = type(retry_state.outcome.exception()).__name__
+    else:
+        ex_class = "unknown"
+
+    wait_secs = (
+        retry_state.next_action.sleep if retry_state.next_action is not None else 0.0
+    )
+    logger.warning(
+        "Retrying API request in %.3gs (attempt %d, %s)",
+        wait_secs,
+        retry_state.attempt_number,
+        ex_class,
+    )
 
 # -------------------------------------------------------------------------
 # PYDANTIC v2 SCHEMAS
@@ -154,7 +182,7 @@ class BOTClient:
             httpx.RequestError, httpx.ConnectError,
             httpx.TimeoutException,
         )),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
+        before_sleep=_safe_before_sleep,
     )
     async def _fetch_json(self, url: str, token: str) -> dict:
         """Fetch JSON from BOT API with built-in 429 rate limit handling.
