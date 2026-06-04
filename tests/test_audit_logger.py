@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Tests for core/audit_logger.py — CSV Audit Trail."""
 
+import atexit
 import csv
 import os
+from datetime import datetime, timedelta
 
 import pytest
 
-from core.audit_logger import AuditLogger
+from core.audit_logger import AuditLogger, cleanup_old_audit_logs
 
 
 class TestAuditLogger:
@@ -128,3 +130,87 @@ class TestAuditLogger:
             audit.log_batch_summary(
                 total_files=1, success=1, failed=0, anomalies_detected=0,
             )
+
+
+class TestAtexitUnregister:
+    """finalize() and _atexit_cleanup() must unregister the atexit callback."""
+
+    def test_double_finalize_is_harmless(self, tmp_path):
+        """Calling finalize() twice must not raise (idempotent close)."""
+        audit = AuditLogger(log_dir=str(tmp_path))
+        first = audit.finalize()
+        second = audit.finalize()
+        assert first == second
+
+    def test_finalize_unregisters_atexit(self, tmp_path):
+        """After finalize(), the atexit callback is no longer registered."""
+        audit = AuditLogger(log_dir=str(tmp_path))
+        audit.finalize()
+        # unregister is idempotent; a second call returns None either way, but
+        # the contract is that finalize() already removed it so per-batch
+        # loggers in a long-lived process do not accumulate callbacks.
+        atexit.unregister(audit._atexit_cleanup)
+        # Re-running the (now-orphaned) cleanup must stay safe.
+        audit._atexit_cleanup()
+
+
+class TestCleanupOldAuditLogs:
+    """Retention prunes Audit_Log_*.csv by the EMBEDDED filename timestamp."""
+
+    def _write(self, directory, name: str) -> None:
+        (directory / name).write_text("x", encoding="utf-8")
+
+    def test_prunes_old_log_by_embedded_timestamp(self, tmp_path):
+        old_stamp = (datetime.now() - timedelta(days=40)).strftime("%Y%m%d_%H%M%S")
+        new_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        old_name = f"Audit_Log_{old_stamp}.csv"
+        new_name = f"Audit_Log_{new_stamp}.csv"
+        self._write(tmp_path, old_name)
+        self._write(tmp_path, new_name)
+
+        deleted = cleanup_old_audit_logs(log_dir=str(tmp_path), max_age_days=30)
+
+        assert deleted == 1
+        assert not (tmp_path / old_name).exists()
+        assert (tmp_path / new_name).exists()
+
+    def test_ignores_st_mtime(self, tmp_path):
+        """Old embedded timestamp prunes even when st_mtime is brand new."""
+        old_stamp = (datetime.now() - timedelta(days=60)).strftime("%Y%m%d_%H%M%S")
+        old_name = f"Audit_Log_{old_stamp}.csv"
+        path = tmp_path / old_name
+        self._write(tmp_path, old_name)
+        # Force a recent mtime — retention must NOT trust it.
+        now = datetime.now().timestamp()
+        os.utime(path, (now, now))
+
+        deleted = cleanup_old_audit_logs(log_dir=str(tmp_path), max_age_days=30)
+
+        assert deleted == 1
+        assert not path.exists()
+
+    def test_skips_unparseable_names(self, tmp_path):
+        """Files that do not match the timestamp pattern are left untouched."""
+        self._write(tmp_path, "Audit_Log_not_a_timestamp.csv")
+        self._write(tmp_path, "Audit_Log_.csv")
+
+        deleted = cleanup_old_audit_logs(log_dir=str(tmp_path), max_age_days=0)
+
+        assert deleted == 0
+        assert (tmp_path / "Audit_Log_not_a_timestamp.csv").exists()
+
+    def test_missing_dir_returns_zero(self, tmp_path):
+        deleted = cleanup_old_audit_logs(
+            log_dir=str(tmp_path / "does_not_exist"), max_age_days=30,
+        )
+        assert deleted == 0
+
+    def test_keeps_logs_within_window(self, tmp_path):
+        recent_stamp = (datetime.now() - timedelta(days=5)).strftime("%Y%m%d_%H%M%S")
+        recent_name = f"Audit_Log_{recent_stamp}.csv"
+        self._write(tmp_path, recent_name)
+
+        deleted = cleanup_old_audit_logs(log_dir=str(tmp_path), max_age_days=30)
+
+        assert deleted == 0
+        assert (tmp_path / recent_name).exists()

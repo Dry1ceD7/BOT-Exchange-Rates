@@ -133,6 +133,18 @@ class TestSettingsManagerGetSet:
         assert mgr2.get("auto_update") is False
 
 
+class TestDefaultSettingsKeys:
+    """Guard the DEFAULT_SETTINGS key set against dead/regressed entries."""
+
+    def test_output_directory_removed(self):
+        """'output_directory' had zero readers and must stay removed."""
+        assert "output_directory" not in DEFAULT_SETTINGS
+
+    def test_api_timeout_seconds_retained(self):
+        """'api_timeout_seconds' is wired into the client and must remain."""
+        assert "api_timeout_seconds" in DEFAULT_SETTINGS
+
+
 class TestSettingsManagerReload:
     """Tests for reload() cache invalidation."""
 

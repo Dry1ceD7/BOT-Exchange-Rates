@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_SETTINGS: dict[str, Any] = {
     "appearance": "system",
     "auto_update": True,
-    "output_directory": "",
     "api_timeout_seconds": 10,
     # v3.1.0: Rate type for formula injection (buying_transfer, selling,
     #          buying_sight, mid_rate)
