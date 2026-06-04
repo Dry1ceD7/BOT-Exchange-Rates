@@ -8,7 +8,7 @@ Version 3.2.8  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Rele
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-349%20Passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-703%20Passed-brightgreen)](tests/)
 
 ---
 
@@ -80,16 +80,15 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 ├──────────────┬───────────────────────┬───────────────────────────┤
 │  gui/panels/ │   gui/handlers.py     │   core/workers/           │
 │  LiveConsole │   BatchHandler        │   EventBus (thread-safe)  │
-│  Settings    │   Async Bridge        │   Push/Drain Queue        │
+│  Settings    │   Async Bridge        │   ThreadRegistry          │
 │  RateTicker  │   Revert Handler      │                           │
 │  Scheduler   │                       │                           │
 ├──────────────┴───────────────────────┴───────────────────────────┤
-│                   core/engine.py (Orchestrator)                   │
-│     Prescan → Cache → AnomalyGuard → Backup → Dispatch → GC     │
+│                   core/engine.py (Orchestrator)                  │
+│     Prescan → Cache → AnomalyGuard → Backup → Dispatch → GC      │
 ├──────────────────────────┬───────────────────────────────────────┤
-│  core/engine_factory.py  │  Platform Router                      │
-│     ├ NativeExcelEngine  │  Windows 11 → COM Engine              │
-│     └ FallbackExcelEngine│  macOS/Linux → openpyxl               │
+│  core/exrate_updater.py  │  WorkbookWriter (ledger pipeline)     │
+│  core/workbook_io.py     │  StandaloneExRateUpdater · disk guard │
 ├──────────────┬───────────┴─────────────┬─────────────────────────┤
 │  api_client  │  logic · database       │  backup_manager         │
 │  Async BOT   │  Zero-Guess Rollback    │  Timestamped            │
@@ -99,9 +98,9 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 │  Date Range  │  Master ExRate Sheet    │  ±5% Rate Guardian      │
 │  Scanner     │  Builder                │  CSV Audit Logger       │
 ├──────────────┼─────────────────────────┼─────────────────────────┤
-│  scheduler   │  csv_import.py          │  xls_converter.py       │
-│  Auto-Timer  │  Offline BOT CSV        │  .xls → .xlsx Native    │
-│  Folder Watch│  Fallback Importer      │  (100% style kept)      │
+│  scheduler   │  csv_import.py          │  ipc · auto_updater     │
+│  Auto-Timer  │  Offline BOT CSV        │  Single-Instance IPC    │
+│  Folder Watch│  Fallback Importer      │  SHA-256 Self-Update    │
 └──────────────┴─────────────────────────┴─────────────────────────┘
 ```
 
@@ -110,14 +109,14 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 - **Featherweight** — 15MB file-size guardrail, per-file `gc.collect()`, zero pandas dependency
 - **Cache-First** — SQLite checked before BOT API; rates cached until new data arrives
 - **Fail-Safe** — every file backed up before modification; safely revertible from the UI
-- **OS-Aware** — Routes natively on Windows using COM, fallback on Mac/Linux seamlessly
+- **Cross-Platform** — pure `openpyxl` engine everywhere; no COM or OS-specific code paths
 
 ---
 
 ## Features
 
 ### Core Processing
-- **Zero-Guess Rollback Engine** — If a date falls on a weekend or BOT holiday, the engine steps back 1 day at a time (max 5 days). Automatically unpacks hidden weekend substitutions and overlays static Thai public holidays for 100% calendar accuracy.
+- **Zero-Guess Rollback Engine** — If a date falls on a weekend or BOT holiday, the engine steps back 1 day at a time (max 10 days, then halts with `<ERROR: No Rate>`). Automatically unpacks hidden weekend substitutions and overlays static Thai public holidays for 100% calendar accuracy.
 - **Concurrent Dual Currency** — Simultaneous (async) USD and EUR rate resolution per row.
 - **Decimal Precision** — All rates written as `Decimal` values quantized to 4 decimal places (Thai accounting standard).
 - **Smart Date Pre-Scanner** — Scans all queued Excel files to find the oldest date, then fetches only the necessary API range.
@@ -137,7 +136,6 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 - **Offline CSV Import** — Import BOT's official CSV files into local cache for offline operation.
 
 ### Engine & Data Pipeline
-- **Native Format Preservation** — Pure Python converter explicitly pulls `xlrd formatting_info=True` copying exact fonts (Browallia New), header colors, 4-border boundaries, and custom column widths.
 - **High-Velocity Networking** — Uses `asyncio.gather` and 0.3s micro-cooldowns. Safely clamped by 10-layer 429 Retry handling with Tenacity exponential waits.
 - **SQLite Cache (WAL Mode)** — Rates and holidays cached locally. Repeat runs skip the API entirely.
 
@@ -243,15 +241,14 @@ Headless mode:
 
 ## CI/CD Pipeline
 
-The project includes a fully automated release pipeline (`.github/workflows/v3-release.yml`):
+Two GitHub Actions workflows:
 
-1. **Quality Gate** — Runs `ruff check` and `pytest` on every push
-2. **Cross-Platform Build** — PyInstaller builds Windows `.exe` and macOS `.app` bundles
-3. **GitHub Release** — Automatically creates a release with downloadable executables when a `v*` tag is pushed
+1. **Quality Gate** (`.github/workflows/ci.yml`) — `ruff check` + the full `pytest` suite on every push and PR, plus a non-blocking `pip-audit` dependency scan
+2. **Release Pipeline** (`.github/workflows/v3-release.yml`) — PyInstaller builds Windows `.exe` and macOS `.app` bundles, then publishes a GitHub Release with downloadable executables when a `v*` tag is pushed
 
 ```bash
 # To trigger a release:
-git tag v3.1.0
+git tag v3.2.8
 git push origin main --tags
 ```
 
@@ -283,6 +280,6 @@ This project is developed for internal enterprise use. All rights reserved.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.1.0*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.2.8*
 
 </div>
