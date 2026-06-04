@@ -53,7 +53,10 @@ def get_theme() -> dict:
             "section_bg":   "#0F172A",
             "text_primary": "#F1F5F9",
             "text_secondary": "#94A3B8",
-            "text_muted":   "#64748B",
+            # text_muted darkened #64748B -> #94A3B8: old value scored only
+            # 3.07:1 on card_bg #1E293B (WCAG floor 4.5); #94A3B8 reaches
+            # 5.71:1 on card_bg and >=6.3:1 on every other dark background.
+            "text_muted":   "#94A3B8",
             "trust_blue":   "#3B82F6",
             "blue_hover":   "#2563EB",
             "success":      "#22C55E",
@@ -111,7 +114,9 @@ def get_theme() -> dict:
             "ticker_up":          "#22C55E",
             "ticker_down":        "#EF4444",
             "ticker_neutral":     "#3B82F6",
-            "ticker_muted":       "#64748B",
+            # ticker placeholder text sits on card_bg #1E293B; #64748B was
+            # 3.07:1, #94A3B8 is 5.71:1.
+            "ticker_muted":       "#94A3B8",
             "ticker_live_alt":    "#dc2626",
             # ── Update banner states ─────────────────────────
             "banner_warn":          "#F59E0B",
@@ -145,7 +150,12 @@ def get_theme() -> dict:
             "section_bg":   "#F5F7FA",
             "text_primary": "#1A202C",
             "text_secondary": "#4A5568",
-            "text_muted":   "#A0AEC0",
+            # text_muted darkened #A0AEC0 -> #5A6678: old value scored only
+            # ~1.8-2.3:1 against the real backgrounds it lands on (white card,
+            # footer #E2E8F0, sched #F0F4F8, section #F5F7FA). #5A6678 clears
+            # the 4.5:1 WCAG floor on all of them (4.72:1 on the darkest,
+            # footer_bg) while staying visibly muted vs. text_secondary.
+            "text_muted":   "#5A6678",
             "trust_blue":   "#2B6CB0",
             "blue_hover":   "#2C5282",
             "success":      "#2F855A",
@@ -203,7 +213,9 @@ def get_theme() -> dict:
             "ticker_up":          "#16A34A",
             "ticker_down":        "#DC2626",
             "ticker_neutral":     "#2563EB",
-            "ticker_muted":       "#94A3B8",
+            # ticker placeholder text sits on card_bg #FFFFFF; #94A3B8 was
+            # 2.56:1, #5A6678 is 5.82:1.
+            "ticker_muted":       "#5A6678",
             "ticker_live_alt":    "#B91C1C",
             # ── Update banner states ─────────────────────────
             "banner_warn":          "#F59E0B",
