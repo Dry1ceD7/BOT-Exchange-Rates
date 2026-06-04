@@ -16,10 +16,25 @@ from decimal import Decimal
 
 import customtkinter as ctk
 
+from core.i18n import tr
 from gui.panels._base_panel import SafePanel
 from gui.theme import MONO_FONT, get_theme
 
 logger = logging.getLogger(__name__)
+
+# Placeholder shown before the first successful fetch (and for any rate that is
+# unavailable). Matches the live single-value shape "34.2100" — four decimals,
+# no slash — so the empty state reads as "loading one number" rather than
+# implying two slash-separated values. Unified across init + _format_single.
+PLACEHOLDER = "--.----"
+
+# Bright placeholder color. The ticker sits on the navy header_bg in BOTH
+# appearance modes, but ticker_muted is tuned for card_bg (white in light
+# mode), so on the navy header it falls to ~1.5:1 in light mode. #CBD5E1
+# reaches 8.18:1 (dark header) / 5.96:1 (light header) — clearly readable as
+# a "loading" state. Themed via the optional "ticker_placeholder" token with
+# this value as the .get() fallback until the theme defines it.
+PLACEHOLDER_COLOR = "#CBD5E1"
 
 
 class RateTicker(SafePanel, ctk.CTkFrame):
@@ -43,6 +58,10 @@ class RateTicker(SafePanel, ctk.CTkFrame):
             "eur_selling": None,
         }
         self._prev_rates: dict[str, Decimal | None] = dict(self._rates)
+        # True once the first successful _update_display has painted real data.
+        # Until then the indicator shows a "connecting" state instead of LIVE,
+        # so an empty cache never implies a live connection (finding #3).
+        self._first_paint_done = False
 
         t = get_theme()
 
@@ -61,25 +80,36 @@ class RateTicker(SafePanel, ctk.CTkFrame):
         self.lbl_usd_title.pack(side="left", padx=(0, 8))
 
         self.lbl_usd_buy = ctk.CTkLabel(
-            self.usd_frame, text="BUY --/--",
+            self.usd_frame, text=f"BUY {PLACEHOLDER}",
             font=ctk.CTkFont(family=MONO_FONT, size=12, weight="bold"),
-            text_color=t["ticker_label"]
+            text_color=t.get("ticker_placeholder", PLACEHOLDER_COLOR)
         )
         self.lbl_usd_buy.pack(side="left", padx=4)
 
         self.lbl_usd_sell = ctk.CTkLabel(
-            self.usd_frame, text="SELL --/--",
+            self.usd_frame, text=f"SELL {PLACEHOLDER}",
             font=ctk.CTkFont(family=MONO_FONT, size=12, weight="bold"),
-            text_color=t["ticker_label"]
+            text_color=t.get("ticker_placeholder", PLACEHOLDER_COLOR)
         )
         self.lbl_usd_sell.pack(side="left", padx=4)
 
-        # Center: LIVE indicator
+        # Unicode mini-sparkline of the last few cached USD selling rates.
+        self.lbl_usd_spark = ctk.CTkLabel(
+            self.usd_frame, text="",
+            font=ctk.CTkFont(family=MONO_FONT, size=12),
+            text_color=t["ticker_neutral"]
+        )
+        self.lbl_usd_spark.pack(side="left", padx=(2, 0))
+
+        # Center: connection indicator. Starts in a "connecting" (amber)
+        # state and only flips to "● LIVE" after the first real data paint —
+        # an empty cache must never imply a live connection (finding #3).
         self.live_frame = ctk.CTkFrame(self.container, fg_color="transparent")
         self.live_frame.pack(side="left", padx=20)
         self.lbl_live = ctk.CTkLabel(
-            self.live_frame, text="● LIVE",
-            font=ctk.CTkFont(size=9, weight="bold"), text_color=t["ticker_live"]
+            self.live_frame, text=tr("ticker.connecting"),
+            font=ctk.CTkFont(size=9, weight="bold"),
+            text_color=t.get("ticker_connecting", "#F59E0B")
         )
         self.lbl_live.pack(side="left", padx=(0, 4))
         self.lbl_time = ctk.CTkLabel(
@@ -99,18 +129,26 @@ class RateTicker(SafePanel, ctk.CTkFrame):
         self.lbl_eur_title.pack(side="left", padx=(0, 8))
 
         self.lbl_eur_buy = ctk.CTkLabel(
-            self.eur_frame, text="BUY --/--",
+            self.eur_frame, text=f"BUY {PLACEHOLDER}",
             font=ctk.CTkFont(family=MONO_FONT, size=12, weight="bold"),
-            text_color=t["ticker_label"]
+            text_color=t.get("ticker_placeholder", PLACEHOLDER_COLOR)
         )
         self.lbl_eur_buy.pack(side="left", padx=4)
 
         self.lbl_eur_sell = ctk.CTkLabel(
-            self.eur_frame, text="SELL --/--",
+            self.eur_frame, text=f"SELL {PLACEHOLDER}",
             font=ctk.CTkFont(family=MONO_FONT, size=12, weight="bold"),
-            text_color=t["ticker_label"]
+            text_color=t.get("ticker_placeholder", PLACEHOLDER_COLOR)
         )
         self.lbl_eur_sell.pack(side="left", padx=4)
+
+        # Unicode mini-sparkline of the last few cached EUR selling rates.
+        self.lbl_eur_spark = ctk.CTkLabel(
+            self.eur_frame, text="",
+            font=ctk.CTkFont(family=MONO_FONT, size=12),
+            text_color=t["ticker_neutral"]
+        )
+        self.lbl_eur_spark.pack(side="left", padx=(2, 0))
 
 
     def start(self) -> None:
@@ -144,13 +182,28 @@ class RateTicker(SafePanel, ctk.CTkFrame):
             rates = self._read_from_cache()
             if rates:
                 self._safe_after(0, self._update_display, rates)
-            else:
-                # Try a lightweight API fetch for today only
-                api_rates = self._fetch_today_from_api()
-                if api_rates:
-                    self._safe_after(0, self._update_display, api_rates)
+                return
+            # Try a lightweight API fetch for today only
+            api_rates = self._fetch_today_from_api()
+            if api_rates:
+                self._safe_after(0, self._update_display, api_rates)
+            elif not self._first_paint_done:
+                # No cache, no API, and nothing has ever painted: surface an
+                # explicit offline/dim state instead of a stale "connecting"
+                # spinner that never resolves (finding #3).
+                self._safe_after(0, self._show_offline)
         except (OSError, ValueError, RuntimeError) as e:
             logger.debug("Rate ticker refresh failed: %s", e)
+
+    def _show_offline(self) -> None:
+        """Tk-thread: switch the indicator to a dim 'offline' state."""
+        if self._first_paint_done:
+            return  # data arrived between scheduling and firing — leave LIVE
+        t = get_theme()
+        self.lbl_live.configure(
+            text=tr("ticker.offline"),
+            text_color=t.get("ticker_placeholder", PLACEHOLDER_COLOR),
+        )
 
     def _read_from_cache(self) -> dict | None:
         """Read today's (or last available) rates from CacheDB."""
@@ -193,7 +246,9 @@ class RateTicker(SafePanel, ctk.CTkFrame):
                     f"&end_period={today_str}"
                     f"&currency={ccy}"
                 )
-                resp = httpx.get(url, headers=headers, timeout=8.0)
+                # 5s per call (was 8s): caps worst-case first-paint latency at
+                # ~10s for the two sequential currency requests (finding #3).
+                resp = httpx.get(url, headers=headers, timeout=5.0)
                 if resp.status_code == 200:
                     data = resp.json()
                     details = (
@@ -250,17 +305,84 @@ class RateTicker(SafePanel, ctk.CTkFrame):
 
         self.lbl_time.configure(text=datetime.now().strftime("%H:%M:%S"))
 
-        # Make the LIVE dot blink slightly between updates
+        # Mark first paint and refresh the sparkline from cache (cheap, cached).
+        self._first_paint_done = True
+        self._update_sparklines()
+
+        # Flip to "● LIVE" now that real data has arrived; thereafter make the
+        # dot blink slightly between updates. Before first paint the indicator
+        # is left in its amber "connecting" state by start()/__init__.
         t = get_theme()
         current_color = self.lbl_live.cget("text_color")
-        self.lbl_live.configure(
-            text_color=t["ticker_live"] if current_color != t["ticker_live"] else t["ticker_live_alt"]
+        live_color = (
+            t["ticker_live"] if current_color != t["ticker_live"]
+            else t["ticker_live_alt"]
         )
+        self.lbl_live.configure(text=tr("ticker.live"), text_color=live_color)
+
+    def _update_sparklines(self) -> None:
+        """Render a unicode mini-sparkline of recent cached selling rates.
+
+        Reads the last ~7 calendar days of USD/EUR selling rates straight from
+        the cache (no network, no history table growth) and maps them onto the
+        8-level block ramp. Bounded to a handful of rows; called only from the
+        Tk thread inside _update_display. Failures degrade to a blank label.
+        """
+        if self._cache is None:
+            return
+        t = get_theme()
+        try:
+            end = date.today()
+            start = end - timedelta(days=7)
+            bulk = self._cache.get_rates_bulk(start, end)
+        except (OSError, ValueError, RuntimeError) as e:
+            logger.debug("Sparkline cache read failed: %s", e)
+            return
+
+        for prefix, label in (
+            ("usd_selling", self.lbl_usd_spark),
+            ("eur_selling", self.lbl_eur_spark),
+        ):
+            series = [
+                bulk[d][prefix]
+                for d in sorted(bulk)
+                if bulk[d].get(prefix) is not None
+            ]
+            label.configure(
+                text=self._sparkline(series),
+                text_color=t["ticker_neutral"],
+            )
+
+    @staticmethod
+    def _sparkline(values: list) -> str:
+        """Map a numeric series onto the 8-level unicode block ramp.
+
+        Returns "" for fewer than 2 points (no trend to show). A flat series
+        (all equal) renders as a mid-level baseline rather than dividing by
+        zero. Decimal-safe: arithmetic stays in Decimal/float space only for
+        the normalization ratio.
+        """
+        bars = "▁▂▃▄▅▆▇█"
+        if not values or len(values) < 2:
+            return ""
+        floats = [float(v) for v in values]
+        lo, hi = min(floats), max(floats)
+        span = hi - lo
+        if span <= 0:
+            return bars[len(bars) // 2] * len(floats)
+        out = []
+        last = len(bars) - 1
+        for f in floats:
+            idx = int((f - lo) / span * last)
+            out.append(bars[max(0, min(last, idx))])
+        return "".join(out)
 
     def _format_single(self, rate: Decimal | None, trend_key: str) -> tuple:
         t = get_theme()
         if rate is None:
-            return "--.--", t["ticker_muted"]
+            # Same token + bright placeholder color as the initial empty state,
+            # so an unavailable rate reads identically to "still loading".
+            return PLACEHOLDER, t.get("ticker_placeholder", PLACEHOLDER_COLOR)
 
         val_str = f"{float(rate):.4f}"
         prev = self._prev_rates.get(trend_key)
@@ -277,9 +399,27 @@ class RateTicker(SafePanel, ctk.CTkFrame):
         """Re-apply colors for dark/light mode transitions."""
         self.lbl_usd_title.configure(text_color=theme.get("ticker_value", "#FFFFFF"))
         self.lbl_eur_title.configure(text_color=theme.get("ticker_value", "#FFFFFF"))
-        self.lbl_usd_buy.configure(text_color=theme.get("ticker_label", "#94A3B8"))
-        self.lbl_usd_sell.configure(text_color=theme.get("ticker_label", "#94A3B8"))
-        self.lbl_eur_buy.configure(text_color=theme.get("ticker_label", "#94A3B8"))
-        self.lbl_eur_sell.configure(text_color=theme.get("ticker_label", "#94A3B8"))
-        self.lbl_live.configure(text_color=theme.get("ticker_live", "#ef4444"))
+
+        # Before the first data paint the rate labels hold the bright
+        # placeholder color; after it they carry per-rate trend colors that a
+        # blanket ticker_label repaint would wipe out. Only recolor the rate
+        # labels while still in the empty placeholder state.
+        if not self._first_paint_done:
+            placeholder = theme.get("ticker_placeholder", PLACEHOLDER_COLOR)
+            for lbl in (
+                self.lbl_usd_buy, self.lbl_usd_sell,
+                self.lbl_eur_buy, self.lbl_eur_sell,
+            ):
+                lbl.configure(text_color=placeholder)
+            # Indicator still in the connecting/offline state.
+            self.lbl_live.configure(
+                text_color=theme.get("ticker_connecting", "#F59E0B")
+            )
+        else:
+            self.lbl_live.configure(text_color=theme.get("ticker_live", "#ef4444"))
+
+        # Sparklines follow the neutral trend color in either state.
+        neutral = theme.get("ticker_neutral", "#3B82F6")
+        self.lbl_usd_spark.configure(text_color=neutral)
+        self.lbl_eur_spark.configure(text_color=neutral)
         self.lbl_time.configure(text_color=theme.get("ticker_label", "#94A3B8"))

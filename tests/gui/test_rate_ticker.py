@@ -95,23 +95,27 @@ class TestRateTickerWidgetTree:
         ticker.destroy()
 
     def test_initial_usd_buy_text(self, tk_root):
+        from gui.panels.rate_ticker import PLACEHOLDER
         ticker = _make_ticker(tk_root)
-        assert ticker.lbl_usd_buy.cget("text") == "BUY --/--"
+        assert ticker.lbl_usd_buy.cget("text") == f"BUY {PLACEHOLDER}"
         ticker.destroy()
 
     def test_initial_usd_sell_text(self, tk_root):
+        from gui.panels.rate_ticker import PLACEHOLDER
         ticker = _make_ticker(tk_root)
-        assert ticker.lbl_usd_sell.cget("text") == "SELL --/--"
+        assert ticker.lbl_usd_sell.cget("text") == f"SELL {PLACEHOLDER}"
         ticker.destroy()
 
     def test_initial_eur_buy_text(self, tk_root):
+        from gui.panels.rate_ticker import PLACEHOLDER
         ticker = _make_ticker(tk_root)
-        assert ticker.lbl_eur_buy.cget("text") == "BUY --/--"
+        assert ticker.lbl_eur_buy.cget("text") == f"BUY {PLACEHOLDER}"
         ticker.destroy()
 
     def test_initial_eur_sell_text(self, tk_root):
+        from gui.panels.rate_ticker import PLACEHOLDER
         ticker = _make_ticker(tk_root)
-        assert ticker.lbl_eur_sell.cget("text") == "SELL --/--"
+        assert ticker.lbl_eur_sell.cget("text") == f"SELL {PLACEHOLDER}"
         ticker.destroy()
 
     def test_initial_time_text(self, tk_root):
@@ -203,19 +207,37 @@ class TestRateTickerThreading:
 class TestRateTickerApplyTheme:
     """apply_theme() updates label colors for dark/light mode."""
 
-    def test_apply_theme_dark_palette(self, tk_root):
+    def test_apply_theme_dark_palette_empty_state(self, tk_root):
+        """Before first paint the rate labels carry the placeholder color and
+        the indicator stays in the connecting (amber) state."""
+        from gui.panels.rate_ticker import PLACEHOLDER_COLOR
         from gui.theme import get_theme
         ticker = _make_ticker(tk_root)
         theme = get_theme()
         ticker.apply_theme(theme)  # must not raise
+        placeholder = theme.get("ticker_placeholder", PLACEHOLDER_COLOR)
         assert ticker.lbl_usd_title.cget("text_color") == theme["ticker_value"]
         assert ticker.lbl_eur_title.cget("text_color") == theme["ticker_value"]
-        assert ticker.lbl_usd_buy.cget("text_color") == theme["ticker_label"]
-        assert ticker.lbl_usd_sell.cget("text_color") == theme["ticker_label"]
-        assert ticker.lbl_eur_buy.cget("text_color") == theme["ticker_label"]
-        assert ticker.lbl_eur_sell.cget("text_color") == theme["ticker_label"]
-        assert ticker.lbl_live.cget("text_color") == theme["ticker_live"]
+        assert ticker.lbl_usd_buy.cget("text_color") == placeholder
+        assert ticker.lbl_usd_sell.cget("text_color") == placeholder
+        assert ticker.lbl_eur_buy.cget("text_color") == placeholder
+        assert ticker.lbl_eur_sell.cget("text_color") == placeholder
+        # Connecting state, NOT live, since no data has painted yet.
+        assert ticker.lbl_live.cget("text_color") == theme.get(
+            "ticker_connecting", "#F59E0B"
+        )
         assert ticker.lbl_time.cget("text_color") == theme["ticker_label"]
+        ticker.destroy()
+
+    def test_apply_theme_after_first_paint_keeps_live(self, tk_root):
+        """After first paint apply_theme() must not wipe trend colors and the
+        indicator follows ticker_live."""
+        from gui.theme import get_theme
+        ticker = _make_ticker(tk_root)
+        ticker._first_paint_done = True
+        theme = get_theme()
+        ticker.apply_theme(theme)
+        assert ticker.lbl_live.cget("text_color") == theme["ticker_live"]
         ticker.destroy()
 
     def test_apply_theme_custom_dict(self, tk_root):
@@ -223,21 +245,23 @@ class TestRateTickerApplyTheme:
         ticker = _make_ticker(tk_root)
         custom = {
             "ticker_value": "#AABBCC",
-            "ticker_label": "#DDEEFF",
-            "ticker_live":  "#FF0000",
+            "ticker_placeholder": "#DDEEFF",
+            "ticker_connecting": "#FFAA00",
         }
         ticker.apply_theme(custom)
         assert ticker.lbl_usd_title.cget("text_color") == "#AABBCC"
         assert ticker.lbl_usd_buy.cget("text_color") == "#DDEEFF"
-        assert ticker.lbl_live.cget("text_color") == "#FF0000"
+        assert ticker.lbl_live.cget("text_color") == "#FFAA00"
         ticker.destroy()
 
     def test_apply_theme_empty_dict_uses_defaults(self, tk_root):
         """apply_theme() falls back to hardcoded defaults for missing keys."""
+        from gui.panels.rate_ticker import PLACEHOLDER_COLOR
         ticker = _make_ticker(tk_root)
         ticker.apply_theme({})  # all keys missing — should not raise
         assert ticker.lbl_usd_title.cget("text_color") == "#FFFFFF"
-        assert ticker.lbl_usd_buy.cget("text_color") == "#94A3B8"
+        # Placeholder fallback, not ticker_label.
+        assert ticker.lbl_usd_buy.cget("text_color") == PLACEHOLDER_COLOR
         ticker.destroy()
 
 
@@ -255,12 +279,15 @@ class TestRateTickerFormatSingle:
         ticker._prev_rates["usd_buying"] = previous
         return ticker
 
-    def test_none_rate_returns_muted(self, tk_root):
+    def test_none_rate_returns_placeholder(self, tk_root):
+        """An unavailable rate renders the same bright placeholder token+color
+        as the initial empty state (findings #1, #2)."""
+        from gui.panels.rate_ticker import PLACEHOLDER, PLACEHOLDER_COLOR
         from gui.theme import get_theme
         ticker = _make_ticker(tk_root)
         text, color = ticker._format_single(None, "usd_buying")
-        assert text == "--.--"
-        assert color == get_theme()["ticker_muted"]
+        assert text == PLACEHOLDER
+        assert color == get_theme().get("ticker_placeholder", PLACEHOLDER_COLOR)
         ticker.destroy()
 
     def test_rate_up_returns_up_color(self, tk_root):
@@ -397,4 +424,246 @@ class TestRateTickerReadFromCache:
         result = ticker._read_from_cache()
         assert result is None
         assert mock_cache.get_rate.call_count == 6
+        ticker.destroy()
+
+
+# ---------------------------------------------------------------------------
+# 7. Placeholder shape + contrast (findings #1, #2)
+# ---------------------------------------------------------------------------
+
+def _contrast(fg: str, bg: str) -> float:
+    """WCAG relative-contrast ratio between two #RRGGBB colors."""
+    def _lum(hex_c: str) -> float:
+        hex_c = hex_c.lstrip("#")
+        chan = [int(hex_c[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        lin = [
+            c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+            for c in chan
+        ]
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+    la, lb = _lum(fg), _lum(bg)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+class TestRateTickerPlaceholder:
+    """Empty/unavailable state placeholder shape + readability."""
+
+    def test_placeholder_has_no_slash(self, tk_root):
+        """Finding #2: placeholder must not imply two slash-separated values."""
+        from gui.panels.rate_ticker import PLACEHOLDER
+        assert "/" not in PLACEHOLDER
+        ticker = _make_ticker(tk_root)
+        assert "/" not in ticker.lbl_usd_buy.cget("text")
+        assert "/" not in ticker.lbl_eur_sell.cget("text")
+        ticker.destroy()
+
+    def test_placeholder_matches_live_single_value_shape(self, tk_root):
+        """Placeholder has 4 trailing dashes to mirror the 4dp live value."""
+        from gui.panels.rate_ticker import PLACEHOLDER
+        # "--.----" -> one group before the dot, four after (4 decimals).
+        assert PLACEHOLDER == "--.----"
+
+    def test_format_single_none_uses_placeholder_token(self, tk_root):
+        """The unavailable token equals the init placeholder (unified)."""
+        from gui.panels.rate_ticker import PLACEHOLDER
+        ticker = _make_ticker(tk_root)
+        text, _ = ticker._format_single(None, "usd_buying")
+        assert text == PLACEHOLDER
+        ticker.destroy()
+
+    def test_placeholder_color_readable_on_navy_header_dark(self, tk_root):
+        """Finding #1: placeholder color must clear WCAG AA (>=4.5:1) on the
+        dark navy header it actually sits on."""
+        from gui.panels.rate_ticker import PLACEHOLDER_COLOR
+        # header_bg dark = #1A365D
+        assert _contrast(PLACEHOLDER_COLOR, "#1A365D") >= 4.5
+
+    def test_placeholder_color_readable_on_navy_header_light(self, tk_root):
+        """The ticker sits on the navy header in LIGHT mode too, where
+        ticker_muted collapsed to ~1.5:1. The placeholder must stay readable."""
+        from gui.panels.rate_ticker import PLACEHOLDER_COLOR
+        # header_bg light = #2D4A7A
+        assert _contrast(PLACEHOLDER_COLOR, "#2D4A7A") >= 4.5
+
+    def test_initial_placeholder_color_applied(self, tk_root):
+        """Rate labels start with the bright placeholder color, not the dim
+        ticker_label."""
+        from gui.panels.rate_ticker import PLACEHOLDER_COLOR
+        from gui.theme import get_theme
+        ticker = _make_ticker(tk_root)
+        expected = get_theme().get("ticker_placeholder", PLACEHOLDER_COLOR)
+        assert ticker.lbl_usd_buy.cget("text_color") == expected
+        assert ticker.lbl_eur_sell.cget("text_color") == expected
+        ticker.destroy()
+
+
+# ---------------------------------------------------------------------------
+# 8. Connection indicator gating (finding #3)
+# ---------------------------------------------------------------------------
+
+class TestRateTickerIndicatorGating:
+    """The '● LIVE' badge only appears after real data has painted."""
+
+    def test_indicator_starts_connecting_not_live(self, tk_root):
+        """At construction the badge is NOT '● LIVE' and first paint is unset."""
+        ticker = _make_ticker(tk_root)
+        assert ticker._first_paint_done is False
+        # tr() falls back to the key string until wave-2 fills the catalog.
+        assert ticker.lbl_live.cget("text") != "● LIVE"
+        ticker.destroy()
+
+    def test_first_paint_flips_indicator_to_live(self, tk_root):
+        """A successful _update_display sets _first_paint_done and shows LIVE."""
+        ticker = _make_ticker(tk_root)
+        ticker._update_display({"usd_buying": Decimal("34.2100")})
+        assert ticker._first_paint_done is True
+        # tr('ticker.live') falls back to the key until wave-2; assert the call
+        # routed through tr by checking it is the live key/text, not connecting.
+        from core.i18n import tr
+        assert ticker.lbl_live.cget("text") == tr("ticker.live")
+        ticker.destroy()
+
+    def test_show_offline_only_before_first_paint(self, tk_root):
+        """_show_offline must no-op once data has painted."""
+        from core.i18n import tr
+        ticker = _make_ticker(tk_root)
+        ticker._first_paint_done = True
+        before = ticker.lbl_live.cget("text")
+        ticker._show_offline()
+        # Unchanged because data already painted.
+        assert ticker.lbl_live.cget("text") == before
+        ticker.destroy()
+
+        ticker2 = _make_ticker(tk_root)
+        ticker2._show_offline()
+        assert ticker2.lbl_live.cget("text") == tr("ticker.offline")
+        ticker2.destroy()
+
+    def test_fetch_bg_shows_offline_when_no_data_ever(self, tk_root):
+        """With no cache and no API, the first failed fetch surfaces offline."""
+        ticker = _make_ticker(tk_root, cache_db=None)
+        calls = []
+        # Capture _safe_after so we can run the scheduled callback synchronously.
+        with patch.object(
+            ticker, "_safe_after",
+            side_effect=lambda ms, fn, *a: calls.append((fn, a)),
+        ), patch.object(ticker, "_fetch_today_from_api", return_value=None):
+            ticker._fetch_rates_bg()
+        # Exactly one callback scheduled: _show_offline.
+        assert len(calls) == 1
+        assert calls[0][0] == ticker._show_offline
+        ticker.destroy()
+
+    def test_fetch_bg_no_offline_after_first_paint(self, tk_root):
+        """Once data has painted, a later empty fetch must not show offline."""
+        ticker = _make_ticker(tk_root, cache_db=None)
+        ticker._first_paint_done = True
+        calls = []
+        with patch.object(
+            ticker, "_safe_after",
+            side_effect=lambda ms, fn, *a: calls.append((fn, a)),
+        ), patch.object(ticker, "_fetch_today_from_api", return_value=None):
+            ticker._fetch_rates_bg()
+        assert calls == []
+        ticker.destroy()
+
+    def test_api_timeout_reduced(self, tk_root):
+        """Finding #3: per-call timeout lowered to cap first-paint latency.
+
+        Stub httpx + token so no real network call happens; assert the two
+        sequential currency requests each use a <=5s timeout.
+        """
+        ticker = _make_ticker(tk_root)
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.json.return_value = {"result": {"data": {"data_detail": []}}}
+        with patch("core.secure_tokens.get_token", return_value="tok"), \
+                patch("httpx.get", return_value=fake_resp) as mock_get:
+            ticker._fetch_today_from_api()
+        assert mock_get.call_count == 2  # USD + EUR
+        for call in mock_get.call_args_list:
+            assert call.kwargs.get("timeout", 999) <= 5.0
+        ticker.destroy()
+
+
+# ---------------------------------------------------------------------------
+# 9. Sparkline (finding #4)
+# ---------------------------------------------------------------------------
+
+class TestRateTickerSparkline:
+    """_sparkline() + _update_sparklines() render from cache only."""
+
+    def test_sparkline_widgets_exist(self, tk_root):
+        import customtkinter as ctk
+        ticker = _make_ticker(tk_root)
+        assert isinstance(ticker.lbl_usd_spark, ctk.CTkLabel)
+        assert isinstance(ticker.lbl_eur_spark, ctk.CTkLabel)
+        # Empty until data paints.
+        assert ticker.lbl_usd_spark.cget("text") == ""
+        ticker.destroy()
+
+    def test_sparkline_empty_for_short_series(self, tk_root):
+        ticker = _make_ticker(tk_root)
+        assert ticker._sparkline([]) == ""
+        assert ticker._sparkline([Decimal("1.0")]) == ""
+        ticker.destroy()
+
+    def test_sparkline_maps_ascending_series(self, tk_root):
+        ticker = _make_ticker(tk_root)
+        bars = ticker._sparkline(
+            [Decimal("1"), Decimal("2"), Decimal("3"), Decimal("4")]
+        )
+        assert len(bars) == 4
+        # Ascending: first is the lowest block, last is the highest.
+        assert bars[0] == "▁"
+        assert bars[-1] == "█"
+        ticker.destroy()
+
+    def test_sparkline_flat_series_is_baseline(self, tk_root):
+        """A flat series renders a constant mid-level bar (no div-by-zero)."""
+        ticker = _make_ticker(tk_root)
+        bars = ticker._sparkline([Decimal("5"), Decimal("5"), Decimal("5")])
+        assert len(bars) == 3
+        assert len(set(bars)) == 1  # all identical
+        ticker.destroy()
+
+    def test_update_sparklines_reads_cache_bulk(self, tk_root):
+        """_update_sparklines pulls from get_rates_bulk and renders bars."""
+        from datetime import date, timedelta
+        mock_cache = MagicMock()
+        today = date.today()
+        bulk = {
+            today - timedelta(days=3): {
+                "usd_selling": Decimal("34.0"), "eur_selling": Decimal("37.0"),
+            },
+            today - timedelta(days=2): {
+                "usd_selling": Decimal("34.5"), "eur_selling": Decimal("37.2"),
+            },
+            today - timedelta(days=1): {
+                "usd_selling": Decimal("35.0"), "eur_selling": Decimal("37.1"),
+            },
+        }
+        mock_cache.get_rates_bulk.return_value = bulk
+        ticker = _make_ticker(tk_root, cache_db=mock_cache)
+        ticker._update_sparklines()
+        assert mock_cache.get_rates_bulk.called
+        assert ticker.lbl_usd_spark.cget("text") != ""
+        assert len(ticker.lbl_usd_spark.cget("text")) == 3
+        ticker.destroy()
+
+    def test_update_sparklines_noop_without_cache(self, tk_root):
+        """No cache -> no crash, label stays blank."""
+        ticker = _make_ticker(tk_root, cache_db=None)
+        ticker._update_sparklines()  # must not raise
+        assert ticker.lbl_usd_spark.cget("text") == ""
+        ticker.destroy()
+
+    def test_update_sparklines_survives_cache_error(self, tk_root):
+        """A cache read error degrades gracefully (label unchanged, no raise)."""
+        mock_cache = MagicMock()
+        mock_cache.get_rates_bulk.side_effect = RuntimeError("db gone")
+        ticker = _make_ticker(tk_root, cache_db=mock_cache)
+        ticker._update_sparklines()  # must not raise
+        assert ticker.lbl_usd_spark.cget("text") == ""
         ticker.destroy()
