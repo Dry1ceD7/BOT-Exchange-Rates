@@ -23,6 +23,7 @@ from pathlib import Path
 import customtkinter as ctk
 import httpx
 
+from core.i18n import tr
 from core.secure_tokens import get_token
 from gui.panels._base_panel import SafePanel
 from gui.theme import get_theme
@@ -72,7 +73,8 @@ def _truncate_notes(body: str | None) -> str:
 class VersionPanel(SafePanel, ctk.CTkFrame):
     """Embeddable version/update panel for the settings modal."""
 
-    def __init__(self, master, on_restart=None, on_error=None, **kwargs):
+    def __init__(self, master, on_restart=None, on_error=None,
+                 is_batch_active=None, **kwargs):
         t = get_theme()
         super().__init__(master, fg_color="transparent", **kwargs)
         self._t = t
@@ -83,6 +85,12 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
         self._busy_browse = False
         self._on_restart = on_restart
         self._on_error = on_error
+        # Optional callable -> bool, supplied by the host so the restart-to-
+        # install flow can refuse while a batch is mid-flight. When omitted we
+        # fall back to walking the widget hierarchy to the app's batch_handler
+        # (see _is_batch_active), so the guard works even without explicit
+        # wiring from the settings modal.
+        self._is_batch_active_cb = is_batch_active
         self._busy_download = False
         # Maps a version label -> its release notes (plain text), populated by
         # _on_browse_versions so _on_version_selected can render them.
@@ -575,19 +583,84 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
             command=self._do_restart,
         ).pack(side="right")
 
+    def _find_app(self):
+        """Walk the widget hierarchy to the main app window.
+
+        The panel lives inside the settings modal, whose own ``master`` is the
+        app (see settings_modal.py). The app is the object that owns the
+        ``batch_handler`` and the ``_on_app_close`` clean-shutdown handler.
+        Returns the first ancestor exposing ``batch_handler`` or
+        ``_on_app_close``, else None.
+        """
+        node = self
+        seen = 0
+        # Bounded walk (defensive against any accidental cycle in master refs).
+        while node is not None and seen < 12:
+            if hasattr(node, "batch_handler") or hasattr(node, "_on_app_close"):
+                return node
+            node = getattr(node, "master", None)
+            seen += 1
+        return None
+
+    def _is_batch_active(self) -> bool:
+        """True when a batch is currently processing files.
+
+        Prefers the host-supplied callback; otherwise reads the app's
+        ``batch_handler._batch_active`` via the hierarchy walk. Any lookup
+        failure is treated as "not active" so the updater never blocks itself
+        on a missing wiring path.
+        """
+        if self._is_batch_active_cb is not None:
+            with contextlib.suppress(Exception):
+                return bool(self._is_batch_active_cb())
+        app = self._find_app()
+        handler = getattr(app, "batch_handler", None) if app else None
+        return bool(getattr(handler, "_batch_active", False))
+
     def _do_restart(self):
-        """Apply pending installer (if any) then restart via callback or fallback."""
+        """Apply pending installer (if any) then restart cleanly.
+
+        A batch left an in-place .xlsx half-written if we exited mid-save, so:
+          1. Refuse while a batch is active (the user keeps the dialog and is
+             told to wait) — never tear down workers under a live save.
+          2. Otherwise route the teardown through the app's ``_on_app_close``,
+             which calls ThreadRegistry.shutdown_all() and lets any in-flight
+             save finish at its safe boundary BEFORE we run the installer and
+             exit. Only fall back to a bare modal-destroy when no app-level
+             close handler is reachable.
+        """
         import sys
 
         from core.auto_updater import apply_update
 
+        # ── Guard: never restart-to-install while a batch is running ──────
+        if self._is_batch_active():
+            msg = tr("version.err_batch_running")
+            logger.warning("Restart-to-install refused: a batch is active")
+            if self._on_error:
+                self._on_error(msg)
+            else:
+                from tkinter import messagebox
+                messagebox.showwarning(tr("version.restart_blocked_title"), msg)
+            return
+
         installer = self._pending_installer
 
-        # Close parent settings modal
-        settings_modal = self.winfo_toplevel()
-        with contextlib.suppress(RuntimeError):
-            settings_modal.grab_release()
-        settings_modal.destroy()
+        # ── Clean teardown: let any in-progress worker save finish ────────
+        # Prefer the app-level close handler (stops workers via
+        # shutdown_all(timeout) at a safe between-files boundary, then destroys
+        # the root). Falling back to a bare modal destroy only when no such
+        # handler exists keeps the previous behavior for non-app hosts (tests).
+        app = self._find_app()
+        close_handler = getattr(app, "_on_app_close", None) if app else None
+        if callable(close_handler):
+            with contextlib.suppress(RuntimeError):
+                close_handler()
+        else:
+            settings_modal = self.winfo_toplevel()
+            with contextlib.suppress(RuntimeError):
+                settings_modal.grab_release()
+            settings_modal.destroy()
 
         # Run the installer silently if we have a downloaded file.
         # SECURITY: pass the expected SHA-256 so apply_update re-verifies the

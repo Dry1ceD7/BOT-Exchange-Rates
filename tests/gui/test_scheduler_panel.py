@@ -950,3 +950,289 @@ class TestSchedulerPanelSkipToggles:
         assert cfg["skip_weekends"] is True
         assert cfg["skip_holidays"] is False
         panel.destroy()
+
+
+# ---------------------------------------------------------------------------
+# 13. Missing watch folders are KEPT (not silently dropped) on load
+#     (finding: scheduler_panel.py:205)
+# ---------------------------------------------------------------------------
+
+class TestSchedulerPanelMissingFolders:
+    """A persisted folder that no longer resolves must stay in the list,
+    visibly flagged, rather than being silently removed — the user otherwise
+    keeps believing the scheduler watches it.
+    """
+
+    def test_missing_folder_is_retained_in_paths(self, tk_root, tmp_path):
+        present = tmp_path / "live"
+        present.mkdir()
+        missing = tmp_path / "offline_share"  # never created
+        settings = {"scheduler_paths": [str(present), str(missing)]}
+
+        panel, _ = _make_panel(tk_root, settings=settings)
+        # Both paths survive — the missing one is NOT dropped.
+        assert str(present) in panel._paths
+        assert str(missing) in panel._paths
+        panel.destroy()
+
+    def test_missing_folder_is_tracked_as_missing(self, tk_root, tmp_path):
+        present = tmp_path / "live"
+        present.mkdir()
+        missing = tmp_path / "gone"
+        settings = {"scheduler_paths": [str(present), str(missing)]}
+
+        panel, _ = _make_panel(tk_root, settings=settings)
+        assert str(missing) in panel._missing_paths
+        assert str(present) not in panel._missing_paths
+        panel.destroy()
+
+    def test_missing_folder_marked_in_path_list(self, tk_root, tmp_path):
+        missing = tmp_path / "gone"
+        settings = {"scheduler_paths": [str(missing)]}
+
+        panel, _ = _make_panel(tk_root, settings=settings)
+        panel._path_list.configure(state="normal")
+        content = panel._path_list.get("1.0", "end")
+        panel._path_list.configure(state="disabled")
+        # The unavailable marker glyph distinguishes it from a healthy folder.
+        assert "⚠" in content
+        assert "gone" in content
+        panel.destroy()
+
+    def test_valid_paths_excludes_missing(self, tk_root, tmp_path):
+        present = tmp_path / "live"
+        present.mkdir()
+        missing = tmp_path / "gone"
+        settings = {"scheduler_paths": [str(present), str(missing)]}
+
+        panel, _ = _make_panel(tk_root, settings=settings)
+        valid = panel._valid_paths()
+        assert valid == [str(present)]
+        panel.destroy()
+
+    def test_status_warns_when_some_folders_missing(self, tk_root, tmp_path):
+        present = tmp_path / "live"
+        present.mkdir()
+        missing = tmp_path / "gone"
+        settings = {"scheduler_paths": [str(present), str(missing)]}
+
+        panel, _ = _make_panel(tk_root, settings=settings)
+        from gui.theme import get_theme
+
+        panel._update_status()
+        text = panel._lbl_status.cget("text")
+        # Status reflects the valid count (1) but flags that some are missing
+        # via the warning color rather than the all-good success color.
+        assert panel._lbl_status.cget("text_color") == get_theme()["warning"]
+        assert text != ""
+        panel.destroy()
+
+    def test_persisted_enabled_arms_over_valid_subset_only(
+        self, tk_root, tmp_path
+    ):
+        """A persisted-enabled panel with one live + one missing folder must
+        arm the scheduler over the LIVE folder only (never the missing one).
+        """
+        present = tmp_path / "live"
+        present.mkdir()
+        missing = tmp_path / "gone"
+        fired = []
+        settings = {
+            "scheduler_enabled": True,
+            "scheduler_time": "08:30",
+            "scheduler_paths": [str(present), str(missing)],
+        }
+        panel, _ = _make_panel(
+            tk_root, settings=settings,
+            on_start=lambda t, p, **kw: fired.append((t, p)),
+        )
+        assert len(fired) == 1
+        # Armed over the valid subset, not the full (incl. missing) list.
+        assert fired[0][1] == [str(present)]
+        assert panel._enable_var.get() == "on"
+        panel.destroy()
+
+    def test_persisted_enabled_all_missing_repairs_to_off(
+        self, tk_root, tmp_path
+    ):
+        """If EVERY persisted folder is missing, the scheduler cannot run; it
+        must repair to off (but the folders are still listed for the user).
+        """
+        missing = tmp_path / "gone"
+        fired = []
+        settings = {
+            "scheduler_enabled": True,
+            "scheduler_time": "23:00",
+            "scheduler_paths": [str(missing)],
+        }
+        panel, mock_mgr = _make_panel(
+            tk_root, settings=settings,
+            on_start=lambda t, p, **kw: fired.append((t, p)),
+        )
+        assert fired == [], "must not arm when no valid folder resolves"
+        assert panel._enable_var.get() == "off"
+        # Folder is still retained (not dropped) so the user can see/remove it.
+        assert str(missing) in panel._paths
+        saved = {c.args[0]: c.args[1] for c in mock_mgr.set.call_args_list}
+        assert saved.get("scheduler_enabled") is False
+        panel.destroy()
+
+    def test_toggle_on_with_only_missing_folder_reverts_off(
+        self, tk_root, tmp_path
+    ):
+        """Flipping ON when the only watch folder is unavailable must refuse to
+        arm — a list of only-missing folders counts as zero valid folders.
+        """
+        missing = tmp_path / "gone"
+        fired = []
+        panel, _ = _make_panel(
+            tk_root, on_start=lambda t, p, **kw: fired.append((t, p))
+        )
+        panel._paths = [str(missing)]
+        panel._recompute_missing()
+        panel._enable_var.set("on")
+        panel._on_toggle()
+        assert panel._enable_var.get() == "off"
+        assert fired == []
+        panel.destroy()
+
+
+# ---------------------------------------------------------------------------
+# 14. Last-run feedback row (finding: app.py:903 — panel side)
+# ---------------------------------------------------------------------------
+
+class TestSchedulerPanelLastRun:
+    """The panel renders the persisted scheduler_last_run summary so a
+    tray-minimised scheduled fire is no longer invisible in the panel.
+
+    The i18n catalog entry ``sched.last_run`` now ships in the real catalog
+    (added by the wave-2 i18n-sync pass). These tests still pin a known value
+    for the duration of a test and restore the prior catalog state on teardown
+    so they neither depend on the exact wording nor mutate the shared CATALOG
+    for any test that runs afterwards.
+    """
+
+    @pytest.fixture
+    def _last_run_key(self):
+        """Pin sched.last_run for a test, restoring the catalog afterwards."""
+        from core import i18n
+
+        sentinel = object()
+        previous = i18n.CATALOG.get("sched.last_run", sentinel)
+        i18n.CATALOG["sched.last_run"] = {
+            "en": "Last run: {summary}",
+            "th": "ทำงานล่าสุด: {summary}",
+        }
+        try:
+            yield
+        finally:
+            if previous is sentinel:
+                i18n.CATALOG.pop("sched.last_run", None)
+            else:
+                i18n.CATALOG["sched.last_run"] = previous
+
+    def test_last_run_label_exists(self, tk_root):
+        import customtkinter as ctk
+
+        panel, _ = _make_panel(tk_root)
+        assert hasattr(panel, "_lbl_last_run")
+        assert isinstance(panel._lbl_last_run, ctk.CTkLabel)
+        panel.destroy()
+
+    def test_last_run_empty_when_never_run(self, tk_root):
+        panel, _ = _make_panel(tk_root)
+        assert panel._lbl_last_run.cget("text") == ""
+        panel.destroy()
+
+    def test_last_run_rendered_from_persisted_record(
+        self, tk_root, _last_run_key
+    ):
+        settings = {
+            "scheduler_paths": [],
+            "scheduler_last_run": {
+                "success": 7, "fail": 1,
+                "summary": "7 OK, 1 failed (04 Jun 23:00)",
+            },
+        }
+        panel, _ = _make_panel(tk_root, settings=settings)
+        text = panel._lbl_last_run.cget("text")
+        assert "7 OK, 1 failed (04 Jun 23:00)" in text
+        panel.destroy()
+
+    def test_last_run_accepts_plain_string_record(
+        self, tk_root, _last_run_key
+    ):
+        settings = {
+            "scheduler_paths": [],
+            "scheduler_last_run": "failed: network down",
+        }
+        panel, _ = _make_panel(tk_root, settings=settings)
+        assert "failed: network down" in panel._lbl_last_run.cget("text")
+        panel.destroy()
+
+    def test_refresh_last_run_picks_up_new_record(
+        self, tk_root, _last_run_key
+    ):
+        """The public refresh hook re-reads settings so the app can update the
+        row after a fire without a restart.
+        """
+        live_settings = {"scheduler_paths": []}
+        panel, mock_mgr = _make_panel(tk_root, settings=live_settings)
+        assert panel._lbl_last_run.cget("text") == ""
+        # Simulate the app persisting a fresh last-run record, then refreshing.
+        live_settings["scheduler_last_run"] = {
+            "success": 3, "fail": 0, "summary": "3 OK, 0 failed",
+        }
+        panel.refresh_last_run()
+        assert "3 OK, 0 failed" in panel._lbl_last_run.cget("text")
+        panel.destroy()
+
+    def test_malformed_last_run_record_hides_row(self, tk_root, _last_run_key):
+        settings = {
+            "scheduler_paths": [],
+            "scheduler_last_run": {"success": 1},  # no summary
+        }
+        panel, _ = _make_panel(tk_root, settings=settings)
+        assert panel._lbl_last_run.cget("text") == ""
+        panel.destroy()
+
+
+# ---------------------------------------------------------------------------
+# 15. Tooltips on icon/emoji controls (finding: scheduler_panel.py:71)
+# ---------------------------------------------------------------------------
+
+class TestSchedulerPanelTooltips:
+    """Icon/emoji-bearing controls carry hover tooltips so their meaning is
+    discoverable regardless of emoji-glyph rendering across platforms.
+    """
+
+    def test_tooltips_registered_for_controls(self, tk_root):
+        panel, _ = _make_panel(tk_root)
+        # One tooltip each for: toggle, hour, minute, skip-weekends,
+        # skip-holidays, remove, add => 7 controls.
+        assert len(panel._tooltips) == 7
+        panel.destroy()
+
+    def test_tooltip_has_nonempty_text(self, tk_root):
+        panel, _ = _make_panel(tk_root)
+        for tip in panel._tooltips:
+            assert tip._text, "every tooltip must carry text"
+        panel.destroy()
+
+    def test_tooltip_show_and_hide_do_not_raise(self, tk_root):
+        panel, _ = _make_panel(tk_root)
+        tip = panel._tooltips[0]
+        tip._show()  # builds the toplevel
+        assert tip._tip is not None
+        tip._hide()  # tears it down
+        assert tip._tip is None
+        panel.destroy()
+
+    def test_tooltip_hidden_after_panel_destroy(self, tk_root):
+        """Destroying the panel must not leave a dangling tooltip toplevel."""
+        panel, _ = _make_panel(tk_root)
+        tip = panel._tooltips[0]
+        tip._show()
+        panel.destroy()
+        # The <Destroy> binding fires _hide; the tip is torn down.
+        assert tip._tip is None

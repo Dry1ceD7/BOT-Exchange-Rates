@@ -796,3 +796,132 @@ class TestVersionPanelReleaseNotes:
             out = panel._fetch_release_notes("3.3.0")
         assert out == ""
         panel.destroy()
+
+
+# ---------------------------------------------------------------------------
+# 12. Restart-to-install batch guard + clean teardown
+#     (finding: "Restart-to-install during a batch hard-exits, abandoning
+#      in-flight openpyxl saves")
+# ---------------------------------------------------------------------------
+
+class TestVersionPanelRestartBatchGuard:
+    """_do_restart refuses during a batch and routes through clean shutdown."""
+
+    def test_is_batch_active_prefers_callback(self, tk_root):
+        panel = _make_panel(tk_root, is_batch_active=lambda: True)
+        assert panel._is_batch_active() is True
+        panel.destroy()
+
+    def test_is_batch_active_callback_false(self, tk_root):
+        panel = _make_panel(tk_root, is_batch_active=lambda: False)
+        assert panel._is_batch_active() is False
+        panel.destroy()
+
+    def test_is_batch_active_false_when_no_app_and_no_callback(self, tk_root):
+        # No callback, no app ancestor with batch_handler → safely not active.
+        panel = _make_panel(tk_root)
+        assert panel._is_batch_active() is False
+        panel.destroy()
+
+    def test_is_batch_active_reads_handler_via_hierarchy(self, tk_root):
+        """With no callback, the panel finds batch_handler._batch_active."""
+        panel = _make_panel(tk_root)
+        fake_handler = MagicMock()
+        fake_handler._batch_active = True
+        fake_app = MagicMock(batch_handler=fake_handler)
+        with patch.object(panel, "_find_app", return_value=fake_app):
+            assert panel._is_batch_active() is True
+        panel.destroy()
+
+    def test_do_restart_refused_during_batch_calls_on_error(self, tk_root):
+        """A live batch blocks the restart and surfaces a message; no install."""
+        error_cb = MagicMock()
+        panel = _make_panel(
+            tk_root, on_error=error_cb, is_batch_active=lambda: True
+        )
+        panel._pending_installer = "/tmp/installer.exe"
+
+        with patch("core.auto_updater.apply_update") as mock_apply:
+            panel._do_restart()
+
+        mock_apply.assert_not_called()
+        error_cb.assert_called_once()
+        panel.destroy()
+
+    def test_do_restart_refused_during_batch_messagebox_fallback(self, tk_root):
+        """When on_error is None, the refusal still surfaces a native popup."""
+        panel = _make_panel(
+            tk_root, on_error=None, is_batch_active=lambda: True
+        )
+        panel._pending_installer = "/tmp/installer.exe"
+
+        with (
+            patch("core.auto_updater.apply_update") as mock_apply,
+            patch("tkinter.messagebox.showwarning") as mock_warn,
+        ):
+            panel._do_restart()
+
+        mock_apply.assert_not_called()
+        mock_warn.assert_called_once()
+        panel.destroy()
+
+    def test_do_restart_routes_through_app_close_handler(self, tk_root):
+        """No batch → teardown goes through app._on_app_close before install.
+
+        _on_app_close runs ThreadRegistry.shutdown_all(), letting an in-flight
+        save finish at its safe boundary before we apply the installer + exit.
+        """
+        panel = _make_panel(tk_root, is_batch_active=lambda: False)
+        panel._pending_installer = "/tmp/installer.exe"
+        panel._pending_sha256 = "abc123"
+
+        close_handler = MagicMock()
+        fake_app = MagicMock(_on_app_close=close_handler)
+
+        call_order: list[str] = []
+        close_handler.side_effect = lambda: call_order.append("close")
+
+        def _apply(_installer, expected_sha256=None):
+            call_order.append("apply")
+            return {"success": True}
+
+        # Mirror the real sys.exit by raising SystemExit so flow stops at the
+        # hard exit instead of falling through to the normal-restart branch.
+        with (
+            patch.object(panel, "_find_app", return_value=fake_app),
+            patch("pathlib.Path.is_file", return_value=True),
+            patch("core.auto_updater.apply_update", side_effect=_apply),
+            patch("gui.panels.version_panel.sys.exit",
+                  side_effect=SystemExit(0)) as mock_exit,
+            pytest.raises(SystemExit),
+        ):
+            panel._do_restart()
+
+        # Clean shutdown happened BEFORE the installer ran (saves can finish).
+        assert call_order == ["close", "apply"]
+        mock_exit.assert_called_once_with(0)
+        panel.destroy()
+
+    def test_do_restart_falls_back_to_modal_destroy_without_app(self, tk_root):
+        """No reachable app close handler → previous bare-destroy behavior."""
+        panel = _make_panel(tk_root, is_batch_active=lambda: False)
+        panel._pending_installer = "/tmp/installer.exe"
+        panel._pending_sha256 = "abc123"
+
+        fake_modal = MagicMock()
+
+        with (
+            patch.object(panel, "_find_app", return_value=None),
+            patch.object(panel, "winfo_toplevel", return_value=fake_modal),
+            patch("pathlib.Path.is_file", return_value=True),
+            patch("core.auto_updater.apply_update",
+                  return_value={"success": True}),
+            patch("gui.panels.version_panel.sys.exit",
+                  side_effect=SystemExit(0)) as mock_exit,
+            pytest.raises(SystemExit),
+        ):
+            panel._do_restart()
+
+        fake_modal.destroy.assert_called_once()
+        mock_exit.assert_called_once_with(0)
+        panel.destroy()

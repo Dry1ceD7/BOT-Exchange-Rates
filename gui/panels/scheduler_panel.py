@@ -14,8 +14,10 @@ background auto-processing scheduler. Provides:
 Persists all configuration via core/config_manager.SettingsManager.
 """
 
+import contextlib
 import logging
 import os
+import tkinter
 from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog
@@ -27,6 +29,74 @@ from core.i18n import plural, tr
 from gui.theme import MONO_FONT, get_theme
 
 logger = logging.getLogger(__name__)
+
+
+class _HoverTooltip:
+    """Minimal hover tooltip for a CTk widget.
+
+    The codebase has no tooltip helper, so this provides a featherweight one:
+    a borderless Toplevel showing a short label when the pointer rests over the
+    target widget, torn down on leave. No new dependencies, no after() loops
+    that could outlive the widget — it only schedules a single delayed show and
+    always cancels it on leave/destroy so it is post-destroy safe.
+    """
+
+    _DELAY_MS = 500
+
+    def __init__(self, widget, text: str):
+        self._widget = widget
+        self._text = text
+        self._tip: tkinter.Toplevel | None = None
+        self._after_id: str | None = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+        widget.bind("<Destroy>", self._hide, add="+")
+
+    def set_text(self, text: str) -> None:
+        self._text = text
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        with contextlib.suppress(tkinter.TclError, RuntimeError):
+            self._after_id = self._widget.after(self._DELAY_MS, self._show)
+
+    def _cancel(self):
+        if self._after_id is not None:
+            with contextlib.suppress(tkinter.TclError, RuntimeError):
+                self._widget.after_cancel(self._after_id)
+            self._after_id = None
+
+    def _show(self):
+        if self._tip is not None or not self._text:
+            return
+        with contextlib.suppress(tkinter.TclError, RuntimeError):
+            t = get_theme()
+            x = self._widget.winfo_rootx() + 12
+            y = self._widget.winfo_rooty() + self._widget.winfo_height() + 6
+            tip = tkinter.Toplevel(self._widget)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{x}+{y}")
+            tkinter.Label(
+                tip,
+                text=self._text,
+                background=t["section_bg"],
+                foreground=t["text_primary"],
+                relief="solid",
+                borderwidth=1,
+                font=("", 10),
+                padx=6,
+                pady=2,
+                justify="left",
+            ).pack()
+            self._tip = tip
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._tip is not None:
+            with contextlib.suppress(tkinter.TclError, RuntimeError):
+                self._tip.destroy()
+            self._tip = None
 
 
 class SchedulerPanel(ctk.CTkFrame):
@@ -59,6 +129,13 @@ class SchedulerPanel(ctk.CTkFrame):
         self._mgr = SettingsManager()
         self._settings = self._mgr.load()
 
+        # Internal path storage. ``_missing_paths`` holds the subset of
+        # ``_paths`` that did not resolve to a real directory on load so they
+        # can be shown marked "(unavailable)" instead of silently dropped.
+        self._paths: list = []
+        self._missing_paths: set[str] = set()
+        self._tooltips: list[_HoverTooltip] = []
+
         self._build_ui()
         self._load_persisted_state()
 
@@ -87,6 +164,9 @@ class SchedulerPanel(ctk.CTkFrame):
             command=self._on_toggle,
         )
         self._toggle.pack(side="right")
+        self._tooltips.append(
+            _HoverTooltip(self._toggle, tr("sched.tip_toggle"))
+        )
 
         # ── Content (hidden when disabled) ────────────────────────────
         self._content = ctk.CTkFrame(self, fg_color="transparent")
@@ -115,6 +195,9 @@ class SchedulerPanel(ctk.CTkFrame):
             command=self._on_config_change,
         )
         self._hour_menu.pack(side="left", padx=(8, 2))
+        self._tooltips.append(
+            _HoverTooltip(self._hour_menu, tr("sched.tip_time"))
+        )
 
         self._lbl_colon = ctk.CTkLabel(
             time_row, text=":",
@@ -139,6 +222,9 @@ class SchedulerPanel(ctk.CTkFrame):
             command=self._on_config_change,
         )
         self._minute_menu.pack(side="left", padx=2)
+        self._tooltips.append(
+            _HoverTooltip(self._minute_menu, tr("sched.tip_time"))
+        )
 
         # ── Skip options row ──────────────────────────────────────────
         skip_row = ctk.CTkFrame(self._content, fg_color="transparent")
@@ -157,6 +243,9 @@ class SchedulerPanel(ctk.CTkFrame):
             command=self._on_config_change,
         )
         self._chk_skip_weekends.pack(side="left", padx=(0, 16))
+        self._tooltips.append(
+            _HoverTooltip(self._chk_skip_weekends, tr("sched.tip_skip_weekends"))
+        )
 
         self._skip_holidays_var = ctk.StringVar(value="off")
         self._chk_skip_holidays = ctk.CTkCheckBox(
@@ -171,6 +260,9 @@ class SchedulerPanel(ctk.CTkFrame):
             command=self._on_config_change,
         )
         self._chk_skip_holidays.pack(side="left")
+        self._tooltips.append(
+            _HoverTooltip(self._chk_skip_holidays, tr("sched.tip_skip_holidays"))
+        )
 
         # ── Watch paths section ───────────────────────────────────────
         paths_header = ctk.CTkFrame(self._content, fg_color="transparent")
@@ -192,6 +284,9 @@ class SchedulerPanel(ctk.CTkFrame):
             command=self._on_remove_path,
         )
         self._btn_remove.pack(side="right", padx=(4, 0))
+        self._tooltips.append(
+            _HoverTooltip(self._btn_remove, tr("sched.tip_remove"))
+        )
 
         self._btn_add = ctk.CTkButton(
             paths_header, text=tr("sched.btn_add"),
@@ -202,6 +297,9 @@ class SchedulerPanel(ctk.CTkFrame):
             command=self._on_add_path,
         )
         self._btn_add.pack(side="right")
+        self._tooltips.append(
+            _HoverTooltip(self._btn_add, tr("sched.tip_add"))
+        )
 
         # Path list (scrollable text box)
         self._path_list = ctk.CTkTextbox(
@@ -222,10 +320,19 @@ class SchedulerPanel(ctk.CTkFrame):
             font=ctk.CTkFont(size=11),
             text_color=t["text_muted"],
         )
-        self._lbl_status.pack(padx=12, pady=(0, 8))
+        self._lbl_status.pack(padx=12, pady=(0, 2))
 
-        # Internal path storage
-        self._paths: list = []
+        # ── Last-run feedback row ─────────────────────────────────────
+        # The scheduler fires unattended (window minimised to the tray), so a
+        # scheduled run is otherwise invisible in the panel. app.py persists a
+        # `scheduler_last_run` record after each fire; render it here so the
+        # operator can confirm auto-processing actually ran and its outcome.
+        self._lbl_last_run = ctk.CTkLabel(
+            self._content, text="",
+            font=ctk.CTkFont(size=11),
+            text_color=t["text_muted"],
+        )
+        self._lbl_last_run.pack(padx=12, pady=(0, 8))
 
     def _load_persisted_state(self):
         """Load scheduler config from settings.json."""
@@ -250,40 +357,52 @@ class SchedulerPanel(ctk.CTkFrame):
                 self._snap_to_options(parts[1], minute_opts, "00")
             )
 
-        # Load paths
-        self._paths = [p for p in paths if Path(p).is_dir()]
+        # Load paths. Previously missing folders (offline share, removed USB,
+        # deleted dir) were silently dropped from the list — the user kept
+        # believing the scheduler watched them. Instead KEEP every persisted
+        # path and remember which ones do not currently resolve so they can be
+        # shown marked "(unavailable)" and the user can prune them deliberately.
+        self._paths = [str(p) for p in paths]
+        self._recompute_missing()
         self._refresh_path_list()
 
         # Restore skip toggles.
         self._skip_weekends_var.set("on" if skip_weekends else "off")
         self._skip_holidays_var.set("on" if skip_holidays else "off")
 
+        # Render any persisted last-run summary.
+        self._refresh_last_run()
+
         # Set toggle (triggers _on_toggle which shows/hides content).
         #
-        # A persisted "on" state is only honored when at least one valid watch
-        # folder survives the is_dir() filter above. Without a folder the
+        # A persisted "on" state is only honored when at least one currently
+        # VALID watch folder exists. Missing folders are kept in the list
+        # (shown "(unavailable)") but cannot be processed, so the scheduler is
+        # only armed over the resolvable subset. Without ANY valid folder the
         # scheduler can never process anything, so we force the toggle back off
         # and re-persist (mirrors the zero-folder guard in _on_toggle) rather
         # than showing a "Next run" that silently fires over an empty list.
-        if enabled and self._paths:
+        valid_paths = self._valid_paths()
+        if enabled and valid_paths:
             self._enable_var.set("on")
             self._content.pack(fill="x", pady=(0, 4))
             self._update_status()
             # CRITICAL: actually arm the background scheduler on launch.
             # Restoring the toggle visual + status alone left the feature
             # silently dead across restarts — the AutoScheduler was never
-            # started, so the scheduled batch never fired.
+            # started, so the scheduled batch never fired. Arm over the VALID
+            # subset only so a stale missing path can't break the run.
             if self._on_start:
                 self._on_start(
                     f"{self._hour_var.get()}:{self._minute_var.get()}",
-                    list(self._paths),
+                    valid_paths,
                     skip_weekends=self._skip_weekends_var.get() == "on",
                     skip_holidays=self._skip_holidays_var.get() == "on",
                 )
         else:
             self._enable_var.set("off")
-            if enabled and not self._paths:
-                # Persisted-enabled but every watch folder is now missing:
+            if enabled and not valid_paths:
+                # Persisted-enabled but no watch folder currently resolves:
                 # repair the on-disk flag so we don't keep advertising a
                 # scheduler that cannot run.
                 self._content.pack(fill="x", pady=(0, 4))
@@ -310,17 +429,38 @@ class SchedulerPanel(ctk.CTkFrame):
             return fallback
         return padded if padded in opts else fallback
 
+    def _recompute_missing(self) -> None:
+        """Refresh the set of watch folders that do not currently resolve.
+
+        Cheap stat per path; the list is tiny (hand-picked folders). Called on
+        load and after every add/remove so the "(unavailable)" marker and the
+        valid-path gate stay in sync without walking any directory contents.
+        """
+        self._missing_paths = {
+            p for p in self._paths if not Path(p).is_dir()
+        }
+
+    def _valid_paths(self) -> list[str]:
+        """Return the watch folders that currently resolve to a directory.
+
+        The scheduler is only ever armed over this subset so a stale/offline
+        folder kept in the list (for visibility) can never break a run.
+        """
+        return [p for p in self._paths if p not in self._missing_paths]
+
     def _on_toggle(self):
         """Handle enable/disable toggle."""
         enabled = self._enable_var.get() == "on"
         if enabled:
-            # Refuse to arm with zero watch folders: the scheduler would
+            # Refuse to arm with zero VALID watch folders: the scheduler would
             # "start" and persist scheduler_enabled=True but could never
             # process anything (it scans an empty path list night after
-            # night). Reveal the content so the warning is visible, snap the
-            # switch back off, and do NOT persist an enabled state.
+            # night). A list of only-missing folders counts as zero here.
+            # Reveal the content so the warning is visible, snap the switch
+            # back off, and do NOT persist an enabled state.
             self._content.pack(fill="x", pady=(0, 4))
-            if not self._paths:
+            valid_paths = self._valid_paths()
+            if not valid_paths:
                 self._enable_var.set("off")
                 self._update_status()
                 self._save_config()
@@ -329,7 +469,7 @@ class SchedulerPanel(ctk.CTkFrame):
             if self._on_start:
                 self._on_start(
                     f"{self._hour_var.get()}:{self._minute_var.get()}",
-                    list(self._paths),
+                    valid_paths,
                     skip_weekends=self._skip_weekends_var.get() == "on",
                     skip_holidays=self._skip_holidays_var.get() == "on",
                 )
@@ -343,11 +483,11 @@ class SchedulerPanel(ctk.CTkFrame):
         """Handle time, path, or skip-option changes."""
         self._save_config()
         self._update_status()
-        # If scheduler is running, update it live
+        # If scheduler is running, update it live (over valid paths only).
         if self._enable_var.get() == "on" and self._on_start:
             self._on_start(
                 f"{self._hour_var.get()}:{self._minute_var.get()}",
-                list(self._paths),
+                self._valid_paths(),
                 skip_weekends=self._skip_weekends_var.get() == "on",
                 skip_holidays=self._skip_holidays_var.get() == "on",
             )
@@ -359,6 +499,7 @@ class SchedulerPanel(ctk.CTkFrame):
         )
         if path and path not in self._paths:
             self._paths.append(path)
+            self._recompute_missing()
             self._refresh_path_list()
             self._on_config_change()
 
@@ -369,6 +510,7 @@ class SchedulerPanel(ctk.CTkFrame):
         # If only one path, just remove it directly
         if len(self._paths) == 1:
             self._paths.clear()
+            self._recompute_missing()
             self._refresh_path_list()
             self._on_config_change()
             return
@@ -382,6 +524,7 @@ class SchedulerPanel(ctk.CTkFrame):
             target = snapshot[idx]
             if target in self._paths:
                 self._paths.remove(target)
+                self._recompute_missing()
                 self._refresh_path_list()
                 self._on_config_change()
 
@@ -395,17 +538,38 @@ class SchedulerPanel(ctk.CTkFrame):
             # dir so the `or p` fallback shows the full path; Path.name would
             # return the last segment instead. Keep exact display behavior.
             display = os.path.basename(p) or p  # noqa: PTH119
-            self._path_list.insert("end", f"📁 {display}\n")
+            # A folder that no longer resolves is kept in the list (so the user
+            # is never silently un-watching it) but visibly flagged so they can
+            # remove it deliberately rather than discovering it was dropped.
+            if p in self._missing_paths:
+                self._path_list.insert(
+                    "end", f"⚠ {display} {tr('sched.unavailable')}\n"
+                )
+            else:
+                self._path_list.insert("end", f"📁 {display}\n")
         self._path_list.configure(state="disabled")
 
     def _update_status(self):
         """Update the status label."""
         t = get_theme()
-        n = len(self._paths)
+        valid = self._valid_paths()
+        n = len(valid)
+        n_missing = len(self._missing_paths)
         time_str = f"{self._hour_var.get()}:{self._minute_var.get()}"
         if n == 0:
             self._lbl_status.configure(
                 text=tr("sched.status_no_folders"),
+                text_color=t["warning"],
+            )
+        elif n_missing:
+            # Some folders resolve, some do not: arm over the valid ones but
+            # warn so the user notices the unavailable entries.
+            self._lbl_status.configure(
+                text=tr(
+                    "sched.status_next_run_some_missing",
+                    time=time_str, count=n, plural=plural(n),
+                    missing=n_missing,
+                ),
                 text_color=t["warning"],
             )
         else:
@@ -416,6 +580,36 @@ class SchedulerPanel(ctk.CTkFrame):
                 ),
                 text_color=t["success"],
             )
+
+    def _refresh_last_run(self) -> None:
+        """Render the persisted last-run summary into the panel.
+
+        Reads the ``scheduler_last_run`` record that app.py writes after each
+        scheduled fire (``{"success", "fail", "summary"}``) and shows a
+        "Last run: …" row. Called on load and re-callable by the app after a
+        fire so the panel reflects the latest run without a restart. A missing
+        or malformed record simply hides the row.
+        """
+        record = None
+        with contextlib.suppress(Exception):
+            record = self._mgr.load().get("scheduler_last_run")
+        summary = ""
+        if isinstance(record, dict):
+            summary = str(record.get("summary") or "").strip()
+        elif isinstance(record, str):
+            summary = record.strip()
+        if not hasattr(self, "_lbl_last_run"):
+            return
+        if summary:
+            self._lbl_last_run.configure(
+                text=tr("sched.last_run", summary=summary),
+            )
+        else:
+            self._lbl_last_run.configure(text="")
+
+    def refresh_last_run(self) -> None:
+        """Public hook for the app to refresh the last-run row after a fire."""
+        self._refresh_last_run()
 
     def _save_config(self):
         """Persist current scheduler config to settings.json.
@@ -469,8 +663,8 @@ class SchedulerPanel(ctk.CTkFrame):
             self._lbl_title.configure(text_color=t["text_primary"])
         if hasattr(self, "_lbl_colon"):
             self._lbl_colon.configure(text_color=t["text_primary"])
-        # Static muted sub-labels.
-        for attr in ("_lbl_run_at", "_lbl_watch"):
+        # Static muted sub-labels (including the last-run feedback row).
+        for attr in ("_lbl_run_at", "_lbl_watch", "_lbl_last_run"):
             lbl = getattr(self, attr, None)
             if lbl is not None:
                 lbl.configure(text_color=t["text_muted"])

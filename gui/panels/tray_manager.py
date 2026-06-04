@@ -163,10 +163,36 @@ class TrayManager:
             self._app.after(0, self._restore_window)
 
     def _restore_window(self) -> None:
-        """Bring the window back and focus it."""
+        """Bring the window back and focus it.
+
+        If a modal dialog (Settings / ExRate) held a Tk grab when the window
+        was hidden, deiconifying only the root leaves the grab in place: clicks
+        land on the (screen-centered, now behind) modal and the main window
+        looks frozen. So after restoring the root we detect any active grab and
+        lift+focus THAT toplevel instead, surfacing the modal the user must act
+        on rather than fighting its grab.
+        """
         self._app.deiconify()
         self._app.lift()
         self._app.focus_force()
+
+        # Bring a still-grabbing modal to the front so input is not trapped.
+        grabbed = None
+        with contextlib.suppress(Exception):  # grab_current absent / Tk torn down
+            grabbed = self._app.grab_current()
+        if grabbed is not None and grabbed is not self._app:
+            with contextlib.suppress(Exception):
+                grabbed.deiconify()
+            with contextlib.suppress(Exception):
+                grabbed.lift()
+            with contextlib.suppress(Exception):
+                grabbed.focus_force()
+            # Re-assert the grab so it owns input cleanly on top, rather than a
+            # stale grab fighting the freshly-lifted root.
+            with contextlib.suppress(Exception):
+                grabbed.grab_set()
+            logger.info("Window restored; surfaced active modal grab")
+
         self._is_hidden = False
         logger.info("Window restored from system tray")
 

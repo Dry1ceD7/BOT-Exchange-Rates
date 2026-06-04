@@ -128,6 +128,65 @@ class TestTrayNotify:
         tray.notify("done")  # no exception, no attribute error
 
 
+class TestTrayRestoreModalGrab:
+    """_restore_window surfaces an active modal grab instead of fighting it.
+
+    Finding: a second-instance restore deiconified the root but left a modal's
+    Tk grab in place, so clicks landed on the off-screen modal and the window
+    looked frozen.
+    """
+
+    def test_restore_surfaces_active_modal_grab(self):
+        tray = _make_tray()
+        modal = MagicMock()
+        # grab_current() returns the modal toplevel that still owns input.
+        tray._app.grab_current.return_value = modal
+
+        tray._restore_window()
+
+        # The root is restored first...
+        tray._app.deiconify.assert_called_once()
+        # ...then the still-grabbing modal is surfaced and re-grabbed so input
+        # is not trapped behind the lifted root.
+        modal.lift.assert_called_once()
+        modal.focus_force.assert_called_once()
+        modal.grab_set.assert_called_once()
+        assert tray._is_hidden is False
+
+    def test_restore_no_grab_does_not_touch_modal(self):
+        """When no modal holds a grab, only the root is restored."""
+        tray = _make_tray()
+        tray._app.grab_current.return_value = None
+
+        tray._restore_window()
+
+        tray._app.deiconify.assert_called_once()
+        tray._app.focus_force.assert_called_once()
+        assert tray._is_hidden is False
+
+    def test_restore_ignores_grab_owned_by_root(self):
+        """A grab held by the root itself is not treated as a separate modal."""
+        tray = _make_tray()
+        # grab_current returns the root → no separate modal to surface.
+        tray._app.grab_current.return_value = tray._app
+
+        tray._restore_window()
+
+        # grab_set must NOT be re-asserted on the root by the modal-surface path.
+        tray._app.grab_set.assert_not_called()
+        assert tray._is_hidden is False
+
+    def test_restore_survives_grab_current_error(self):
+        """A Tk error from grab_current must not break the restore."""
+        tray = _make_tray()
+        tray._app.grab_current.side_effect = RuntimeError("no display")
+
+        tray._restore_window()  # no exception
+
+        tray._app.deiconify.assert_called_once()
+        assert tray._is_hidden is False
+
+
 class TestTrayLastRun:
     """set_last_run() records a retrievable summary for the tray menu row."""
 
