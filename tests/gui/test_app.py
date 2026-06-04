@@ -47,12 +47,14 @@ def _make_app(batch_running=False, scheduled=False, file_queue=None):
         last_processed_path=None,
         btn_process=_btn(),
         btn_revert=_btn(),
+        btn_backups=_btn(),
         btn_export_exrate=_btn(),
         btn_reveal=_btn(),
         lbl_status=MagicMock(),
         lbl_queue=MagicMock(),
         dz_text=MagicMock(),
         dz_sub=MagicMock(),
+        lbl_empty_state=MagicMock(),
         progressbar=MagicMock(),
         batch_handler=MagicMock(),
         update_idletasks=MagicMock(),
@@ -62,6 +64,15 @@ def _make_app(batch_running=False, scheduled=False, file_queue=None):
     app._render_failed_files = MagicMock()
     app._unlock_ui_after_batch = lambda: BOTExrateApp._unlock_ui_after_batch(app)
     app._settle_progressbar = lambda value: BOTExrateApp._settle_progressbar(app, value)
+    # _set_window_title no-ops (no real Tk title); _refresh_revert_state fails
+    # OPEN (no backup_mgr) — both are exercised but harmless on the stand-in.
+    app._set_window_title = lambda suffix=None: BOTExrateApp._set_window_title(app, suffix)
+    app._refresh_revert_state = lambda: BOTExrateApp._refresh_revert_state(app)
+    app._show_empty_state = lambda: BOTExrateApp._show_empty_state(app)
+    app._hide_empty_state = lambda: BOTExrateApp._hide_empty_state(app)
+    app.btn_clear_queue = _btn()
+    app._show_clear_queue = lambda: BOTExrateApp._show_clear_queue(app)
+    app._hide_clear_queue = lambda: BOTExrateApp._hide_clear_queue(app)
     app._last_succeeded_path = (
         lambda errors: BOTExrateApp._last_succeeded_path(app, errors)
     )
@@ -96,6 +107,7 @@ class TestScheduledRunFlag:
             lbl_status=MagicMock(),
             batch_handler=MagicMock(),
         )
+        app._set_window_title = lambda suffix=None: BOTExrateApp._set_window_title(app, suffix)
         app._lock_ui_for_batch = lambda: BOTExrateApp._lock_ui_for_batch(app)
 
         BOTExrateApp._begin_scheduled_batch(app, ["x.xlsx"], "2026-01-01")
@@ -124,6 +136,7 @@ class TestScheduledBatchHonorsRevert:
             backup_mgr=MagicMock(),
             btn_process=_btn(),
             btn_revert=_btn(),
+            btn_backups=_btn(),
             btn_export_exrate=_btn(),
             btn_reveal=_btn(),
             progressbar=MagicMock(),
@@ -131,6 +144,8 @@ class TestScheduledBatchHonorsRevert:
             batch_handler=MagicMock(),
         )
         app._flash_busy_status = lambda: BOTExrateApp._flash_busy_status(app)
+        app._set_window_title = lambda suffix=None: BOTExrateApp._set_window_title(app, suffix)
+        app._refresh_revert_state = lambda: BOTExrateApp._refresh_revert_state(app)
         return app
 
     def test_scheduled_batch_skipped_while_revert_running(self):
@@ -333,10 +348,14 @@ class TestExrateConcurrencyGuard:
             file_queue=[],
             btn_process=_btn(),
             btn_revert=_btn(),
+            btn_backups=_btn(),
             btn_export_exrate=_btn(),
             lbl_status=MagicMock(),
         )
         app._flash_busy_status = lambda: BOTExrateApp._flash_busy_status(app)
+        # _poll_exrate_done re-evaluates Revert via _refresh_revert_state; no
+        # backup_mgr on the stand-in => fails OPEN (state="normal").
+        app._refresh_revert_state = lambda: BOTExrateApp._refresh_revert_state(app)
         return app
 
     def test_export_disables_process_and_revert(self, monkeypatch):
@@ -666,3 +685,145 @@ class TestWindowSizing:
         # A pathologically short screen still yields the usable 640px floor.
         app = SimpleNamespace(winfo_screenheight=lambda: 600)
         assert BOTExrateApp._fit_default_height(app, 960) == 640
+
+
+# ---------------------------------------------------------------------------
+# app-polish #1 / #10 — date combos are pick-only and default to bot_today()
+# ---------------------------------------------------------------------------
+
+class TestDateComboReadonly:
+    def test_lock_dropdowns_unlocked_is_readonly_not_normal(self):
+        """Unlocking the manual date combos must leave them 'readonly' (pick-
+        only), never 'normal' — re-enabling free-text would reintroduce the
+        typo-at-process-time gap (#1)."""
+        from gui.app import BOTExrateApp
+
+        combos = [MagicMock(), MagicMock(), MagicMock()]
+        app = SimpleNamespace(_combo_widgets=combos)
+
+        BOTExrateApp._lock_date_dropdowns(app, locked=False)
+        for c in combos:
+            c.configure.assert_called_with(state="readonly")
+
+        BOTExrateApp._lock_date_dropdowns(app, locked=True)
+        for c in combos:
+            c.configure.assert_called_with(state="disabled")
+
+    def test_combos_build_readonly_and_default_to_bot_today(self, tk_root):
+        """Build real combos exactly as _build_card does and assert they are
+        readonly and seeded with the BOT business date (#1, #10)."""
+        import customtkinter as ctk
+
+        from core.constants import bot_today
+
+        today = bot_today()
+        card = ctk.CTkFrame(tk_root)
+        current_year = today.year
+        built = {}
+        for width, values, default, attr in [
+            (100, [str(y) for y in range(2020, current_year + 1)], str(today.year), "y"),
+            (80, [f"{m:02d}" for m in range(1, 13)], f"{today.month:02d}", "m"),
+            (80, [f"{d:02d}" for d in range(1, 32)], f"{today.day:02d}", "d"),
+        ]:
+            combo = ctk.CTkComboBox(card, values=values, width=width, state="readonly")
+            combo.set(default)
+            built[attr] = combo
+
+        # Pick-only (no free-text) and seeded to today's components.
+        assert str(built["y"].cget("state")) == "readonly"
+        assert built["y"].get() == str(today.year)
+        assert built["m"].get() == f"{today.month:02d}"
+        assert built["d"].get() == f"{today.day:02d}"
+        # The stale hardcoded "2025" default is gone.
+        assert built["y"].get() != "2025" or today.year == 2025
+        card.destroy()
+
+
+# ---------------------------------------------------------------------------
+# app-polish #9 — Help / About dialog (version, license, shortcuts, logs link)
+# ---------------------------------------------------------------------------
+
+class TestHelpDialog:
+    def test_logs_dir_points_at_data_logs(self):
+        from gui.app import BOTExrateApp
+
+        path = BOTExrateApp._logs_dir(SimpleNamespace())
+        assert path.replace("\\", "/").endswith("data/logs")
+
+    def test_open_help_builds_dialog_with_version_and_shortcuts(self, tk_root, monkeypatch):
+        import customtkinter as ctk
+
+        from core.i18n import tr
+        from gui.app import BOTExrateApp
+
+        # Parent the dialog on the session root regardless of the `self` master,
+        # so we can drive _open_help without constructing a full BOTExrateApp.
+        # Capture the ORIGINAL constructor first — referencing ctk.CTkToplevel
+        # inside the replacement would recurse into the patched symbol.
+        _orig_toplevel = ctk.CTkToplevel
+        monkeypatch.setattr(
+            "gui.app.ctk.CTkToplevel", lambda master=None: _orig_toplevel(tk_root),
+        )
+
+        app = SimpleNamespace()
+        app._open_folder = MagicMock()
+        app._logs_dir = lambda: "/tmp/logs"
+
+        dialog = BOTExrateApp._open_help(app)
+
+        def _labels(w):
+            out = []
+            for c in w.winfo_children():
+                if isinstance(c, ctk.CTkLabel):
+                    out.append(c.cget("text"))
+                out.extend(_labels(c))
+            return out
+
+        texts = " ".join(_labels(dialog))
+        from core.version import __version__ as v
+        assert v in texts
+        # Shortcuts header is present (routed through tr(); falls back to key).
+        assert tr("main.help_shortcuts_header") in texts
+        dialog.destroy()
+
+
+# ---------------------------------------------------------------------------
+# app-polish #13 — keyboard accelerators route through the click handlers
+# ---------------------------------------------------------------------------
+
+class TestAccelerators:
+    def _accel_app(self, *, process_state="normal"):
+        from gui.app import BOTExrateApp
+
+        app = SimpleNamespace(
+            btn_process=MagicMock(),
+            btn_revert=MagicMock(),
+            btn_export_exrate=MagicMock(),
+        )
+        app.btn_process.cget = lambda key: process_state
+        app.btn_revert.cget = lambda key: "normal"
+        app.btn_export_exrate.cget = lambda key: "normal"
+        app._on_process_click = MagicMock()
+        app._on_revert_click = MagicMock()
+        app._on_export_exrate = MagicMock()
+        app._accel_process = lambda e=None: BOTExrateApp._accel_process(app, e)
+        app._accel_revert = lambda e=None: BOTExrateApp._accel_revert(app, e)
+        app._accel_exrate = lambda e=None: BOTExrateApp._accel_exrate(app, e)
+        return app
+
+    def test_process_accel_invokes_click_when_enabled(self):
+        app = self._accel_app(process_state="normal")
+        app._accel_process()
+        app._on_process_click.assert_called_once()
+
+    def test_process_accel_noop_when_disabled(self):
+        app = self._accel_app(process_state="disabled")
+        app._accel_process()
+        app._on_process_click.assert_not_called()
+
+    def test_revert_and_exrate_accels(self):
+        app = self._accel_app()
+        app._accel_revert()
+        app._accel_exrate()
+        app._on_revert_click.assert_called_once()
+        app._on_export_exrate.assert_called_once()

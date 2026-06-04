@@ -67,15 +67,20 @@ def _make_app(batch_running=False, file_queue=None):
         last_processed_path=None,
         btn_process=_btn(),
         btn_revert=_btn(),
+        btn_backups=_btn(),
         btn_export_exrate=_btn(),
         btn_reveal=_btn(),
         lbl_status=MagicMock(),
         lbl_queue=MagicMock(),
         dz_text=MagicMock(),
         dz_sub=MagicMock(),
+        lbl_empty_state=MagicMock(),
         progressbar=MagicMock(),
         batch_handler=MagicMock(),
         update_idletasks=MagicMock(),
+        # No backup_mgr / no real Tk title — _refresh_revert_state fails OPEN and
+        # _set_window_title no-ops (guarded getattr), so the lock/unlock helpers
+        # exercise their full control flow on the stand-in without a Tk root.
     )
     # Bind the real busy-status / unlock helpers so guarded methods that call
     # back into them exercise the genuine control flow on the stand-in.
@@ -83,6 +88,14 @@ def _make_app(batch_running=False, file_queue=None):
     app._unlock_ui_after_batch = lambda: BOTExrateApp._unlock_ui_after_batch(app)
     app._lock_ui_for_batch = lambda: BOTExrateApp._lock_ui_for_batch(app)
     app._settle_progressbar = lambda value: BOTExrateApp._settle_progressbar(app, value)
+    app._set_window_title = lambda suffix=None: BOTExrateApp._set_window_title(app, suffix)
+    app._refresh_revert_state = lambda: BOTExrateApp._refresh_revert_state(app)
+    app._show_empty_state = lambda: BOTExrateApp._show_empty_state(app)
+    app._hide_empty_state = lambda: BOTExrateApp._hide_empty_state(app)
+    app.btn_clear_queue = _btn()
+    app._show_clear_queue = lambda: BOTExrateApp._show_clear_queue(app)
+    app._hide_clear_queue = lambda: BOTExrateApp._hide_clear_queue(app)
+    app._dedup_new = lambda c: BOTExrateApp._dedup_new(app, c)
     app._last_succeeded_path = (
         lambda errors: BOTExrateApp._last_succeeded_path(app, errors)
     )
@@ -561,9 +574,14 @@ class TestPreflightWarnSeam:
         f.write_bytes(b"\0" * 1024)
 
         order = []
-        app = SimpleNamespace(_batch_running=False)
+        app = SimpleNamespace(_batch_running=False, file_queue=[])
         app._preflight_warn = lambda files: order.append(("preflight", list(files)))
         app._set_queue = lambda files: order.append(("set_queue", list(files)))
+        app._dedup_new = lambda c: BOTExrateApp._dedup_new(app, c)
+        # A pure FILE drop stays synchronous and routes through _finish_drop.
+        app._finish_drop = (
+            lambda excel, rejected: BOTExrateApp._finish_drop(app, excel, rejected)
+        )
 
         event = SimpleNamespace(data=str(f))
         with pytest.MonkeyPatch.context() as mp:
@@ -600,3 +618,412 @@ class TestPreflightWarnSeam:
             BOTExrateApp._preflight_warn(app, [str(f)])
 
         warn.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# app-polish #2 — drop/browse APPEND (dedup) instead of REPLACE; Clear queue
+# ---------------------------------------------------------------------------
+
+class TestAdditiveQueue:
+    def test_dedup_new_excludes_already_queued(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(file_queue=["/a/jan.xlsx", "/a/feb.xlsx"])
+        # feb is a dup (normalized); mar is new.
+        result = BOTExrateApp._dedup_new(
+            app, ["/a/./feb.xlsx", "/a/mar.xlsx", "/a/mar.xlsx"],
+        )
+        assert result == ["/a/mar.xlsx"]
+
+    def test_finish_drop_appends_to_existing_queue(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(file_queue=["/a/jan.xlsx"])
+        app._preflight_warn = MagicMock()
+        captured = {}
+        app._set_queue = lambda files: captured.__setitem__("files", list(files))
+
+        BOTExrateApp._finish_drop(app, ["/a/feb.xlsx"], [])
+
+        # The new file is APPENDED, not a replacement — both survive.
+        assert captured["files"] == ["/a/jan.xlsx", "/a/feb.xlsx"]
+        # Only the newly-added file is preflighted (no re-warn on jan).
+        app._preflight_warn.assert_called_once_with(["/a/feb.xlsx"])
+
+    def test_finish_drop_dedups_redrop(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(file_queue=["/a/jan.xlsx"])
+        app._preflight_warn = MagicMock()
+        captured = {}
+        app._set_queue = lambda files: captured.__setitem__("files", list(files))
+
+        # Re-dropping the already-queued file must not duplicate it.
+        BOTExrateApp._finish_drop(app, ["/a/jan.xlsx"], [])
+
+        assert captured["files"] == ["/a/jan.xlsx"]
+        # Nothing new -> no preflight warning round-trip.
+        app._preflight_warn.assert_not_called()
+
+    def test_clear_queue_resets_selection(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(file_queue=["/a/jan.xlsx", "/a/feb.xlsx"])
+        BOTExrateApp._on_clear_queue(app)
+
+        assert app.file_queue == []
+        app.btn_process.configure.assert_any_call(state="disabled")
+
+    def test_clear_queue_ignored_mid_batch(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(batch_running=True, file_queue=["/a/jan.xlsx"])
+        BOTExrateApp._on_clear_queue(app)
+
+        # A running batch owns the snapshot — Clear must not disturb file_queue.
+        assert app.file_queue == ["/a/jan.xlsx"]
+        assert (
+            app.lbl_status.configure.call_args.kwargs["text"]
+            == tr("main.status_busy")
+        )
+
+
+# ---------------------------------------------------------------------------
+# app-polish #3 — progress names the file + shows how many REMAIN
+# ---------------------------------------------------------------------------
+
+class TestProgressRemaining:
+    def test_progress_reports_remaining_and_names_file(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(batch_running=True)
+        BOTExrateApp._update_progress(app, idx=3, total=10, fname="mar.xlsx", error=None)
+
+        status = app.lbl_status.configure.call_args.kwargs["text"]
+        assert status == tr(
+            "main.status_progress_ok",
+            idx=3, total=10, remaining=7, fname="mar.xlsx",
+        )
+
+    def test_progress_skip_reports_remaining(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(batch_running=True)
+        BOTExrateApp._update_progress(app, idx=10, total=10, fname="dec.xlsx", error="boom")
+
+        status = app.lbl_status.configure.call_args.kwargs["text"]
+        assert status == tr(
+            "main.status_progress_skipped",
+            idx=10, total=10, remaining=0, fname="dec.xlsx",
+        )
+
+
+# ---------------------------------------------------------------------------
+# app-polish #6 — Revert/Backups greyed when there is nothing to revert
+# ---------------------------------------------------------------------------
+
+class TestRevertGreyedWhenEmpty:
+    def _app(self, backup_dir):
+        from gui.app import BOTExrateApp
+
+        app = SimpleNamespace(
+            backup_mgr=SimpleNamespace(backup_dir=str(backup_dir)),
+            btn_revert=_btn(),
+            btn_backups=_btn(),
+        )
+        app._refresh_revert_state = lambda: BOTExrateApp._refresh_revert_state(app)
+        return app
+
+    def test_disabled_when_no_backups(self, tmp_path):
+        app = self._app(tmp_path)  # empty backup dir
+        app._refresh_revert_state()
+
+        app.btn_revert.configure.assert_called_with(state="disabled")
+        app.btn_backups.configure.assert_called_with(state="disabled")
+
+    def test_enabled_when_a_backup_exists(self, tmp_path):
+        (tmp_path / "ledger__bak__20260101_120000.xlsx").write_bytes(b"x")
+        app = self._app(tmp_path)
+        app._refresh_revert_state()
+
+        app.btn_revert.configure.assert_called_with(state="normal")
+        app.btn_backups.configure.assert_called_with(state="normal")
+
+    def test_probe_error_fails_open(self):
+        from gui.app import BOTExrateApp
+
+        # A backup_mgr whose backup_dir is unusable -> probe raises -> fail OPEN.
+        app = SimpleNamespace(
+            backup_mgr=SimpleNamespace(backup_dir=None),
+            btn_revert=_btn(),
+            btn_backups=_btn(),
+        )
+        BOTExrateApp._refresh_revert_state(app)
+        app.btn_revert.configure.assert_called_with(state="normal")
+
+
+# ---------------------------------------------------------------------------
+# app-polish #8 — folder drop resolves listing OFF the Tk thread
+# ---------------------------------------------------------------------------
+
+class TestFolderDropOffloaded:
+    def test_folder_drop_uses_worker_thread(self, tmp_path, monkeypatch):
+        """A dropped DIRECTORY must not call resolve_excel_files inline on the
+        Tk thread; it spawns a worker and marshals the result via after()."""
+        from core.workers.thread_registry import ThreadRegistry
+        from gui.app import BOTExrateApp
+
+        (tmp_path / "a.xlsx").write_bytes(b"\0" * 16)
+        scheduled = []
+
+        app = SimpleNamespace(
+            _batch_running=False,
+            _closing=False,
+            lbl_status=MagicMock(),
+            after=lambda ms, fn: scheduled.append((ms, fn)),
+            thread_registry=ThreadRegistry(),
+        )
+        app._finish_drop = MagicMock()
+        # Bind the real shutdown-safe marshal + registry helpers so the worker's
+        # guarded marshal-back and thread registration are exercised (#1).
+        app._safe_marshal = BOTExrateApp._safe_marshal.__get__(app)
+        app._register_worker = BOTExrateApp._register_worker.__get__(app)
+
+        # Fake Thread that captures the target instead of running it on a real
+        # OS thread — keeps the test deterministic and leak-free.
+        captured = {}
+
+        class FakeThread:
+            def __init__(self, target=None, daemon=None, **k):
+                captured["target"] = target
+                self.name = "FakeThread"
+
+            def start(self):
+                captured["started"] = True
+
+            def is_alive(self):
+                return False
+
+        monkeypatch.setattr("gui.app.threading.Thread", FakeThread)
+        monkeypatch.setattr(
+            "gui.app.parse_drop_data", lambda data, tk_root=None: [str(tmp_path)],
+        )
+
+        event = SimpleNamespace(data=str(tmp_path))
+        BOTExrateApp._on_drop(app, event)
+
+        # A worker thread was spawned (listing offloaded), and _finish_drop was
+        # NOT called inline on the Tk thread.
+        assert captured.get("started") is True
+        app._finish_drop.assert_not_called()
+        # The worker is registered so _on_app_close.shutdown_all accounts for it
+        # before self.destroy() (#1).
+        assert "FolderResolveWorker" in app.thread_registry.status()
+        # The status shows a scanning hint while the worker runs.
+        assert app.lbl_status.configure.called
+
+        # Run the captured worker target; it must marshal the result via after().
+        captured["target"]()
+        assert len(scheduled) == 1
+        # Executing the marshalled callback delivers the resolved files.
+        scheduled[0][1]()
+        app._finish_drop.assert_called_once()
+        excel_files = app._finish_drop.call_args.args[0]
+        assert any(p.endswith("a.xlsx") for p in excel_files)
+
+    def test_file_drop_stays_synchronous(self, tmp_path, monkeypatch):
+        """A pure FILE drop must NOT spawn a thread (cheap, stays inline)."""
+        from gui.app import BOTExrateApp
+
+        f = tmp_path / "a.xlsx"
+        f.write_bytes(b"\0" * 16)
+
+        app = SimpleNamespace(_batch_running=False, lbl_status=MagicMock())
+        app._finish_drop = MagicMock()
+
+        spawned = {"n": 0}
+        monkeypatch.setattr(
+            "gui.app.threading.Thread",
+            lambda *a, **k: spawned.__setitem__("n", spawned["n"] + 1) or MagicMock(),
+        )
+        monkeypatch.setattr(
+            "gui.app.parse_drop_data", lambda data, tk_root=None: [str(f)],
+        )
+
+        BOTExrateApp._on_drop(app, SimpleNamespace(data=str(f)))
+
+        assert spawned["n"] == 0
+        app._finish_drop.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# app-polish #11 — window title reflects the in-flight batch
+# ---------------------------------------------------------------------------
+
+class TestWindowTitleReflectsBatch:
+    def _title_app(self):
+        from gui.app import BOTExrateApp
+
+        captured = {"titles": []}
+        app = SimpleNamespace(
+            _base_title="BOT Exchange Rate Processor  |  V9",
+            title=lambda text: captured["titles"].append(text),
+        )
+        app._set_window_title = (
+            lambda suffix=None: BOTExrateApp._set_window_title(app, suffix)
+        )
+        return app, captured
+
+    def test_title_shows_progress_then_restores(self):
+        from gui.app import BOTExrateApp
+
+        app, captured = self._title_app()
+        BOTExrateApp._set_window_title(app, "Processing 2 of 5")
+        assert "Processing 2 of 5" in captured["titles"][-1]
+        assert "BOT Exchange Rate Processor" in captured["titles"][-1]
+
+        BOTExrateApp._set_window_title(app, None)
+        # Restored to exactly the idle base title.
+        assert captured["titles"][-1] == app._base_title
+
+    def test_update_progress_sets_title(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(batch_running=True)
+        titles = []
+        app._set_window_title = lambda suffix=None: titles.append(suffix)
+
+        BOTExrateApp._update_progress(app, idx=2, total=5, fname="x.xlsx", error=None)
+
+        assert titles and titles[-1] == tr(
+            "main.title_processing", idx=2, total=5,
+        )
+
+
+# ---------------------------------------------------------------------------
+# app-polish #12 — empty-state guidance shown only when the queue is empty
+# ---------------------------------------------------------------------------
+
+class TestEmptyStateGuidance:
+    def test_set_queue_hides_empty_state_and_shows_clear(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(batch_running=False)
+        hidden = {"empty": False, "clear": False}
+        app._hide_empty_state = lambda: hidden.__setitem__("empty", True)
+        app._show_clear_queue = lambda: hidden.__setitem__("clear", True)
+
+        BOTExrateApp._set_queue(app, ["a.xlsx"])
+
+        assert hidden["empty"] is True
+        assert hidden["clear"] is True
+
+    def test_reset_shows_empty_state_and_hides_clear(self):
+        from gui.app import BOTExrateApp
+
+        app = _make_app(batch_running=False, file_queue=["a.xlsx"])
+        shown = {"empty": False, "clear_hidden": False}
+        app._show_empty_state = lambda: shown.__setitem__("empty", True)
+        app._hide_clear_queue = lambda: shown.__setitem__("clear_hidden", True)
+
+        BOTExrateApp._reset_queue_after_run(app)
+
+        assert shown["empty"] is True
+        assert shown["clear_hidden"] is True
+        assert app.file_queue == []
+
+
+# ---------------------------------------------------------------------------
+# round-9 — crash-recovery: offer to resume an interrupted batch on launch
+# ---------------------------------------------------------------------------
+
+class TestResumeOnLaunch:
+    """_offer_batch_resume reads the engine manifest and, when unfinished files
+    remain, offers to re-queue ONLY those. Accepting loads them; declining drops
+    the manifest so the prompt never reappears."""
+
+    def _resume_app(self):
+        from gui.app import BOTExrateApp
+
+        app = SimpleNamespace(
+            _batch_running=False,
+            file_queue=[],
+            lbl_status=MagicMock(),
+        )
+        app._offer_batch_resume = (
+            lambda: BOTExrateApp._offer_batch_resume(app)
+        )
+        return app
+
+    def test_no_manifest_no_prompt(self, monkeypatch):
+        # No pending files → never prompt, never touch the queue.
+        fake_manifest = MagicMock()
+        fake_manifest.pending_files.return_value = []
+        monkeypatch.setattr(
+            "core.engine.BatchManifest", lambda *a, **k: fake_manifest,
+        )
+        ask = MagicMock()
+        monkeypatch.setattr("gui.app.messagebox.askyesno", ask)
+
+        app = self._resume_app()
+        app._offer_batch_resume()
+
+        ask.assert_not_called()
+        assert app.file_queue == []
+
+    def test_accept_loads_only_unfinished_files(self, monkeypatch):
+        fake_manifest = MagicMock()
+        fake_manifest.pending_files.return_value = ["/a/feb.xlsx", "/a/mar.xlsx"]
+        monkeypatch.setattr(
+            "core.engine.BatchManifest", lambda *a, **k: fake_manifest,
+        )
+        monkeypatch.setattr(
+            "gui.app.messagebox.askyesno", MagicMock(return_value=True),
+        )
+
+        app = self._resume_app()
+        loaded = {}
+        app._preflight_warn = MagicMock()
+        app._set_queue = lambda files: loaded.__setitem__("files", list(files))
+
+        app._offer_batch_resume()
+
+        # Only the unfinished files are queued; the manifest is left in place
+        # (the next real run rewrites it from the new selection).
+        assert loaded["files"] == ["/a/feb.xlsx", "/a/mar.xlsx"]
+        app._preflight_warn.assert_called_once_with(
+            ["/a/feb.xlsx", "/a/mar.xlsx"]
+        )
+        fake_manifest.clear.assert_not_called()
+
+    def test_decline_clears_manifest(self, monkeypatch):
+        fake_manifest = MagicMock()
+        fake_manifest.pending_files.return_value = ["/a/feb.xlsx"]
+        monkeypatch.setattr(
+            "core.engine.BatchManifest", lambda *a, **k: fake_manifest,
+        )
+        monkeypatch.setattr(
+            "gui.app.messagebox.askyesno", MagicMock(return_value=False),
+        )
+
+        app = self._resume_app()
+        app._set_queue = MagicMock()
+        app._offer_batch_resume()
+
+        # Declining drops the manifest so the prompt does not reappear, and the
+        # queue is left empty.
+        fake_manifest.clear.assert_called_once()
+        app._set_queue.assert_not_called()
+
+    def test_skipped_while_batch_running(self, monkeypatch):
+        # A resume offer must never interrupt an in-flight batch.
+        called = {"manifest": False}
+        monkeypatch.setattr(
+            "core.engine.BatchManifest",
+            lambda *a, **k: called.__setitem__("manifest", True),
+        )
+        app = self._resume_app()
+        app._batch_running = True
+        app._offer_batch_resume()
+
+        assert called["manifest"] is False
