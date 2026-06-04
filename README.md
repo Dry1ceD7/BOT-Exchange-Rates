@@ -287,7 +287,9 @@ uv run python main.py
 
 ## License
 
-This project is developed for internal enterprise use. All rights reserved.
+Proprietary. Copyright (c) 2026 AAE. All rights reserved. This project is
+developed for internal enterprise use only; redistribution is not permitted.
+See [LICENSE](LICENSE) for the full terms.
 
 ---
 
