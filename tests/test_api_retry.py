@@ -197,27 +197,24 @@ class TestRaisedMessageRedaction:
         _assert_no_token(msg)
 
     def test_http_500_surfaces_without_token(self, client, http_client):
-        """A 5xx triggers raise_for_status; ensure no token leaks out."""
+        """A 5xx is retried as BOTTransientServerError; ensure no token leaks out.
+
+        A transient 5xx is raised as BOTTransientServerError (in the tenacity
+        retry set), so after exhaustion a tenacity.RetryError surfaces. Neither
+        the RetryError nor the wrapped server-error message carries a token.
+        """
         resp = MagicMock()
         resp.status_code = 500
         resp.headers = {}
-
-        def _raise():
-            # httpx would normally embed the request URL (with token) here;
-            # we keep the message token-free to model the redaction contract.
-            raise httpx.HTTPStatusError(
-                "Server error '500'",
-                request=httpx.Request("GET", "https://gw/"),
-                response=httpx.Response(500),
-            )
-
-        resp.raise_for_status = _raise
+        resp.raise_for_status = MagicMock()
         http_client.get = AsyncMock(return_value=resp)
 
-        # HTTPStatusError is NOT in the tenacity retry set -> surfaces directly.
-        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        # 5xx -> BOTTransientServerError -> retried to exhaustion -> RetryError.
+        with pytest.raises(tenacity.RetryError) as exc_info:
             asyncio.run(client.get_holidays(2025))
         _assert_no_token(str(exc_info.value))
+        underlying = exc_info.value.last_attempt.exception()
+        _assert_no_token(str(underlying))
 
 
 # =========================================================================
