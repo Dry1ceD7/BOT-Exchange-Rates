@@ -78,6 +78,11 @@ class TrayManager:
         self._icon: pystray.Icon | None = None
         self._tray_thread: threading.Thread | None = None
         self._is_hidden = False
+        # Human-readable summary of the most recent scheduled run, surfaced in
+        # the tray menu so an operator who left the app minimised overnight can
+        # see whether last night's run happened and how it went. None until the
+        # first scheduled run completes.
+        self._last_run_summary: str | None = None
 
     @property
     def supported(self) -> bool:
@@ -116,6 +121,16 @@ class TrayManager:
                 "Show Window",
                 self._on_show,
                 default=True,  # double-click action
+            ),
+            pystray.Menu.SEPARATOR,
+            # Dynamic, click-through informational row. pystray re-evaluates the
+            # text callable each time the menu opens, so this always reflects the
+            # latest scheduled-run outcome without rebuilding the icon. enabled=
+            # False renders it greyed-out (it's a status line, not an action).
+            pystray.MenuItem(
+                self._last_run_menu_text,
+                None,
+                enabled=False,
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", self._on_exit),
@@ -179,3 +194,41 @@ class TrayManager:
         if self._icon:
             with contextlib.suppress(RuntimeError, OSError):
                 self._icon.stop()
+
+    # ── Scheduled-run feedback ───────────────────────────────────────────
+
+    def _last_run_menu_text(self, _item=None) -> str:
+        """Text for the dynamic 'Last run' tray menu row.
+
+        Called by pystray each time the menu is opened (item.text accepts a
+        callable), so it always reflects the latest summary.
+        """
+        if self._last_run_summary:
+            return f"Last run: {self._last_run_summary}"
+        return "Last run: none yet"
+
+    def notify(self, message: str, title: str = "BOT Exchange Rate Processor") -> None:
+        """Show a balloon/toast notification from the tray icon.
+
+        On the supported Windows/pystray path this surfaces succeeded/failed
+        counts to an operator whose window is minimised to the tray. Anywhere
+        else (macOS/Linux, no pystray, icon not yet running) it is a graceful
+        no-op so callers never need to platform-guard.
+        """
+        icon = self._icon
+        if icon is None:
+            return
+        notify = getattr(icon, "notify", None)
+        if not callable(notify):
+            return
+        with contextlib.suppress(Exception):
+            notify(message, title)
+
+    def set_last_run(self, summary: str) -> None:
+        """Record the most recent scheduled-run summary for the tray menu.
+
+        ``summary`` is a short human-readable string (e.g.
+        "07 OK, 1 failed @ 23:00"). Stored only; the menu text callable reads
+        it lazily on next open, so no icon rebuild is required.
+        """
+        self._last_run_summary = summary

@@ -18,6 +18,7 @@ Features:
  - Auto-Scheduler Panel — background scheduled processing (v3.1.0)
 """
 
+import contextlib
 import logging
 import os
 import platform
@@ -140,6 +141,25 @@ class BOTExrateApp(ctk.CTk):
 
         self.file_queue: list[str] = []
         self.last_processed_path: str | None = None
+        # True while a batch (manual OR scheduler-fired) is running. Guards the
+        # drop zone / browse / queue from re-enabling Process Batch mid-run and
+        # lets the scheduler path lock the same controls a manual run does.
+        self._batch_running = False
+        # True only while the in-flight batch was started by the auto-scheduler
+        # (not the manual button). Drives the tray notification + last-run
+        # summary on completion so an overnight, minimised run is not invisible
+        # (#1). Cleared on every batch terminal path.
+        self._scheduled_run_active = False
+        # True while a manual revert (BackupManager.restore_latest) is in flight.
+        # start_revert spawns a RevertWorker that does NOT touch the batch guard,
+        # and _on_revert_click never sets _batch_running, so the scheduler's
+        # programmatic entry point (_begin_scheduled_batch) must consult this flag
+        # to avoid two threads touching the same .xlsx (#3). Set in
+        # _on_revert_click, cleared on every revert terminal path.
+        self._revert_running = False
+        # Holds the always-visible "Failed files" summary box, built lazily on
+        # the first batch that reports failures (#2).
+        self._failed_box = None
         self.backup_mgr = BackupManager()
         self.event_bus = EventBus()
         # Single registry that tracks worker threads (batch, revert, ...) so
@@ -601,6 +621,9 @@ class BOTExrateApp(ctk.CTk):
     #  DROP / BROWSE
     # ================================================================== #
     def _on_drop(self, event):
+        if self._batch_running:
+            self._flash_busy_status()
+            return
         paths = parse_drop_data(event.data, tk_root=self)
         excel_files, rejected = resolve_excel_files(paths, collect_rejected=True)
         if rejected:
@@ -620,6 +643,9 @@ class BOTExrateApp(ctk.CTk):
                                    "No Excel files found in the dropped items.")
 
     def _browse_files(self):
+        if self._batch_running:
+            self._flash_busy_status()
+            return
         paths = filedialog.askopenfilenames(
             title="Select Excel Ledgers",
             filetypes=[
@@ -631,6 +657,12 @@ class BOTExrateApp(ctk.CTk):
             self._set_queue(list(paths))
 
     def _set_queue(self, files: list[str]):
+        # A batch in flight owns the queue/selection — never mutate it or
+        # re-enable Process Batch mid-run (#1). The drop/browse handlers already
+        # short-circuit, but guard here too in case _set_queue is called direct.
+        if self._batch_running:
+            self._flash_busy_status()
+            return
         self.file_queue = files
         self.last_processed_path = None
         count = len(files)
@@ -646,21 +678,46 @@ class BOTExrateApp(ctk.CTk):
         self.btn_process.configure(state="normal")
         self.btn_reveal.pack_forget()
 
+    def _flash_busy_status(self):
+        """Tell the operator the UI is busy instead of silently swallowing the
+        click/drop. Used by the drop zone / browse / queue guards (#1)."""
+        if hasattr(self, "lbl_status"):
+            self.lbl_status.configure(
+                text="Busy:  a batch is already running — please wait.",
+                text_color=_get_colors()["warning"],
+            )
+
     # ================================================================== #
     #  PROCESSING
     # ================================================================== #
+    def _lock_ui_for_batch(self):
+        """Disable every action a manual or scheduled batch must own while it
+        runs and raise the busy flag (#1, #3). Shared by the manual click and
+        the scheduler callback so a background run locks the UI identically."""
+        self._batch_running = True
+        self.btn_process.configure(state="disabled")
+        self.btn_revert.configure(state="disabled")
+        self.btn_export_exrate.configure(state="disabled")
+        self.btn_reveal.pack_forget()
+        self.progressbar.configure(mode="determinate")
+        self.progressbar.set(0)
+
+    def _unlock_ui_after_batch(self):
+        """Re-enable the controls locked by _lock_ui_for_batch and clear the
+        busy flag. Called from every batch terminal path (complete/error)."""
+        self._batch_running = False
+        self.btn_process.configure(state="normal")
+        self.btn_revert.configure(state="normal")
+        self.btn_export_exrate.configure(state="normal")
+
     def _on_process_click(self):
-        if not self.file_queue:
+        if not self.file_queue or self._batch_running:
             return
         # Snapshot the selection at click time so a selection change during
         # the background prescan can't desync what actually gets processed (#2).
         queue_snapshot = list(self.file_queue)
-        self.btn_process.configure(state="disabled")
-        self.btn_revert.configure(state="disabled")
-        self.btn_reveal.pack_forget()
+        self._lock_ui_for_batch()
         total = len(queue_snapshot)
-        self.progressbar.configure(mode="determinate")
-        self.progressbar.set(0)
 
         is_auto = self.auto_detect_var.get() == "on"
 
@@ -710,8 +767,7 @@ class BOTExrateApp(ctk.CTk):
             # ── Manual mode ──────────────────────────────────────────
             start_date_str = self._assemble_start_date()
             if start_date_str is None:
-                self.btn_process.configure(state="normal")
-                self.btn_revert.configure(state="normal")
+                self._unlock_ui_after_batch()
                 return
             self.lbl_status.configure(
                 text=f"Connecting to BOT API...  (0 of {total})",
@@ -737,29 +793,150 @@ class BOTExrateApp(ctk.CTk):
 
     def _show_batch_complete(self, success: int, fail: int, errors: list[str]):
         self.progressbar.set(1)
-        self.btn_process.configure(state="normal")
-        self.btn_revert.configure(state="normal")
+        # Capture whether this was a scheduler-fired run BEFORE unlock clears
+        # nothing (it doesn't touch the flag) — done here so the notification
+        # path below fires exactly once and only for scheduled runs (#1).
+        was_scheduled = self._scheduled_run_active
+        self._scheduled_run_active = False
+        self._unlock_ui_after_batch()
         if fail == 0:
             self.lbl_status.configure(
                 text=f"Complete:  All {success} ledger{'s' if success != 1 else ''} processed successfully.",
                 text_color=_get_colors()["success"]
             )
+            self._render_failed_files([])
         else:
             self.lbl_status.configure(
-                text=f"Complete:  {success} succeeded, {fail} failed.",
+                text=f"Complete:  {success} succeeded, {fail} failed.  See failed files below.",
                 text_color=_get_colors()["warning"]
             )
+            # Surface WHICH files failed and WHY so the operator can act on
+            # them — the bare count alone hides actionable detail (#2).
+            self._render_failed_files(errors or [])
         if self.file_queue:
             self.last_processed_path = self.file_queue[-1]
             self.btn_reveal.pack(pady=(12, 14))
+        # A scheduler-fired run may have completed while minimised to the tray;
+        # surface the outcome so it is never invisible (#1).
+        if was_scheduled:
+            self._announce_scheduled_run(success, fail)
         # Force UI refresh so the user sees the updated state immediately
         self.update_idletasks()
+
+    def _announce_scheduled_run(self, success: int, fail: int) -> None:
+        """Surface the outcome of a scheduler-fired batch (#1).
+
+        Fires a tray balloon notification with succeeded/failed counts (Windows
+        /pystray path; graceful no-op elsewhere), records a retrievable last-run
+        summary in the tray menu, persists it to settings.json so the scheduler
+        panel can show it across restarts, and auto-restores the window when the
+        run had any failures so the operator is pulled back to the detail.
+        """
+        ts = datetime.now().strftime("%d %b %H:%M")
+        summary = f"{success} OK, {fail} failed ({ts})"
+        title = "BOT ExRate — Scheduled Run"
+        message = (
+            f"{success} ledger{'s' if success != 1 else ''} processed, "
+            f"{fail} failed."
+        )
+
+        # Tray notification + retrievable last-run summary (guarded — the tray
+        # is Windows-only and may be absent on this platform/build).
+        tray = getattr(self, "_tray", None)
+        if tray is not None:
+            try:
+                if hasattr(tray, "set_last_run"):
+                    tray.set_last_run(summary)
+                if hasattr(tray, "notify"):
+                    tray.notify(message, title)
+            except (RuntimeError, OSError) as e:
+                logger.debug("Tray notification failed (non-critical): %s", e)
+
+        # Persist a last-run record so the scheduler panel / a future session
+        # can show "last run" even after the tray summary is gone.
+        try:
+            _settings_mgr.set(
+                "scheduler_last_run",
+                {"success": success, "fail": fail, "summary": summary},
+            )
+        except (OSError, ValueError, TypeError) as e:
+            logger.debug("Persisting scheduler_last_run failed: %s", e)
+
+        # Pull the operator back to the window on failure so the failed-files
+        # box is seen rather than buried behind a minimised tray icon.
+        if fail > 0:
+            try:
+                self.restore_from_tray()
+            except (RuntimeError, tkinter.TclError) as e:
+                logger.debug("Auto-restore on failure failed: %s", e)
+
+    def _render_failed_files(self, errors: list[str]):
+        """Render the failed-file reasons into an always-visible, scrollable
+        box under the status line (#2). An empty list hides the box.
+
+        Each entry in ``errors`` is already a ``"<filename>: <reason>"`` string
+        from ``LedgerEngine.process_batch``; we surface them verbatim, one row
+        per failure, so the operator sees what to fix without digging through
+        the live console history.
+        """
+        # Tear down any prior box first so repeated batches don't stack frames.
+        if self._failed_box is not None:
+            try:
+                self._failed_box.destroy()
+            except (RuntimeError, tkinter.TclError) as e:
+                logger.debug("failed-box teardown failed: %s", e)
+            self._failed_box = None
+        if not errors:
+            return
+        t = _get_colors()
+        box = ctk.CTkFrame(
+            self.card, fg_color=t["section_bg"], corner_radius=10,
+            border_width=1, border_color=t["card_border"],
+        )
+        # Place the box directly after the status box / reveal button area.
+        box.pack(pady=(8, 0), padx=50, fill="x")
+        ctk.CTkLabel(
+            box,
+            text=f"Failed files ({len(errors)}) — fix and re-run:",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=t["error_text"],
+            anchor="w",
+        ).pack(fill="x", padx=12, pady=(8, 2))
+        scroll = ctk.CTkScrollableFrame(
+            box, fg_color="transparent", height=92,
+        )
+        scroll.pack(fill="x", padx=8, pady=(0, 8))
+        for entry in errors:
+            ctk.CTkLabel(
+                scroll, text=f"•  {entry}",
+                font=ctk.CTkFont(size=11),
+                text_color=t["text_secondary"],
+                anchor="w", justify="left", wraplength=560,
+            ).pack(fill="x", padx=4, pady=1)
+        self._failed_box = box
 
     def _show_error(self, msg: str):
         self.progressbar.set(0)
         self.lbl_status.configure(text=f"Error:  {msg}", text_color=_get_colors()["error_text"])
-        self.btn_process.configure(state="normal")
-        self.btn_revert.configure(state="normal")
+        # A scheduler-fired run that errored out (e.g. network down overnight)
+        # must still surface — otherwise the failure is invisible (#1).
+        was_scheduled = self._scheduled_run_active
+        self._scheduled_run_active = False
+        self._unlock_ui_after_batch()
+        if was_scheduled:
+            tray = getattr(self, "_tray", None)
+            summary = f"failed: {msg}"
+            if tray is not None:
+                with contextlib.suppress(RuntimeError, OSError):
+                    if hasattr(tray, "set_last_run"):
+                        tray.set_last_run(summary)
+                    if hasattr(tray, "notify"):
+                        tray.notify(
+                            f"Scheduled run failed: {msg}",
+                            "BOT ExRate — Scheduled Run",
+                        )
+            with contextlib.suppress(RuntimeError, tkinter.TclError):
+                self.restore_from_tray()
         self.update_idletasks()
 
     def _show_download_error(self, msg: str):
@@ -796,6 +973,9 @@ class BOTExrateApp(ctk.CTk):
         if not path:
             return
 
+        # Raise the busy flag BEFORE spawning the worker so a scheduler fire
+        # racing in on the UI thread sees the revert in progress (#3).
+        self._revert_running = True
         self.btn_revert.configure(state="disabled")
         self.btn_process.configure(state="disabled")
         self.lbl_status.configure(
@@ -809,6 +989,7 @@ class BOTExrateApp(ctk.CTk):
 
 
     def _show_revert_success(self, filepath: str, backup_name: str):
+        self._revert_running = False
         self.progressbar.stop()
         self.progressbar.configure(mode="determinate")
         self.progressbar.set(1)
@@ -822,6 +1003,7 @@ class BOTExrateApp(ctk.CTk):
         self.btn_reveal.pack(pady=(12, 14))
 
     def _show_revert_error(self, msg: str):
+        self._revert_running = False
         self.progressbar.stop()
         self.progressbar.configure(mode="determinate")
         self.progressbar.set(0)
@@ -916,7 +1098,10 @@ class BOTExrateApp(ctk.CTk):
             start_str = oldest.strftime("%Y-%m-%d")
             flag = "auto-detected" if was_detected else "fallback"
             logger.info("Scheduler start_date: %s (%s)", start_str, flag)
-            self.after(0, lambda: self.batch_handler.start_batch(scheduled, start_str))
+            # Marshal onto the UI thread: lock the SAME controls a manual run
+            # locks and reflect the run in lbl_status, so a desk-side user can
+            # see it and can't collide with Process/Revert/ExRate (#3).
+            self.after(0, lambda: self._begin_scheduled_batch(scheduled, start_str))
 
         self._auto_scheduler.start(
             time_str=time_str,
@@ -924,6 +1109,38 @@ class BOTExrateApp(ctk.CTk):
             callback=_scheduler_callback,
         )
         logger.info("Scheduler started: %s, %d paths", time_str, len(paths))
+
+    def _begin_scheduled_batch(self, scheduled: list[str], start_str: str):
+        """UI-thread entry point for a scheduler-fired batch (#3).
+
+        Locks the same controls a manual run does and reflects the run in
+        lbl_status so a desk-side user sees it and cannot collide with a manual
+        Process/Revert/ExRate. Skip (log + return) when a batch is already
+        running (manual or a prior scheduled fire) OR when a manual revert is in
+        flight. The revert check is essential: start_revert spawns a RevertWorker
+        that never sets _batch_running, so without consulting _revert_running the
+        scheduler would spawn a BatchWorker that reads/writes the same .xlsx a
+        RevertWorker is restoring a backup over — two threads on one workbook (#3).
+        """
+        if self._batch_running:
+            logger.info("Scheduled batch skipped — a batch is already running")
+            return
+        if self._revert_running:
+            logger.info("Scheduled batch skipped — a manual revert is in progress")
+            return
+        self._lock_ui_for_batch()
+        # Mark this run as scheduler-fired so the completion path knows to raise
+        # a tray notification + record a last-run summary (#1).
+        self._scheduled_run_active = True
+        total = len(scheduled)
+        self.lbl_status.configure(
+            text=(
+                f"Scheduled run:  processing {total} "
+                f"ledger{'s' if total != 1 else ''}...  (0 of {total})"
+            ),
+            text_color=_get_colors()["process_text"],
+        )
+        self.batch_handler.start_batch(scheduled, start_str)
 
     def _on_scheduler_stop(self):
         """Stop the background scheduler."""

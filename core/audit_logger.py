@@ -13,6 +13,8 @@ Output: data/logs/Audit_Log_YYYYMMDD_HHMMSS.csv
 import atexit
 import csv
 import logging
+import threading
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -20,6 +22,55 @@ from core.constants import AUDIT_LOG_MAX_AGE_DAYS, csv_safe
 from core.paths import get_project_root
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class AuditRecord:
+    """A single cell-mutation record captured during the write pipeline.
+
+    Decouples *recording* a change (which happens deep inside the openpyxl
+    write pipeline, possibly on a worker thread) from *writing* it to the CSV
+    (which the AuditLogger owns). The write pipeline appends these to an
+    ``AuditCollector``; the engine drains them into ``log_row_change`` after the
+    workbook is safely closed, so the CSV file handle is never touched mid-save.
+    """
+
+    filename: str
+    sheet: str
+    row: int
+    cell_date: str
+    currency: str
+    original_value: str
+    new_value: str
+    rate_source: str = "API"
+    holiday_rollback: bool = False
+    anomaly_flag: bool = False
+
+
+class AuditCollector:
+    """Thread-safe, in-memory sink for ``AuditRecord`` instances.
+
+    The WorkbookWriter appends records here while the workbook is open; the
+    engine drains them into the ``AuditLogger`` once the file is closed. Keeping
+    this separate from the file handle means a single long-lived audit CSV can
+    aggregate every file in a batch without crossing thread/async boundaries
+    with an open ``csv.writer``.
+    """
+
+    def __init__(self) -> None:
+        self._records: list[AuditRecord] = []
+        self._lock = threading.Lock()
+
+    def add(self, record: AuditRecord) -> None:
+        with self._lock:
+            self._records.append(record)
+
+    def drain(self) -> list[AuditRecord]:
+        """Return all collected records and clear the buffer."""
+        with self._lock:
+            out = self._records
+            self._records = []
+        return out
 
 
 class AuditLogger:
@@ -149,6 +200,27 @@ class AuditLogger:
             "ANOMALY" if anomaly_flag else "",
         ])
         self._row_count += 1
+
+    def log_records(self, records: "list[AuditRecord]") -> None:
+        """Append every collected ``AuditRecord`` as an audit-log row.
+
+        Convenience bridge between the write pipeline's ``AuditCollector`` and
+        the per-cell CSV trail, so the engine can flush a file's changes in one
+        call after the workbook is safely closed.
+        """
+        for r in records:
+            self.log_row_change(
+                filename=r.filename,
+                sheet=r.sheet,
+                row=r.row,
+                cell_date=r.cell_date,
+                currency=r.currency,
+                original_value=r.original_value,
+                new_value=r.new_value,
+                rate_source=r.rate_source,
+                holiday_rollback=r.holiday_rollback,
+                anomaly_flag=r.anomaly_flag,
+            )
 
     def log_batch_summary(
         self,

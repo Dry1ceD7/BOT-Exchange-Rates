@@ -82,3 +82,64 @@ class TestTraySetupSkipsWhenUnsupported:
             tray.setup()
         # No close-to-tray handler installed on macOS — normal quit stands.
         tray._app.protocol.assert_not_called()
+
+
+class TestTrayNotify:
+    """notify() forwards to the pystray icon and no-ops when unavailable."""
+
+    def test_notify_noop_when_no_icon(self):
+        # No icon running (the common macOS/Linux/headless case): must not raise.
+        tray = _make_tray()
+        assert tray._icon is None
+        tray.notify("3 processed, 1 failed")  # no exception
+
+    def test_notify_forwards_to_icon(self):
+        tray = _make_tray()
+        icon = MagicMock()
+        tray._icon = icon
+        tray.notify("3 processed, 1 failed", title="BOT ExRate")
+        icon.notify.assert_called_once_with("3 processed, 1 failed", "BOT ExRate")
+
+    def test_notify_default_title(self):
+        tray = _make_tray()
+        icon = MagicMock()
+        tray._icon = icon
+        tray.notify("done")
+        args = icon.notify.call_args.args
+        assert args[0] == "done"
+        assert "BOT" in args[1]
+
+    def test_notify_swallows_icon_error(self):
+        # A backend that raises (some pystray backends don't support notify)
+        # must not crash the completion callback.
+        tray = _make_tray()
+        icon = MagicMock()
+        icon.notify.side_effect = NotImplementedError("backend has no balloons")
+        tray._icon = icon
+        tray.notify("done")  # no exception
+
+    def test_notify_noop_when_icon_lacks_notify(self):
+        tray = _make_tray()
+
+        class _IconWithoutNotify:
+            pass
+
+        tray._icon = _IconWithoutNotify()
+        tray.notify("done")  # no exception, no attribute error
+
+
+class TestTrayLastRun:
+    """set_last_run() records a retrievable summary for the tray menu row."""
+
+    def test_last_run_text_defaults_to_none_yet(self):
+        tray = _make_tray()
+        assert tray._last_run_summary is None
+        assert tray._last_run_menu_text() == "Last run: none yet"
+
+    def test_set_last_run_updates_menu_text(self):
+        tray = _make_tray()
+        tray.set_last_run("7 OK, 1 failed (04 Jun 23:00)")
+        assert tray._last_run_summary == "7 OK, 1 failed (04 Jun 23:00)"
+        assert tray._last_run_menu_text() == (
+            "Last run: 7 OK, 1 failed (04 Jun 23:00)"
+        )

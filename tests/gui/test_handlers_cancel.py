@@ -113,7 +113,9 @@ class TestStopEventThreadedToEngine:
 
         class _FakeEngine:
             def __init__(self, *a, **k):
-                pass
+                # Mirror the real LedgerEngine contract: handlers reads
+                # engine.last_audit_path after process_batch returns.
+                self.last_audit_path = None
 
             async def process_batch(self, file_queue, start_date=None,
                                     progress_cb=None, dry_run=False,
