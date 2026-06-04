@@ -17,12 +17,13 @@ import logging
 import customtkinter as ctk
 
 from core.workers.event_bus import EventBus
+from gui.panels._base_panel import SafePanel
 from gui.theme import MONO_FONT, get_theme
 
 logger = logging.getLogger(__name__)
 
 
-class LiveConsolePanel(ctk.CTkFrame):
+class LiveConsolePanel(SafePanel, ctk.CTkFrame):
     """
     A read-only, dark-themed log viewer that polls an EventBus.
 
@@ -130,7 +131,7 @@ class LiveConsolePanel(ctk.CTkFrame):
 
     def _poll(self) -> None:
         """Drain events from the bus and render them with color tags."""
-        if not self._polling:
+        if self._destroyed or not self._polling:
             return
         events = self._bus.drain()
         if events:
@@ -151,4 +152,4 @@ class LiveConsolePanel(ctk.CTkFrame):
                 tb.insert("end", f"{prefix}  {msg}\n", tag)
             self._textbox.configure(state="disabled")
             self._textbox.see("end")
-        self.after(self.POLL_INTERVAL_MS, self._poll)
+        self._safe_after(self.POLL_INTERVAL_MS, self._poll)

@@ -228,3 +228,91 @@ def test_logger_name_is_module(client):
     """Sanity: the client wires its retry logging through the module logger
     (so the TokenRedactionFilter on root handlers can scrub it)."""
     assert logging.getLogger("core.api_client") is not None
+
+
+# =========================================================================
+#  BEFORE-SLEEP CALLBACK: no token in captured log records
+# =========================================================================
+
+class TestBeforeSleepNoTokenLeak:
+    """_safe_before_sleep must never emit token values into log records.
+
+    These tests drive a forced retry (ConnectError with token in the
+    exception message) and assert that every WARNING record captured
+    during the retry loop is free of the token.
+    """
+
+    def test_before_sleep_log_has_no_token_in_message(
+        self, client, http_client, caplog,
+    ):
+        """Token embedded in ConnectError message must not reach log output."""
+        leaky = httpx.ConnectError(
+            f"failed GET https://gw/?token={_SECRET_EXG}"
+        )
+        http_client.get = AsyncMock(side_effect=leaky)
+
+        with caplog.at_level(logging.WARNING, logger="core.api_client"), pytest.raises(tenacity.RetryError):
+            asyncio.run(client.get_holidays(2025))
+
+        # At least one WARNING record must have been emitted (the retry log).
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert warning_records, "Expected at least one WARNING retry log record"
+
+        for record in warning_records:
+            msg = record.getMessage()
+            assert _SECRET_EXG not in msg, (
+                f"EXG token leaked into retry log message: {msg!r}"
+            )
+            assert _SECRET_HOL not in msg, (
+                f"HOL token leaked into retry log message: {msg!r}"
+            )
+
+    def test_before_sleep_log_contains_expected_fields(
+        self, client, http_client, caplog,
+    ):
+        """Retry log must include attempt number and exception class name."""
+        http_client.get = AsyncMock(
+            side_effect=httpx.ConnectError("connection refused")
+        )
+
+        with caplog.at_level(logging.WARNING, logger="core.api_client"), pytest.raises(tenacity.RetryError):
+            asyncio.run(client.get_holidays(2025))
+
+        warning_messages = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+        ]
+        assert warning_messages, "Expected WARNING retry log records"
+
+        # Each retry log should mention the exception class and attempt info.
+        for msg in warning_messages:
+            assert "ConnectError" in msg, (
+                f"Expected exception class name in retry log: {msg!r}"
+            )
+
+    def test_before_sleep_log_no_token_for_request_error(
+        self, client, http_client, caplog,
+    ):
+        """Token embedded in RequestError message must not reach log output."""
+        leaky = httpx.RequestError(
+            f"transport error token={_SECRET_HOL}"
+        )
+        http_client.get = AsyncMock(side_effect=leaky)
+
+        with caplog.at_level(logging.WARNING, logger="core.api_client"), pytest.raises(tenacity.RetryError):
+            asyncio.run(client.get_exchange_rates(
+                date(2025, 3, 10), date(2025, 3, 10), "USD",
+            ))
+
+        for record in caplog.records:
+            if record.levelno == logging.WARNING:
+                msg = record.getMessage()
+                assert _SECRET_HOL not in msg, (
+                    f"HOL token leaked into retry log message: {msg!r}"
+                )
+                assert _SECRET_EXG not in msg, (
+                    f"EXG token leaked into retry log message: {msg!r}"
+                )

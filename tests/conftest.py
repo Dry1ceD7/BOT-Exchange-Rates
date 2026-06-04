@@ -9,8 +9,13 @@ Provides:
     columns across one or more monthly tabs.
   - tmp_cache: a CacheDB backed by a temporary on-disk SQLite file.
   - mock_api: an AsyncMock BOTClient with a helper to seed rate records.
+  - tk_root: a withdrawn CTk root window for GUI widget tests; auto-skipped
+    when no display is available (headless CI).
 """
 
+import contextlib
+import os
+import sys
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -100,3 +105,50 @@ def mock_api():
 def thai_holidays_2025():
     """A small, well-known set of 2025 Thai holiday dates."""
     return [date(2025, 1, 1)]
+
+
+@pytest.fixture(scope="session")
+def tk_root():
+    """Withdrawn CTk root window for GUI widget tests (session-scoped).
+
+    Session scope is required because CTk maintains a per-process singleton
+    for the Tk interpreter; creating and destroying multiple CTk roots within
+    one pytest process leads to segfaults on macOS/aarch64.  One root is
+    created at the start of the session and destroyed at the end.
+
+    Skips automatically when no graphical display is available so the suite
+    stays green on headless CI (ubuntu-latest — no DISPLAY/WAYLAND_DISPLAY).
+    On macOS the env-var check is unreliable (Aqua needs no DISPLAY), so we
+    always attempt root creation there and convert a TclError (e.g. SSH
+    session without a window server) into a clean skip.
+    """
+    # On headless CI (ubuntu-latest) neither DISPLAY nor WAYLAND_DISPLAY is
+    # set, so we skip cleanly without attempting to create any Tk window.
+    # Do NOT create a bare tkinter.Tk() probe: destroying a raw Tk interpreter
+    # before a CTk root is created corrupts the Tcl runtime and causes
+    # CTkScrollbar to segfault when update_idletasks() fires inside __init__.
+    has_display = bool(
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    )
+    on_macos = sys.platform == "darwin"
+    if not has_display and not on_macos:
+        pytest.skip("No display available (headless CI)")
+
+    import tkinter
+
+    import customtkinter as ctk
+
+    try:
+        root = ctk.CTk()
+    except tkinter.TclError as exc:
+        # macOS without a reachable window server (SSH, headless agent).
+        pytest.skip(f"Display unavailable: {exc}")
+    root.withdraw()  # keep window hidden during tests
+    # Pump the Tk event loop once so CTk finishes all deferred initialisation.
+    # CTkScrollbar calls update_idletasks() inside __init__, which segfaults if
+    # mainloop() has never run.  after(1, quit) exits immediately after one cycle.
+    root.after(1, root.quit)
+    root.mainloop()
+    yield root
+    with contextlib.suppress(Exception):
+        root.destroy()
