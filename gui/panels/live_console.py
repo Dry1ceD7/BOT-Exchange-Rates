@@ -35,6 +35,7 @@ class LiveConsolePanel(SafePanel, ctk.CTkFrame):
     """
 
     POLL_INTERVAL_MS = 100  # 10 FPS drain rate
+    MAX_LINES = 2000  # cap retained lines — bounds memory in long-lived process
 
     def __init__(
         self,
@@ -111,6 +112,21 @@ class LiveConsolePanel(SafePanel, ctk.CTkFrame):
         self._textbox.delete("1.0", "end")
         self._textbox.configure(state="disabled")
 
+    def _trim_lines(self, tb) -> None:
+        """Cap the Text widget to the last MAX_LINES lines.
+
+        Bounds memory in the long-lived tray+scheduler process: without a cap
+        the log grows unbounded. ``tb`` is the underlying Tk Text widget; the
+        caller is responsible for the normal/disabled state toggling.
+        """
+        # "end-1c" excludes the trailing newline Tk always appends, so the
+        # line number here is the true count of rendered lines.
+        line_count = int(tb.index("end-1c").split(".")[0])
+        if line_count > self.MAX_LINES:
+            excess = line_count - self.MAX_LINES
+            # Delete the oldest lines (1.0 .. start of the first kept line).
+            tb.delete("1.0", f"{excess + 1}.0")
+
     def start_polling(self) -> None:
         """Begin the root.after() polling loop to drain the EventBus."""
         self._polling = True
@@ -150,6 +166,7 @@ class LiveConsolePanel(SafePanel, ctk.CTkFrame):
                 }
                 prefix, tag = prefix_map.get(etype, ("[---]", "log"))
                 tb.insert("end", f"{prefix}  {msg}\n", tag)
+            self._trim_lines(tb)
             self._textbox.configure(state="disabled")
             self._textbox.see("end")
         self._safe_after(self.POLL_INTERVAL_MS, self._poll)

@@ -22,10 +22,10 @@ jobs:
   quality-gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
 
@@ -40,6 +40,10 @@ jobs:
 
       - name: Run tests
         run: uv run pytest tests/ -v
+
+      # Blocking dependency audit against the project env (before artifacts build)
+      - name: Dependency audit (pip-audit)
+        run: uv run pip-audit
 
   # ── STAGE 2: Build Matrix ──────────────────────────────────────────────
   build:
@@ -56,10 +60,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
 
@@ -82,13 +86,58 @@ jobs:
           print('ICO regenerated with sizes:', sizes)
           "
 
+      # ── Windows: embed a version resource into the .exe ───────────────
+      # Without this the produced executable has no FileVersion/ProductVersion
+      # metadata (blank "Details" tab in Windows Explorer). Generate a
+      # PyInstaller version-info file from core.version.__version__.
+      - name: Generate Windows version-info file
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          uv run python -c "
+          from core.version import __version__
+          parts = (__version__.split('.') + ['0', '0', '0', '0'])[:4]
+          v = ', '.join(str(int(p)) for p in parts)
+          content = f'''VSVersionInfo(
+            ffi=FixedFileInfo(
+              filevers=({v}),
+              prodvers=({v}),
+              mask=0x3f,
+              flags=0x0,
+              OS=0x40004,
+              fileType=0x1,
+              subtype=0x0,
+              date=(0, 0)
+            ),
+            kids=[
+              StringFileInfo([
+                StringTable('040904B0', [
+                  StringStruct('CompanyName', 'AAE'),
+                  StringStruct('FileDescription', 'BOT Exchange Rate Processor'),
+                  StringStruct('FileVersion', '{__version__}'),
+                  StringStruct('InternalName', 'BOT-ExRate'),
+                  StringStruct('OriginalFilename', 'BOT-ExRate.exe'),
+                  StringStruct('ProductName', 'BOT Exchange Rate Processor'),
+                  StringStruct('ProductVersion', '{__version__}')
+                ])
+              ]),
+              VarFileInfo([VarStruct('Translation', [1033, 1200])])
+            ]
+          )'''
+          with open('version_info.txt', 'w', encoding='utf-8') as fh:
+              fh.write(content)
+          print('Wrote version_info.txt for', __version__)
+          "
+
       - name: Build with PyInstaller
         shell: bash
         run: |
           ICON_FLAG=""
+          VERSION_FLAG=""
           SEPARATOR=":"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             ICON_FLAG="--icon=assets/icon.ico"
+            VERSION_FLAG="--version-file=version_info.txt"
             SEPARATOR=";"
           fi
           uv run pyinstaller \
@@ -96,6 +145,7 @@ jobs:
             --onedir \
             --windowed \
             $ICON_FLAG \
+            $VERSION_FLAG \
             --add-data "assets${SEPARATOR}assets" \
             --hidden-import customtkinter \
             --hidden-import tkinterdnd2 \
@@ -132,6 +182,17 @@ jobs:
             exit 1
           }
 
+      # ── macOS: verify the .app bundle exists before packaging ─────────
+      - name: Verify macOS .app bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [[ ! -d "dist/BOT-ExRate.app" ]]; then
+            echo "✗ dist/BOT-ExRate.app is missing — PyInstaller did not produce an .app bundle."
+            exit 1
+          fi
+          echo "✓ Found dist/BOT-ExRate.app"
+
       # ── macOS: DMG Disk Image ─────────────────────────────────────────
       - name: Build macOS DMG
         if: runner.os == 'macOS'
@@ -139,7 +200,8 @@ jobs:
         run: |
           # Create a staging directory for the DMG contents
           mkdir -p dmg-staging
-          cp -R dist/BOT-ExRate dmg-staging/
+          # Ship the .app bundle (double-clickable), not the raw onedir folder
+          cp -R dist/BOT-ExRate.app dmg-staging/
           ln -s /Applications dmg-staging/Applications
 
           # Create the DMG
@@ -161,7 +223,7 @@ jobs:
           tar -czf BOT-ExRate-Linux.tar.gz BOT-ExRate/
 
       - name: Upload Build Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: |
@@ -177,15 +239,15 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: release-assets
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           files: release-assets/**/*

@@ -39,18 +39,41 @@ load_dotenv(dotenv_path=ENV_PATH)
 # ── Sentry Telemetry (v3.2.4) ───────────────────────────────────────────
 # Conditionally initialize Sentry crash reporting. If SENTRY_DSN is not
 # set, Sentry is completely disabled — zero overhead, zero network calls.
+def _scrubber_token_values() -> list:
+    """Collect live token values for the Sentry scrubber.
+
+    Sources tokens via core.secure_tokens.get_token (keychain + .env) so the
+    scrubber still works after the env→keychain migration empties os.environ.
+    Exception-guarded and cached per event batch (see _sentry_token_scrubber).
+    """
+    tokens: list = []
+    try:
+        from core.secure_tokens import get_token
+        for env_key in ("BOT_TOKEN_EXG", "BOT_TOKEN_HOL"):
+            with contextlib.suppress(Exception):
+                val = get_token(env_key)
+                if val:
+                    tokens.append(val)
+    except Exception:
+        # Fallback to os.environ if secure_tokens is unavailable.
+        for env_key in ("BOT_TOKEN_EXG", "BOT_TOKEN_HOL"):
+            val = os.environ.get(env_key)
+            if val:
+                tokens.append(val)
+    return tokens
+
+
 def _sentry_token_scrubber(event, hint):
     """Sentry before_send hook: replace known token values with '***'.
 
     Tokens can otherwise surface in event messages, exception values, or
     request data. We recursively walk the event and substitute any known
     token string. Returns the (mutated) event so it is still sent.
+
+    Token values are resolved fresh for each event batch (keychain + .env)
+    and cached on the function for the duration of this call.
     """
-    tokens = [
-        os.environ.get("BOT_TOKEN_EXG"),
-        os.environ.get("BOT_TOKEN_HOL"),
-    ]
-    tokens = [t for t in tokens if t]
+    tokens = _scrubber_token_values()
     if not tokens:
         return event
 
@@ -74,7 +97,8 @@ def _sentry_token_scrubber(event, hint):
 
 _SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
 if _SENTRY_DSN:
-    try:
+    # Sentry is optional — never block app startup
+    with contextlib.suppress(Exception):
         import sentry_sdk
 
         from core.version import __version__
@@ -85,8 +109,6 @@ if _SENTRY_DSN:
             send_default_pii=False,  # Never send user PII
             before_send=_sentry_token_scrubber,  # Redact tokens from events
         )
-    except Exception:
-        pass  # Sentry is optional — never block app startup
 
 # ── Configure root logger — routes ALL log output to file + console ──────
 _LOG_DIR = Path(get_project_root()) / "data"
@@ -108,11 +130,9 @@ logging.basicConfig(
 
 # SECURITY: redact BOT API token values from all log records before they
 # reach the file/console handlers (defends app.log + Sentry breadcrumbs).
-try:
+with contextlib.suppress(Exception):
     from core.api_client import install_token_redaction_filter
     install_token_redaction_filter()
-except Exception:
-    pass
 
 
 # ── Cold-Start: Ensure required directories exist ────────────────────────
@@ -160,14 +180,23 @@ def _prompt_for_tokens() -> bool:
     return activated
 
 
+def _purge_credentials() -> None:
+    """Delete both BOT API tokens from the OS keychain and report the result.
+
+    Invoked by the Windows uninstaller via --purge-credentials so secrets do
+    not survive an application removal.
+    """
+    from core.secure_tokens import delete_token
+    removed = 0
+    for env_key in ("BOT_TOKEN_EXG", "BOT_TOKEN_HOL"):
+        if delete_token(env_key):
+            removed += 1
+    print(f"Purged {removed} stored credential(s) from the OS keychain.")
+
+
 def main():
     """Ensures directories, validates/prompts tokens, then starts the app."""
     _ensure_directories()
-
-    from core.ipc import ping_running_instance
-    if ping_running_instance():
-        print("Another instance is already running. Signal sent to restore.")
-        sys.exit(0)
 
     # ── v3.1.0: CLI argument parsing ─────────────────────────────────
     parser = argparse.ArgumentParser(
@@ -185,7 +214,24 @@ def main():
         "--start-date", "-s", type=str, default=None,
         help="Start date for rate extraction (YYYY-MM-DD). Defaults to auto-detect.",
     )
+    parser.add_argument(
+        "--purge-credentials", action="store_true",
+        help="Delete stored BOT API tokens from the OS keychain and exit. "
+             "Invoked by the Windows uninstaller.",
+    )
     args = parser.parse_args()
+
+    # Purge stored credentials early — before the single-instance check and
+    # any token validation — so the uninstaller can wipe secrets even when
+    # the app is running or no tokens are currently configured.
+    if args.purge_credentials:
+        _purge_credentials()
+        sys.exit(0)
+
+    from core.ipc import ping_running_instance
+    if ping_running_instance():
+        print("Another instance is already running. Signal sent to restore.")
+        sys.exit(0)
 
     if args.headless:
         _run_headless(args)
@@ -265,7 +311,7 @@ def _run_headless(args: argparse.Namespace) -> None:
     # Run async batch
     async def _run():
         from core.api_client import BOTClient
-        from core.audit_logger import AuditLogger
+        from core.audit_logger import AuditLogger, cleanup_old_audit_logs
         from core.engine import LedgerEngine
 
         audit = AuditLogger()
@@ -293,6 +339,8 @@ def _run_headless(args: argparse.Namespace) -> None:
             anomalies_detected=engine.last_batch_anomaly_count,
         )
         audit_path = audit.finalize()
+        # Prune accumulated per-batch audit logs (one is written every run).
+        cleanup_old_audit_logs()
 
         print(f"\nResults: {success} succeeded, {fail} failed")
         print(f"Audit log: {audit_path}")
@@ -329,25 +377,20 @@ def global_exception_handler(
         print(f"\n[FATAL] {error_msg}", file=sys.stderr, flush=True)
 
     # Layer 1: Forward to Sentry if initialized
-    try:
+    with contextlib.suppress(Exception):
         import sentry_sdk
         sentry_sdk.capture_exception(exc_value)
         sentry_sdk.flush(timeout=2.0)
-    except Exception:
-        pass
 
     # Layer 2: Write to local error.log
     log_dir = Path(get_project_root()) / "data" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "error.log"
-    try:
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(f"\n--- FATAL ERROR ---\n{error_msg}\n")
-    except Exception:
-        pass
+    with contextlib.suppress(Exception), log_path.open("a", encoding="utf-8") as f:
+        f.write(f"\n--- FATAL ERROR ---\n{error_msg}\n")
 
     # Layer 3: Show GUI popup (best-effort, may fail in headless/noconsole)
-    try:
+    with contextlib.suppress(Exception):
         root = tk.Tk()
         root.withdraw()
         messagebox.showerror(
@@ -355,8 +398,6 @@ def global_exception_handler(
             f"A critical crash occurred:\n\n{exc_value}\n\nPlease check error.log for full details."
         )
         root.destroy()
-    except Exception:
-        pass
 
 sys.excepthook = global_exception_handler
 

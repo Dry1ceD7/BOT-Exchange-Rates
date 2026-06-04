@@ -9,6 +9,7 @@ Extracted from gui/app.py to reduce God Object line count.
 
 import contextlib
 import logging
+import sys
 import threading
 
 import customtkinter as ctk
@@ -49,6 +50,12 @@ class UpdateManager(SafePanel):
         """Check for updates in a background thread."""
         from core.config_manager import SettingsManager
         from core.version import __version__ as APP_VERSION
+
+        # The updater only handles the Windows .exe installer
+        # (core.auto_updater is Windows-only), so nagging on macOS/Linux is a
+        # dead end — gate the whole check to win32.
+        if sys.platform != "win32":
+            return
 
         settings = SettingsManager().load()
         if not settings.get("auto_update", True):
@@ -271,7 +278,7 @@ class UpdateManager(SafePanel):
 
             ctk.CTkLabel(
                 inner,
-                text="  ✅ Update downloaded!",
+                text="  Update downloaded!",
                 font=ctk.CTkFont(size=13, weight="bold"),
                 text_color=t["banner_text_light"],
             ).pack(side="left", padx=(0, 16))

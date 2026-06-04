@@ -12,7 +12,7 @@ Override via environment variables where noted.
 
 import logging
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,12 @@ they lack the standard Date/Cur/EX Rate header and must be skipped."""
 BACKUP_MAX_AGE_DAYS: int = int(os.environ.get("BOT_BACKUP_AGE_DAYS", "7"))
 """Auto-cleanup backups older than this many days."""
 
+AUDIT_LOG_MAX_AGE_DAYS: int = int(os.environ.get("BOT_AUDIT_LOG_AGE_DAYS", "30"))
+"""Auto-cleanup Audit_Log_*.csv files older than this many days.
+
+The CLI path writes one audit log per batch, so data/logs/ would otherwise
+grow unbounded. Override via the BOT_AUDIT_LOG_AGE_DAYS environment variable."""
+
 MIN_DISK_SPACE_MB: int = 100
 """Minimum free disk space (MB) required before saving a workbook."""
 
@@ -51,6 +57,21 @@ API_TIMEOUT_SECONDS: float = 30.0
 
 API_CONNECT_TIMEOUT_SECONDS: float = 10.0
 """Default httpx connect timeout."""
+
+API_RETRY_ATTEMPTS: int = 4
+"""tenacity stop_after_attempt count for transient network/5xx errors."""
+
+API_RETRY_BACKOFF_MULTIPLIER: float = 1.0
+"""tenacity wait_exponential multiplier for retry backoff."""
+
+API_RETRY_BACKOFF_MIN_SECONDS: float = 2.0
+"""tenacity wait_exponential minimum backoff (seconds)."""
+
+API_RETRY_BACKOFF_MAX_SECONDS: float = 20.0
+"""tenacity wait_exponential maximum backoff (seconds)."""
+
+RETRY_AFTER_MAX_SECONDS: int = 300
+"""Upper clamp for a 429 Retry-After header value (seconds)."""
 
 # ── IPC ──────────────────────────────────────────────────────────────────
 IPC_NONCE_LENGTH: int = 32
@@ -76,9 +97,30 @@ DATE_FORMATS: tuple = (
 )
 """Single source of truth for textual date formats accepted across the app
 (prescan, exrate_sheet, engine). Superset of every format the individual
-modules historically parsed."""
+modules historically parsed.
+
+Day-first by deliberate Thai-locale policy: a slash/dash date such as
+"01/02/2025" is parsed as 1 February (day-month-year), NOT 2 January. Thai
+ledgers are authored DD/MM/YYYY, so the day-first formats are listed before
+any month-first interpretation could match."""
 
 _NON_DATE_TOKENS = frozenset({"", "nan", "null"})
+
+# Buddhist-Era ⇄ Common-Era offset. Thai ledgers routinely record years in
+# B.E. (e.g. 2567 = 2024 CE); strptime parses them as literal CE, silently
+# mis-targeting rate queries ~543 years out, so parse_date normalizes them.
+_BE_CE_OFFSET = 543
+_BE_YEAR_LOW = 2400
+_BE_YEAR_HIGH = 2700
+
+
+def _plausible_year(year: int) -> bool:
+    """True if ``year`` is within the accepted Common-Era window.
+
+    Lower bound is 1970 (epoch-ish; older accounting dates are not expected);
+    upper bound is next year to tolerate forward-dated entries.
+    """
+    return 1970 <= year <= date.today().year + 1
 
 
 def parse_date(cell_val) -> date | None:
@@ -86,6 +128,12 @@ def parse_date(cell_val) -> date | None:
 
     Accepts datetime, date, or string inputs. Returns None for empty,
     "nan"/"null", non-string/non-date types, or unrecognized formats.
+
+    Buddhist-Era normalization: this is the single choke point for every
+    string-date caller, so a year landing in the B.E. band (~2400-2700) is
+    converted to Common Era by subtracting 543 and re-validated. Years that
+    are implausible after normalization (e.g. 9999) return None rather than
+    silently mis-targeting a query.
     """
     if isinstance(cell_val, datetime):
         return cell_val.date()
@@ -97,10 +145,43 @@ def parse_date(cell_val) -> date | None:
             return None
         for fmt in DATE_FORMATS:
             try:
-                return datetime.strptime(val, fmt).date()
+                parsed = datetime.strptime(val, fmt).date()
             except ValueError:
                 continue
+            return _normalize_year(parsed)
     return None
+
+
+def _normalize_year(parsed: date) -> date | None:
+    """Apply the plausible-year window with B.E.→CE fallback.
+
+    Returns ``parsed`` unchanged for plausible CE years; converts B.E.-band
+    years (subtract 543) and re-validates; returns None for anything that is
+    still implausible.
+    """
+    if _plausible_year(parsed.year):
+        return parsed
+    if _BE_YEAR_LOW <= parsed.year <= _BE_YEAR_HIGH:
+        try:
+            converted = parsed.replace(year=parsed.year - _BE_CE_OFFSET)
+        except ValueError:
+            return None
+        if _plausible_year(converted.year):
+            return converted
+    return None
+
+
+def bot_today() -> date:
+    """Return today's date in the Bank of Thailand timezone (Asia/Bangkok).
+
+    BOT publishes rates on the local trading calendar (UTC+7). A machine in
+    an earlier timezone can still be on "yesterday" at Bangkok midnight, so a
+    naive ``date.today()`` would lag the BOT business date by up to a day and
+    target the wrong trading day near the day boundary. Using the fixed
+    UTC+7 offset (Thailand observes no DST) keeps date targeting aligned with
+    the rates source.
+    """
+    return datetime.now(timezone(timedelta(hours=7))).date()
 
 
 # ── CSV / Decimal Helpers ────────────────────────────────────────────────

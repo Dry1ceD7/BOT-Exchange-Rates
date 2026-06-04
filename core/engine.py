@@ -20,10 +20,11 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
 import openpyxl
 
 from core.anomaly_guard import AnomalyGuard
-from core.api_client import BOTClient
+from core.api_client import BOTAPIError, BOTClient
 from core.backup_manager import BackupError, BackupManager
 from core.config_manager import SettingsManager
 from core.constants import (
@@ -31,6 +32,7 @@ from core.constants import (
     DEFAULT_ANOMALY_THRESHOLD_PCT,
     MAX_FILE_SIZE_MB,
     SKIP_SHEET_NAMES,
+    bot_today,
     parse_date,
 )
 from core.database import CacheDB
@@ -202,7 +204,7 @@ class LedgerEngine:
         except (ValueError, TypeError):
             force_start = date(2025, 1, 1)
 
-        today = date.today()
+        today = bot_today()
         all_d = set(dates) | {force_start, today}
         min_date, max_date = min(all_d), max(all_d)
         years = {d.year for d in all_d}
@@ -451,17 +453,22 @@ class LedgerEngine:
 
         self._check_memory_guardrail(filepath)
         self._emit("Size check passed")
+
+        # ── Standalone ExRate detection + format validation ─────────────
+        # Detect BEFORE taking our own backup: the standalone path makes its
+        # own pre-edit backup (StandaloneExRateUpdater.run), so backing up here
+        # first would duplicate the identical pristine file. Delegate and skip
+        # process_ledger's own backup when this is a standalone file.
+        standalone_result = await self._detect_standalone_exrate(filepath)
+        if standalone_result is not None:
+            self._last_anomaly_count = 0
+            return standalone_result
+
         if dry_run:
             self._emit("[SIM] Backup skipped (dry run)")
         else:
             self.backup.create_backup(filepath)
             self._emit("Backup created")
-
-        # ── Standalone ExRate detection + format validation ─────────────
-        standalone_result = await self._detect_standalone_exrate(filepath)
-        if standalone_result is not None:
-            self._last_anomaly_count = 0
-            return standalone_result
 
         # ── Pre-scan dates for API data loading ──────────────────────
         all_target_dates = self._prescan_target_dates(filepath)
@@ -469,7 +476,7 @@ class LedgerEngine:
         # ── Date hierarchy ───────────────────────────────────────────
         target_year = (
             min(all_target_dates).year if all_target_dates
-            else date.today().year
+            else bot_today().year
         )
         if start_date is None:
             start_date = f"{target_year - 1}-12-20"
@@ -520,8 +527,15 @@ class LedgerEngine:
         start_date: str | None = None,
         progress_cb: Callable[[int, int, str, str | None], None] | None = None,
         dry_run: bool = False,
+        stop_event: threading.Event | None = None,
     ) -> tuple[int, int, list[str]]:
-        """Batch processing with pre-edit backup, cache, and auto-cleanup."""
+        """Batch processing with pre-edit backup, cache, and auto-cleanup.
+
+        ``stop_event`` (set by the GUI on shutdown) is checked BETWEEN files —
+        a safe boundary after the previous file's wb.close()+gc — so a cancel
+        never lands mid-save and risks truncating an in-place .xlsx. Remaining
+        files are reported as unprocessed via errors + progress_cb.
+        """
         if not dry_run:
             self.backup.cleanup_old_backups(max_age_days=BACKUP_MAX_AGE_DAYS)
         total = len(filepaths)
@@ -531,6 +545,14 @@ class LedgerEngine:
 
         for idx, fp in enumerate(filepaths):
             fname = Path(fp).name
+            # ── Cooperative cancellation (safe boundary: between files) ────
+            if stop_event is not None and stop_event.is_set():
+                err_msg = f"{fname}: cancelled — not processed"
+                errors.append(err_msg)
+                logger.warning("Batch cancelled before file: %s", fname)
+                if progress_cb:
+                    progress_cb(idx + 1, total, fname, "cancelled")
+                continue
             try:
                 await self.process_ledger(
                     fp, start_date=start_date, dry_run=dry_run,
@@ -548,6 +570,18 @@ class LedgerEngine:
                 err_msg = f"{fname}: {e!s}"
                 errors.append(err_msg)
                 logger.error("File SKIPPED: %s", err_msg)
+                if progress_cb:
+                    progress_cb(idx + 1, total, fname, str(e))
+            except (BOTAPIError, httpx.HTTPError) as e:
+                # API/network failure on THIS file (401/503/timeout/conn drop).
+                # None are OSError subclasses, so without this branch the whole
+                # batch would abort at file N. Record + continue with N+1.
+                err_msg = f"{fname}: {e!s}"
+                errors.append(err_msg)
+                logger.error(
+                    "File SKIPPED (API/network): %s\n%s",
+                    fname, traceback.format_exc(),
+                )
                 if progress_cb:
                     progress_cb(idx + 1, total, fname, str(e))
             except (OSError, ValueError, KeyError,

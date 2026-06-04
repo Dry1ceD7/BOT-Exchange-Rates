@@ -13,10 +13,10 @@ Output: data/logs/Audit_Log_YYYYMMDD_HHMMSS.csv
 import atexit
 import csv
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from core.constants import csv_safe
+from core.constants import AUDIT_LOG_MAX_AGE_DAYS, csv_safe
 from core.paths import get_project_root
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,9 @@ class AuditLogger:
             except (OSError, ValueError):
                 pass
             self._closed = True
+        # Drop the atexit reference so a long-lived process that instantiates
+        # one logger per batch does not accumulate stale callbacks.
+        atexit.unregister(self._atexit_cleanup)
 
     @property
     def filepath(self) -> str:
@@ -186,8 +189,56 @@ class AuditLogger:
                 logger.warning("Audit log close warning: %s", e)
             self._closed = True
 
+        # The handle is now closed deterministically, so the interpreter-exit
+        # safety net is no longer needed; unregister it so per-batch loggers
+        # in a long-lived process do not pile up atexit callbacks.
+        atexit.unregister(self._atexit_cleanup)
+
         logger.info(
             "Audit log finalized: %s (%d entries)",
             self._filepath, self._row_count,
         )
         return self._filepath
+
+
+def cleanup_old_audit_logs(
+    log_dir: str | None = None,
+    max_age_days: int = AUDIT_LOG_MAX_AGE_DAYS,
+) -> int:
+    """Delete Audit_Log_*.csv files older than ``max_age_days``.
+
+    The CLI writes one audit log per batch, so data/logs/ would grow forever
+    without pruning. Age is derived from the YYYYMMDD_HHMMSS timestamp EMBEDDED
+    in each filename — never st_mtime, which a copy/restore could reset to a
+    misleading recent value.
+
+    Returns:
+        Number of files deleted. Unparseable names and unlink failures are
+        skipped (logged at debug), never raised, so a stray file cannot abort
+        the batch.
+    """
+    if log_dir is None:
+        log_dir = str(Path(get_project_root()) / "data" / "logs")
+    log_path = Path(log_dir)
+    if not log_path.is_dir():
+        return 0
+
+    cutoff = datetime.now() - timedelta(days=max_age_days)
+    deleted = 0
+    for candidate in log_path.glob("Audit_Log_*.csv"):
+        # Filename: "Audit_Log_YYYYMMDD_HHMMSS.csv" → strip prefix/suffix.
+        stamp = candidate.name[len("Audit_Log_"):-len(".csv")]
+        try:
+            logged_at = datetime.strptime(stamp, "%Y%m%d_%H%M%S")
+        except ValueError:
+            logger.debug("Skipping audit log with unparseable name: %s", candidate.name)
+            continue
+        if logged_at < cutoff:
+            try:
+                candidate.unlink()
+                deleted += 1
+            except OSError as e:
+                logger.debug("Could not delete old audit log %s: %s", candidate, e)
+    if deleted:
+        logger.info("Pruned %d audit log(s) older than %d days.", deleted, max_age_days)
+    return deleted

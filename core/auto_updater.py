@@ -591,15 +591,19 @@ def apply_update(
 
             if sys.platform == "win32":
                 flags = 0x00000008  # DETACHED_PROCESS
-                subprocess.Popen(
-                    ["cmd.exe", "/c", bat_path],
+                # noqa S603/S607: fixed argv launching the SHA-256-verified helper
+                # script via the OS-standard cmd.exe — no shell, no untrusted input.
+                subprocess.Popen(  # noqa: S603
+                    ["cmd.exe", "/c", bat_path],  # noqa: S607
                     creationflags=flags,
                     close_fds=True,
                 )
             else:
                 import shlex
-                subprocess.Popen(
-                    [
+                # noqa S603/S607: every interpolated path is shlex.quote()'d and the
+                # installer was SHA-256 verified upstream; sh is the OS-standard shell.
+                subprocess.Popen(  # noqa: S603
+                    [  # noqa: S607
                         "sh", "-c",
                         f"sleep 3 && {shlex.quote(new_exe_path)} /VERYSILENT "
                         f"/DIR={shlex.quote(install_dir)} && "
@@ -642,10 +646,11 @@ def restart_app() -> None:
     import subprocess
     import sys
 
+    # noqa S603: relaunch uses the trusted sys.executable path with a fixed argv.
     if getattr(sys, "frozen", False):
-        subprocess.Popen([sys.executable])
+        subprocess.Popen([sys.executable])  # noqa: S603
     else:
-        subprocess.Popen([sys.executable] + sys.argv)
+        subprocess.Popen([sys.executable, *sys.argv])  # noqa: S603
 
     sys.exit(0)
 

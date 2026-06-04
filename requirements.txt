@@ -14,4 +14,4 @@ sentry-sdk==2.57.0
 # pystray's Windows backend depends on pywin32; keep it explicit, win32-only.
 pywin32>=306 ; sys_platform == 'win32'
 pystray>=0.19.5 ; sys_platform == 'win32'
-Pillow>=10.0.0 ; sys_platform == 'win32'
+Pillow>=12.2.0 ; sys_platform == 'win32'

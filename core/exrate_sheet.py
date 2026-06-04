@@ -14,7 +14,14 @@ from decimal import Decimal
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
+from core.constants import bot_today
 from core.constants import parse_date as _shared_parse_date
+
+# Mirror resolve_rate's guardrail (core/logic.py): a weekend/holiday row
+# carries forward the prior trading-day rate, but no further back than this
+# many days. Beyond the limit the rate stays blank so the ledger IFERROR
+# yields "" rather than a stale rate older than the documented rollback.
+_MAX_ROLLBACK_DAYS = 10
 
 
 def update_master_exrate_sheet(
@@ -26,6 +33,7 @@ def update_master_exrate_sheet(
     holidays_list: list[date],
     holidays_names: dict[date, str],
     start_date: date,
+    end_date: date | None = None,
 ) -> None:
     """
     Creates or updates a unified "ExRate" master tab.
@@ -37,6 +45,12 @@ def update_master_exrate_sheet(
       - Weekend only → "Weekend"
       - Holiday on weekday → "[Holiday Name]"
       - Holiday on weekend → "Weekend; [Holiday Name]"
+
+    Args:
+        end_date: Last calendar date to populate. Defaults to the BOT business
+            date (bot_today, Asia/Bangkok) when None so the standard ledger
+            path keeps its prior behavior; the GUI manual-range path passes the
+            user's explicit end date.
     """
     SHEET_NAME = "ExRate"
     HEADER_ROW = 1
@@ -79,7 +93,8 @@ def update_master_exrate_sheet(
 
     # ── Build ALL calendar dates ─────────────────────────────────────
     holidays_set = set(holidays_list)
-    end_date = date.today()
+    if end_date is None:
+        end_date = bot_today()
     all_dates = _build_date_range(start_date, end_date, existing_data)
 
     # ── Build the merged dataset ────────────────────────────────────
@@ -143,20 +158,38 @@ def _merge_rate_data(
     usd_buying_rates, usd_selling_rates,
     eur_buying_rates, eur_selling_rates,
 ) -> dict[date, dict]:
-    """Merge API rates with existing sheet data (API priority)."""
+    """Merge API rates with existing sheet data (API priority).
+
+    Weekend/holiday rows carry no BOT rate of their own, so the ledger
+    XLOOKUP (exact match) would resolve a Saturday-dated row to a blank
+    cell, silently skipping the documented 10-day rollback. To honor that
+    rule inside the formula path we carry forward the prior TRADING-DAY rate
+    into each weekend/holiday row, bounded to ``_MAX_ROLLBACK_DAYS`` (mirrors
+    resolve_rate in core/logic.py). Beyond the window the cell stays blank.
+    """
+    rate_keys = ("usd_buy", "usd_sell", "eur_buy", "eur_sell")
+    # Per-column last seen trading-day value + the date it came from, used to
+    # bound the carry-forward to the rollback window.
+    last_trading: dict[str, tuple[date, Decimal] | None] = {
+        key: None for key in rate_keys
+    }
+
     merged: dict[date, dict] = {}
     for d in sorted(all_dates):
         existing = existing_data.get(d, {})
         is_weekend = d.weekday() >= 5
         is_holiday = d in holidays_set
+        is_trading_day = not (is_weekend or is_holiday)
 
         # Keep rate values as Decimal end-to-end — NEVER cast to float.
         # float() corrupts 4dp precision (34.5650 -> 34.564999...).
         # openpyxl writes Decimal cells natively.
-        ub = usd_buying_rates.get(d)
-        us = usd_selling_rates.get(d)
-        eb = eur_buying_rates.get(d)
-        es = eur_selling_rates.get(d)
+        row_rates = {
+            "usd_buy": usd_buying_rates.get(d),
+            "usd_sell": usd_selling_rates.get(d),
+            "eur_buy": eur_buying_rates.get(d),
+            "eur_sell": eur_selling_rates.get(d),
+        }
 
         holiday_label = ""
         if is_weekend and is_holiday:
@@ -166,13 +199,28 @@ def _merge_rate_data(
         elif is_holiday:
             holiday_label = holidays_names.get(d, "Holiday")
 
-        merged[d] = {
-            "usd_buy": ub if ub is not None else existing.get("usd_buy"),
-            "usd_sell": us if us is not None else existing.get("usd_sell"),
-            "eur_buy": eb if eb is not None else existing.get("eur_buy"),
-            "eur_sell": es if es is not None else existing.get("eur_sell"),
-            "holidays_weekend": holiday_label,
-        }
+        entry: dict = {}
+        for key in rate_keys:
+            # API value wins; otherwise fall back to whatever was on the sheet.
+            value = (
+                row_rates[key]
+                if row_rates[key] is not None
+                else existing.get(key)
+            )
+            if is_trading_day:
+                # Record the freshest trading-day rate for downstream rollback.
+                if value is not None:
+                    last_trading[key] = (d, value)
+            elif value is None:
+                # Weekend/holiday with no own rate → carry the prior trading
+                # day's rate forward, but only within the rollback window.
+                prior = last_trading[key]
+                if prior is not None and (d - prior[0]).days <= _MAX_ROLLBACK_DAYS:
+                    value = prior[1]
+            entry[key] = value
+
+        entry["holidays_weekend"] = holiday_label
+        merged[d] = entry
     return merged
 
 

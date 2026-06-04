@@ -4,11 +4,18 @@ core/logic.py
 ---------------------------------------------------------------------------
 BOT Exchange Rate Processor (v2.6.1) - Featherweight Architecture
 ---------------------------------------------------------------------------
-The Standard Date Resolution Engine. Fetches the exchange rate for the
-exact date provided. If the target date is a weekend or BOT holiday,
-rolls back day-by-day until it finds the first valid historical trading
-day. No Excel formulas are used; outputs are guaranteed Python Decimal
-objects.
+Holiday-aware trading-day utilities plus Decimal helpers.
+
+This module is the pure-logic layer: weekend/holiday detection, day-by-day
+rollback to the nearest historical trading day, year-end start-date
+computation, and exact Decimal coercion. It holds NO Excel I/O.
+
+NOTE on Excel formulas: the live ledger write path injects XLOOKUP formulas
+(the intended design per README); it does NOT consume ``resolve_rate``.
+``resolve_rate`` / ``resolve_rate_for_currency`` are the standalone/utility
+path that returns hard Decimal values for callers needing a resolved rate
+in code (CSV export, anomaly checks, headless helpers). Do not treat them as
+the live ledger engine.
 """
 
 import re
@@ -58,11 +65,16 @@ class BOTLogicEngine:
         eur_rates: dict[date, Decimal],
     ) -> tuple[date, Decimal | None, Decimal | None]:
         """
-        Standard Date Resolution Engine (V2.5).
+        Standalone/utility date resolver (V2.5).
 
         Returns the rate for the EXACT date provided. If the target date is
         a weekend or BOT holiday, it rolls back day-by-day until it finds
         the first valid historical trading day with available data.
+
+        This serves the standalone/utility path (CSV export, anomaly checks,
+        headless helpers) and returns hard Decimal values. It is NOT the live
+        ledger engine — the ledger write path injects XLOOKUP formulas and
+        does not call this method.
 
         Examples:
             - Target is Tuesday (trading day)  → returns Tuesday's rate

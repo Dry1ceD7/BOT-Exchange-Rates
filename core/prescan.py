@@ -16,7 +16,7 @@ from pathlib import Path
 
 import openpyxl
 
-from core.constants import DATE_FORMATS
+from core.constants import DATE_FORMATS, bot_today
 from core.constants import parse_date as _shared_parse_date
 
 logger = logging.getLogger(__name__)
@@ -50,8 +50,10 @@ def prescan_oldest_date(
     if oldest is not None:
         return oldest, True
 
-    # Fallback: last week of previous year (not today - 30)
-    prev_year = date.today().year - 1
+    # Fallback: last week of previous year (not today - 30).
+    # Anchor on the BOT business date (Asia/Bangkok), not naive local time, so
+    # the year boundary matches the rates source near midnight.
+    prev_year = bot_today().year - 1
     fallback = date(prev_year, 12, 28)
     return fallback, False
 

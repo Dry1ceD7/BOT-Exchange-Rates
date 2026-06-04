@@ -45,6 +45,20 @@ SetupIconFile=..\assets\icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
+; ---------------------------------------------------------------------------
+; PrivilegesRequired=lowest — dual install-location consequence (intentional)
+; ---------------------------------------------------------------------------
+; This installer does NOT force elevation. The effective install root depends
+; on whether the user happens to run elevated:
+;   * Elevated   -> {autopf} resolves to Program Files (machine-wide install).
+;   * Not elevated (default) -> {autopf} resolves to
+;     %LOCALAPPDATA%\Programs (per-user install, no admin prompt).
+; Application data follows the install root: it lives under {app}\data in both
+; cases (i.e. Program Files\BOT-ExRate\data or
+; %LOCALAPPDATA%\Programs\BOT-ExRate\data). Per-user settings written by the
+; app itself also live under %LOCALAPPDATA%\BOT_Exrate. Keep this in mind for
+; the [UninstallDelete] / [Code] cleanup below.
+; ---------------------------------------------------------------------------
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog commandline
 UninstallDisplayIcon={app}\assets\icon.ico
@@ -79,8 +93,51 @@ Filename: "{sys}\ie4uinit.exe"; Parameters: "-show"; Flags: runhidden nowait
 ; Option to launch app after install
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
+; Purge OS-stored credentials (keyring) on uninstall. Gated behind user
+; confirmation in [Code] (RemoveUserDataConfirmed); --purge-credentials is
+; handled by main.py. runhidden so no console window flashes.
+[UninstallRun]
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--purge-credentials"; Flags: runhidden; RunOnceId: "PurgeCredentials"; Check: RemoveUserDataConfirmed
+
 [UninstallDelete]
-; Clean up any runtime-generated files
+; Clean up any runtime-generated files. Logs live under {app}\data, not {app}.
 Type: filesandordirs; Name: "{app}\__pycache__"
-Type: filesandordirs; Name: "{app}\*.log"
+Type: files; Name: "{app}\data\app.log*"
+Type: filesandordirs; Name: "{app}\data\logs"
+
+[Code]
+var
+  RemoveUserData: Boolean;
+
+{ Single source of truth: did the user agree to wipe their data/backups/logs?
+  Used both by [UninstallRun] (Check:) and CurUninstallStepChanged below. }
+function RemoveUserDataConfirmed(): Boolean;
+begin
+  Result := RemoveUserData;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    { Ask ONCE, before anything is removed. These are financial backups —
+      never delete silently. The same answer also gates the keyring purge. }
+    RemoveUserData := MsgBox(
+      'Also remove saved data, backups and logs?' + #13#10 + #13#10 +
+      'This permanently deletes your exchange-rate backups, cache and logs ' +
+      'from both the application folder and your user profile. ' +
+      'Choose No to keep them.',
+      mbConfirmation, MB_YESNO) = IDYES;
+  end
+  else if CurUninstallStep = usPostUninstall then
+  begin
+    if RemoveUserData then
+    begin
+      { Per-user app data written by the app itself. }
+      DelTree(ExpandConstant('{localappdata}\BOT_Exrate'), True, True, True);
+      { Data/backups/logs living alongside the install. }
+      DelTree(ExpandConstant('{app}\data'), True, True, True);
+    end;
+  end;
+end;
 

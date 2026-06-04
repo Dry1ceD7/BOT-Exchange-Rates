@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Tests for core/scheduler.py — Auto-Scheduler."""
 
-import contextlib
 import os
 import time
+from datetime import datetime
 from unittest.mock import MagicMock
 
 from core.scheduler import AutoScheduler
@@ -49,7 +49,7 @@ class TestAutoScheduler:
         scheduler = AutoScheduler()
         scheduler._watch_paths = [str(tmp_path)]
 
-        files = scheduler._scan_watch_paths()
+        files = scheduler._scan_watch_paths(scheduler._watch_paths)
 
         assert len(files) == 2
         names = [os.path.basename(f) for f in files]
@@ -61,7 +61,7 @@ class TestAutoScheduler:
     def test_scan_nonexistent_path(self):
         scheduler = AutoScheduler()
         scheduler._watch_paths = ["/nonexistent/path"]
-        files = scheduler._scan_watch_paths()
+        files = scheduler._scan_watch_paths(scheduler._watch_paths)
         assert files == []
 
     def test_update_config(self):
@@ -76,10 +76,25 @@ class TestAutoScheduler:
         assert len(scheduler.watch_paths) == 2
         scheduler.stop()
 
-    def test_callback_fires_at_time(self, tmp_path):
-        """Test that callback fires when current time matches."""
+    def test_callback_fires_at_time(self, tmp_path, monkeypatch):
+        """Test that callback fires when current time matches.
+
+        Time is frozen via a fake datetime so the captured target_time and
+        the datetime.now() read inside _check_and_fire always agree (no
+        wall-clock minute-rollover flakiness). Errors are NOT suppressed so a
+        real failure surfaces instead of silently passing.
+        """
         # Create a test file so scan finds something
         (tmp_path / "test.xlsx").write_text("test")
+
+        frozen = datetime(2025, 1, 1, 23, 0, 0)
+
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return frozen
+
+        monkeypatch.setattr("core.scheduler.datetime", _FrozenDatetime)
 
         callback = MagicMock()
         scheduler = AutoScheduler()
@@ -87,15 +102,9 @@ class TestAutoScheduler:
         scheduler._callback = callback
         scheduler._watch_paths = [str(tmp_path)]
         scheduler._last_run_date = None
+        scheduler._target_time = frozen.strftime("%H:%M")
 
-        # Set target to current time so it fires immediately
-        import time as _time
-        scheduler._target_time = _time.strftime("%H:%M")
-
-        # Call the check directly (without scheduling next)
-        # Timer scheduling may fail in test context
-        with contextlib.suppress(Exception):
-            scheduler._check_and_fire()
+        scheduler._check_and_fire()
 
         # Callback should have been called with the discovered file
         callback.assert_called_once()
@@ -116,6 +125,72 @@ class TestAutoScheduler:
         scheduler._last_run_date = time.strftime("%Y-%m-%d")
         scheduler._check_and_fire()
         callback.assert_not_called()
+        scheduler.stop()
+
+    def test_check_and_fire_marks_last_run_under_lock(
+        self, tmp_path, monkeypatch
+    ):
+        """Fix: _check_and_fire snapshots shared state under the lock, writes
+        _last_run_date back, and a second call on the same (frozen) day is a
+        no-op — guarding against a double-fire race on the Timer thread.
+        """
+        (tmp_path / "test.xlsx").write_text("test")
+
+        frozen = datetime(2025, 1, 1, 23, 0, 0)
+
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return frozen
+
+        monkeypatch.setattr("core.scheduler.datetime", _FrozenDatetime)
+
+        callback = MagicMock()
+        scheduler = AutoScheduler()
+        scheduler._running = True
+        scheduler._callback = callback
+        scheduler._watch_paths = [str(tmp_path)]
+        scheduler._last_run_date = None
+        scheduler._target_time = frozen.strftime("%H:%M")
+
+        scheduler._check_and_fire()
+        assert scheduler._last_run_date == "2025-01-01"
+        callback.assert_called_once()
+
+        # Same frozen day: duplicate-run guard must prevent a second fire.
+        scheduler._check_and_fire()
+        callback.assert_called_once()
+        scheduler.stop()
+
+    def test_check_and_fire_uses_watch_path_snapshot(
+        self, tmp_path, monkeypatch
+    ):
+        """Fix: the callback receives the watch-path snapshot taken under the
+        lock, so a concurrent update_config() cannot torn-read mid-scan.
+        """
+        (tmp_path / "test.xlsx").write_text("test")
+
+        frozen = datetime(2025, 2, 2, 8, 30, 0)
+
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return frozen
+
+        monkeypatch.setattr("core.scheduler.datetime", _FrozenDatetime)
+
+        received = []
+        scheduler = AutoScheduler()
+        scheduler._running = True
+        scheduler._callback = received.extend
+        scheduler._watch_paths = [str(tmp_path)]
+        scheduler._last_run_date = None
+        scheduler._target_time = frozen.strftime("%H:%M")
+
+        scheduler._check_and_fire()
+
+        assert len(received) == 1
+        assert os.path.basename(received[0]) == "test.xlsx"
         scheduler.stop()
 
     def test_schedule_next_noop_after_stop(self):

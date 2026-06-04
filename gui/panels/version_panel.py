@@ -460,8 +460,14 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
             )
             if not result.get("success"):
                 logger.error("Installer failed: %s", result.get("error"))
+                err_msg = f"Install failed: {result.get('error')}"
                 if self._on_error:
-                    self._on_error(f"Install failed: {result.get('error')}")
+                    self._on_error(err_msg)
+                else:
+                    # Failure must never be silent: the modal is already torn
+                    # down, so fall back to a native error popup directly.
+                    from tkinter import messagebox
+                    messagebox.showerror("Update Failed", err_msg)
                 return
             # Installer succeeded — hard exit
             sys.exit(0)

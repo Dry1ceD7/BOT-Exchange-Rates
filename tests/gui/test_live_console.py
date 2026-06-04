@@ -131,6 +131,63 @@ class TestLiveConsolePanelContent:
         panel.destroy()
 
 
+class TestLiveConsolePanelLineCap:
+    """_poll caps the Text widget to MAX_LINES to bound memory growth."""
+
+    def test_poll_caps_to_max_lines(self, tk_root):
+        from gui.panels.live_console import LiveConsolePanel
+
+        panel = LiveConsolePanel(tk_root)
+        # Shrink the cap so the test stays fast.
+        panel.MAX_LINES = 50
+        # Push far more events than the cap through the real drain path.
+        for i in range(200):
+            panel.event_bus.push({"type": "log", "msg": f"line {i}"})
+        panel._polling = True
+        # Drive a single drain cycle directly (no after() loop needed).
+        panel._poll()
+        panel._polling = False
+
+        tb = panel._textbox._textbox
+        line_count = int(tb.index("end-1c").split(".")[0])
+        assert line_count <= panel.MAX_LINES, (
+            f"expected <= {panel.MAX_LINES} lines, got {line_count}"
+        )
+        panel.destroy()
+
+    def test_poll_keeps_newest_lines(self, tk_root):
+        """When trimmed, the most recent lines survive and oldest are dropped."""
+        from gui.panels.live_console import LiveConsolePanel
+
+        panel = LiveConsolePanel(tk_root)
+        panel.MAX_LINES = 10
+        for i in range(60):
+            panel.event_bus.push({"type": "log", "msg": f"line {i}"})
+        panel._polling = True
+        panel._poll()
+        panel._polling = False
+
+        content = panel._textbox.get("1.0", "end")
+        assert "line 59" in content, "newest line must be retained"
+        assert "line 0" not in content, "oldest line must be trimmed"
+        panel.destroy()
+
+    def test_trim_lines_noop_below_cap(self, tk_root):
+        """_trim_lines leaves content untouched when under the cap."""
+        from gui.panels.live_console import LiveConsolePanel
+
+        panel = LiveConsolePanel(tk_root)
+        panel.MAX_LINES = 2000
+        panel.append_line("only one line")
+        tb = panel._textbox._textbox
+        panel._textbox.configure(state="normal")
+        panel._trim_lines(tb)
+        panel._textbox.configure(state="disabled")
+        content = panel._textbox.get("1.0", "end")
+        assert "only one line" in content
+        panel.destroy()
+
+
 class TestLiveConsolePanelEventBus:
     """Panel owns a default EventBus and exposes it via property."""
 

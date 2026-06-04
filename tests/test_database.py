@@ -8,6 +8,7 @@ V2.6.1: Updated to 4-column rate schema (usd_buying, usd_selling,
 ---------------------------------------------------------------------------
 """
 
+import logging
 import os
 import threading
 from datetime import date
@@ -424,3 +425,104 @@ class TestGetCache:
 
         assert len(instances) == 5
         assert all(inst is instances[0] for inst in instances)
+
+
+# =========================================================================
+#  CORRUPTION RECOVERY (fix: malformed cache.db must not kill the engine)
+# =========================================================================
+
+class TestCorruptionRecovery:
+    """A corrupted cache.db is rebuildable from the API — recover cold."""
+
+    def test_garbage_db_recovers_and_is_usable(self, tmp_path, caplog):
+        """Writing garbage to cache.db → CacheDB() succeeds and is usable."""
+        tmp = str(tmp_path / "cache.db")
+        # Lay down bytes that look like a SQLite header but are malformed,
+        # so quick_check fails when the schema is touched.
+        with open(tmp, "wb") as fh:
+            fh.write(b"SQLite format 3\x00" + b"\xde\xad\xbe\xef" * 256)
+
+        with caplog.at_level(logging.WARNING, logger="core.database"):
+            cache = CacheDB(db_path=tmp)
+        try:
+            # Construction did not raise and the cache is fully functional.
+            d = date(2025, 8, 1)
+            cache.insert_rate(d, usd_buying=33.0, usd_selling=33.1)
+            row = cache.get_rate(d)
+            assert row["usd_buying"] == Decimal("33.0")
+        finally:
+            cache.close()
+
+        # A clear warning was logged about the rebuild.
+        assert any(
+            r.levelno == logging.WARNING and "corrupt" in r.getMessage().lower()
+            for r in caplog.records
+        )
+
+    def test_recovery_unlinks_wal_shm_siblings(self, tmp_path):
+        """Stale -wal/-shm siblings of a bad DB are removed on rebuild."""
+        tmp = str(tmp_path / "cache.db")
+        with open(tmp, "wb") as fh:
+            fh.write(b"SQLite format 3\x00" + b"\x00garbage" * 200)
+        # Leftover WAL/SHM from the crash.
+        for suffix in ("-wal", "-shm"):
+            with open(tmp + suffix, "wb") as fh:
+                fh.write(b"stale")
+
+        cache = CacheDB(db_path=tmp)
+        try:
+            # The fresh DB works and the stale siblings did not corrupt it.
+            cache.insert_rate(date(2025, 8, 2), usd_buying=1.0, usd_selling=1.1)
+            assert cache.get_rate(date(2025, 8, 2)) is not None
+        finally:
+            cache.close()
+
+
+# =========================================================================
+#  CLOSE CHECKPOINT (fix: WAL must truncate regardless of thread ownership)
+# =========================================================================
+
+class TestCloseCheckpoint:
+    """close() must checkpoint even when connections were opened elsewhere."""
+
+    def test_same_thread_close_checkpoints_wal(self, tmp_path):
+        """No exception on close and the -wal is checkpointed/removed."""
+        tmp = str(tmp_path / "same.db")
+        cache = CacheDB(db_path=tmp)
+        cache.insert_rates_bulk([
+            (f"2025-09-{d:02d}", 33.0, 33.1, 36.0, 36.1) for d in range(1, 28)
+        ])
+        cache.close()  # must not raise
+        wal = tmp + "-wal"
+        assert (not os.path.exists(wal)) or os.path.getsize(wal) == 0
+
+    def test_cross_thread_close_logs_not_silent(self, tmp_path, caplog):
+        """A connection opened in a worker thread logs on cross-thread close."""
+        tmp = str(tmp_path / "cross.db")
+        cache = CacheDB(db_path=tmp)
+        # Open a connection from a worker thread and write through it so the
+        # connection is registered in _all_conns but owned by that thread.
+        worker_done = threading.Event()
+
+        def worker():
+            cache.insert_rate(date(2025, 9, 1), usd_buying=5.0, usd_selling=5.1)
+            worker_done.set()
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        assert worker_done.is_set()
+
+        # Closing from the MAIN thread cannot close the worker's connection;
+        # that must be logged (debug), never silently suppressed.
+        with caplog.at_level(logging.DEBUG, logger="core.database"):
+            cache.close()  # must not raise
+
+        assert any(
+            r.levelno == logging.DEBUG and "thread" in r.getMessage().lower()
+            for r in caplog.records
+        ), "cross-thread close should log instead of silently passing"
+
+        # The checkpoint still ran on a fresh connection: -wal is gone/empty.
+        wal = tmp + "-wal"
+        assert (not os.path.exists(wal)) or os.path.getsize(wal) == 0

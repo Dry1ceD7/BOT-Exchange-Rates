@@ -81,8 +81,13 @@ class TrayManager:
 
     @property
     def supported(self) -> bool:
-        """True if the current platform supports system tray."""
-        return HAS_PYSTRAY and platform.system() in ("Windows", "Darwin")
+        """True if the current platform supports system tray.
+
+        Windows only: pystray's macOS (AppKit) backend run off the main thread
+        frequently shows no icon, so close-to-tray would strand a hidden
+        window. On macOS/Linux the window close is a normal quit instead.
+        """
+        return HAS_PYSTRAY and platform.system() == "Windows"
 
     def setup(self) -> None:
         """Install the close-to-tray handler and start the tray icon."""

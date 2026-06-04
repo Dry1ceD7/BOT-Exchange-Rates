@@ -16,12 +16,15 @@ for both USD and EUR (4 rate columns total).
 
 import atexit
 import contextlib
+import logging
 import sqlite3
 import threading
 import weakref
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class CacheDB:
@@ -55,8 +58,14 @@ class CacheDB:
         self._all_conns: set = set()
         self._closed = False
 
-        self._create_tables()
-        self._migrate_schema()
+        try:
+            self._create_tables()
+            self._migrate_schema()
+        except sqlite3.DatabaseError as exc:
+            # A corrupted cache.db (e.g. "database disk image is malformed"
+            # after a power loss) must NOT kill the whole engine — the cache is
+            # fully rebuildable from the API. Recover by recreating it cold.
+            self._recover_from_corruption(exc)
         atexit.register(_atexit_close, weakref.ref(self))
 
     def _conn(self) -> sqlite3.Connection:
@@ -69,6 +78,52 @@ class CacheDB:
             with self._conn_lock:
                 self._all_conns.add(conn)
         return conn
+
+    def _recover_from_corruption(self, exc: sqlite3.DatabaseError) -> None:
+        """Recreate a corrupted cache.db from scratch so the engine keeps running.
+
+        Confirms the damage with ``PRAGMA quick_check`` (a clean DB never
+        reaches this path because :meth:`_create_tables` succeeds), then closes
+        any open handles, unlinks ``cache.db`` plus its ``-wal``/``-shm``
+        siblings, and re-opens a fresh empty DB. Processing continues
+        cache-cold; missing rates are simply re-fetched from the API.
+        """
+        # quick_check on a fresh connection — best-effort; treat any failure
+        # (including a second DatabaseError) as confirmation of corruption.
+        with contextlib.suppress(sqlite3.DatabaseError):
+            probe = sqlite3.connect(self.db_path)
+            try:
+                result = probe.execute("PRAGMA quick_check").fetchone()
+                if result is not None and result[0] == "ok":
+                    # quick_check disagrees — re-raise the original error rather
+                    # than silently discard a DB that might be salvageable.
+                    raise exc
+            finally:
+                probe.close()
+
+        # Drop any handles we (or quick_check) may have opened on the bad file.
+        with self._conn_lock:
+            conns = list(self._all_conns)
+            self._all_conns.clear()
+        for conn in conns:
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()
+        self._local = threading.local()
+
+        # Unlink the malformed DB and its WAL/SHM siblings.
+        for suffix in ("", "-wal", "-shm"):
+            with contextlib.suppress(OSError):
+                Path(self.db_path + suffix).unlink(missing_ok=True)
+
+        logger.warning(
+            "Cache DB at %s was corrupted (%s); rebuilt empty. "
+            "Rates will be re-fetched from the API.",
+            self.db_path, exc,
+        )
+
+        # Re-open a clean DB and lay down the schema fresh.
+        self._create_tables()
+        self._migrate_schema()
 
     def _create_tables(self):
         """Safely create tables if they do not exist."""
@@ -386,11 +441,33 @@ class CacheDB:
             conns = list(self._all_conns)
             self._all_conns.clear()
 
+        # Run the final TRUNCATE checkpoint on a FRESH connection opened in the
+        # closing thread. Doing it on the per-thread connections below fails for
+        # any connection created in a worker thread — sqlite3 raises
+        # ProgrammingError ("created in a thread can only be used in that same
+        # thread"), which is a sqlite3.Error subclass that contextlib.suppress
+        # silently ate, so the checkpoint never ran and -wal/-shm accumulated.
+        # A brand-new connection owns itself, so the checkpoint always runs.
+        with contextlib.suppress(sqlite3.Error):
+            checkpoint_conn = sqlite3.connect(self.db_path)
+            try:
+                checkpoint_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                checkpoint_conn.close()
+
         for conn in conns:
-            with contextlib.suppress(sqlite3.Error):
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            with contextlib.suppress(sqlite3.Error):
+            try:
                 conn.close()
+            except sqlite3.ProgrammingError as exc:
+                # Cross-thread close attempt: log rather than silently pass so
+                # the leak is visible. The TRUNCATE above already flushed the
+                # WAL; the OS reclaims the leaked handle at process exit.
+                logger.debug(
+                    "Could not close cache connection from this thread "
+                    "(opened in another thread): %s", exc,
+                )
+            except sqlite3.Error as exc:
+                logger.debug("Error closing cache connection: %s", exc)
 
         # Drop this thread's cached handle so a later call re-opens cleanly.
         if getattr(self._local, "conn", None) is not None:

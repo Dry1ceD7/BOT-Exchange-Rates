@@ -40,10 +40,19 @@ def test_global_exception_handler_writes_error_log_to_data_logs(tmp_path, monkey
 
 
 def test_sentry_scrubber_redacts_tokens(monkeypatch):
-    """SECURITY: the Sentry before_send scrubber replaces token values."""
-    monkeypatch.setenv("BOT_TOKEN_EXG", "exgsecretAAA")
-    monkeypatch.setenv("BOT_TOKEN_HOL", "holsecretBBB")
+    """SECURITY: the Sentry before_send scrubber replaces token values.
+
+    Tokens are sourced via secure_tokens.get_token (keychain + .env), so we
+    patch it to return the test tokens regardless of the host keychain state.
+    """
+    monkeypatch.delenv("BOT_TOKEN_EXG", raising=False)
+    monkeypatch.delenv("BOT_TOKEN_HOL", raising=False)
     main = _import_main_with_fake_tk(monkeypatch)
+
+    _tokens = {"BOT_TOKEN_EXG": "exgsecretAAA", "BOT_TOKEN_HOL": "holsecretBBB"}
+    monkeypatch.setattr(
+        "core.secure_tokens.get_token", lambda key: _tokens.get(key),
+    )
 
     event = {
         "message": "failed with token exgsecretAAA",
@@ -61,5 +70,40 @@ def test_sentry_scrubber_noop_without_tokens(monkeypatch):
     monkeypatch.delenv("BOT_TOKEN_EXG", raising=False)
     monkeypatch.delenv("BOT_TOKEN_HOL", raising=False)
     main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr("core.secure_tokens.get_token", lambda key: None)
     event = {"message": "hello"}
     assert main._sentry_token_scrubber(event, {}) == event
+
+
+def test_sentry_scrubber_redacts_keychain_sourced_token(monkeypatch):
+    """SECURITY: scrubber redacts tokens sourced from the keychain (env empty).
+
+    After the env→keychain migration os.environ is scrubbed, so the scrubber
+    must consult secure_tokens.get_token to keep redacting.
+    """
+    monkeypatch.delenv("BOT_TOKEN_EXG", raising=False)
+    monkeypatch.delenv("BOT_TOKEN_HOL", raising=False)
+    main = _import_main_with_fake_tk(monkeypatch)
+
+    def _fake_get_token(env_key):
+        return "keychainSecretXYZ" if env_key == "BOT_TOKEN_EXG" else None
+
+    monkeypatch.setattr("core.secure_tokens.get_token", _fake_get_token)
+    event = {"message": "boom keychainSecretXYZ here"}
+    scrubbed = main._sentry_token_scrubber(event, {})
+    assert "keychainSecretXYZ" not in str(scrubbed)
+    assert "***" in scrubbed["message"]
+
+
+def test_purge_credentials_deletes_both_tokens(monkeypatch, capsys):
+    """--purge-credentials deletes both keychain tokens and reports a result."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    deleted: list = []
+    monkeypatch.setattr(
+        "core.secure_tokens.delete_token",
+        lambda env_key: deleted.append(env_key) or True,
+    )
+    main._purge_credentials()
+    assert deleted == ["BOT_TOKEN_EXG", "BOT_TOKEN_HOL"]
+    out = capsys.readouterr().out
+    assert "Purged 2" in out

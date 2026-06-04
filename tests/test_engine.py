@@ -8,14 +8,18 @@ Uses mocked API client and temporary files.
 """
 
 import asyncio
+import threading
 from datetime import date, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import openpyxl
 import pytest
 
-from core.constants import SKIP_SHEET_NAMES
+import core.engine as engine_mod
+from core.api_client import BOTAPIError
+from core.constants import MAX_FILE_SIZE_MB, SKIP_SHEET_NAMES
 from core.engine import (
     FileSizeLimitError,
     LedgerEngine,
@@ -36,9 +40,14 @@ def mock_api():
 
 
 @pytest.fixture
-def engine(mock_api):
-    """Creates a LedgerEngine with mocked API."""
-    return LedgerEngine(mock_api)
+def engine(mock_api, tmp_cache):
+    """Creates a LedgerEngine with mocked API and injected temp cache/backup.
+
+    Injecting ``cache=tmp_cache`` (the temp on-disk SQLite from conftest) and a
+    MagicMock backup keeps unit tests from lazily constructing the REAL
+    data/cache.db singleton (+atexit handler) as a side effect.
+    """
+    return LedgerEngine(mock_api, cache=tmp_cache, backup=MagicMock())
 
 
 @pytest.fixture
@@ -59,9 +68,13 @@ def sample_xlsx(tmp_path):
 
 @pytest.fixture
 def oversized_file(tmp_path):
-    """Creates a file larger than MAX_FILE_SIZE_MB (50 MB)."""
+    """Creates a file just over the MAX_FILE_SIZE_MB limit (default 15 MB).
+
+    Sized relative to the constant ((MAX_FILE_SIZE_MB + 1) MiB) so the fixture
+    tracks the real featherweight limit instead of a hardcoded number.
+    """
     filepath = tmp_path / "huge.xlsx"
-    filepath.write_bytes(b"x" * (51 * 1024 * 1024))  # 51 MB
+    filepath.write_bytes(b"x" * ((MAX_FILE_SIZE_MB + 1) * 1024 * 1024))
     return str(filepath)
 
 
@@ -269,6 +282,71 @@ class TestUpdateExrateStandaloneFailSafe:
         # Backup happened before the post-load failure (load succeeded).
 
 
+class TestStandaloneFromLedgerSingleBackup:
+    """Fix #2: process_ledger on a standalone ExRate file backs up only once.
+
+    Before the fix, process_ledger created its own backup THEN delegated to
+    update_exrate_standalone, which backed the identical pristine file up
+    again — two backups of the same file. The detection now runs BEFORE
+    process_ledger's own backup, so only the standalone path's backup fires.
+    """
+
+    def test_standalone_from_ledger_produces_one_backup(
+        self, exrate_xlsx, tmp_cache, monkeypatch,
+    ):
+        from unittest.mock import MagicMock
+
+        # Counting backup shared by both code paths via the live engine.
+        counting_backup = MagicMock()
+
+        # Mocked API so the standalone update path completes without network.
+        async def _rates(start, end, currency):
+            return []
+
+        async def _holidays(year):
+            return []
+
+        api = MagicMock()
+        api.get_exchange_rates = _rates
+        api.get_holidays = _holidays
+
+        engine = LedgerEngine(api, backup=counting_backup, cache=tmp_cache)
+
+        result = asyncio.run(engine.process_ledger(exrate_xlsx))
+        assert result == exrate_xlsx
+        # Exactly one backup of the pristine file — no duplicate.
+        counting_backup.create_backup.assert_called_once_with(exrate_xlsx)
+
+    def test_standalone_dry_run_takes_no_backup(
+        self, exrate_xlsx, tmp_cache,
+    ):
+        """A dry-run on a standalone-from-ledger file makes no backup at all.
+
+        The standalone path only backs up when not skipped; routing BEFORE the
+        ledger backup means a dry run never produces a stray backup either.
+        """
+        from unittest.mock import MagicMock
+
+        async def _rates(start, end, currency):
+            return []
+
+        async def _holidays(year):
+            return []
+
+        api = MagicMock()
+        api.get_exchange_rates = _rates
+        api.get_holidays = _holidays
+
+        counting_backup = MagicMock()
+        engine = LedgerEngine(api, backup=counting_backup, cache=tmp_cache)
+
+        # Standalone path (update_exrate_standalone) backs up whenever the file
+        # exists; it has no dry_run concept. The key assertion is that the
+        # LEDGER backup path is not ALSO invoked (would be 2 calls).
+        asyncio.run(engine.process_ledger(exrate_xlsx, dry_run=True))
+        assert counting_backup.create_backup.call_count == 1
+
+
 class TestSkipSheetNames:
     """Tests for the SKIP_SHEET_NAMES constant."""
 
@@ -327,6 +405,137 @@ class TestBatchAndHolidayLookup:
         )
         assert (success, failed, errors) == (2, 0, [])
         assert engine.last_batch_anomaly_count == 4
+
+    def test_botapi_error_on_one_file_does_not_abort_batch(
+        self, engine, monkeypatch,
+    ):
+        """Fix #1: a BOTAPIError (e.g. 401) on file 2 must NOT abort 1 & 3.
+
+        BOTAPIError is a plain Exception (not OSError), so before the fix the
+        per-file loop let it propagate and skip the remaining files silently.
+        """
+        async def _fake_process_ledger(fp, *args, **kwargs):
+            if fp == "b.xlsx":
+                raise BOTAPIError("BOT API server error 401.")
+            return fp
+
+        monkeypatch.setattr(engine, "process_ledger", _fake_process_ledger)
+        success, failed, errors = asyncio.run(
+            engine.process_batch(["a.xlsx", "b.xlsx", "c.xlsx"], dry_run=True)
+        )
+        # Files 1 and 3 still processed; only file 2 failed.
+        assert success == 2
+        assert failed == 1
+        assert len(errors) == 1
+        assert "b.xlsx" in errors[0]
+        assert "401" in errors[0]
+
+    def test_httpx_error_on_one_file_does_not_abort_batch(
+        self, engine, monkeypatch,
+    ):
+        """Fix #1: an httpx network error (not an OSError subclass) on file 2
+        must be recorded and the batch must continue with file 3."""
+        async def _fake_process_ledger(fp, *args, **kwargs):
+            if fp == "b.xlsx":
+                raise httpx.ConnectError("connection dropped")
+            return fp
+
+        monkeypatch.setattr(engine, "process_ledger", _fake_process_ledger)
+        success, failed, errors = asyncio.run(
+            engine.process_batch(["a.xlsx", "b.xlsx", "c.xlsx"], dry_run=True)
+        )
+        assert success == 2
+        assert failed == 1
+        assert len(errors) == 1
+        assert "b.xlsx" in errors[0]
+
+    def test_botapi_error_invokes_progress_cb(self, engine, monkeypatch):
+        """The per-file API/network branch must still drive progress_cb."""
+        async def _fake_process_ledger(fp, *args, **kwargs):
+            if fp == "b.xlsx":
+                raise BOTAPIError("503")
+            return fp
+
+        monkeypatch.setattr(engine, "process_ledger", _fake_process_ledger)
+        calls = []
+        asyncio.run(engine.process_batch(
+            ["a.xlsx", "b.xlsx"], dry_run=True,
+            progress_cb=lambda i, t, n, e: calls.append((i, t, n, e)),
+        ))
+        # Both files reported; file 2 carries the error string.
+        assert len(calls) == 2
+        assert calls[1][3] is not None
+        assert "503" in calls[1][3]
+
+    def test_stop_event_halts_batch_between_files(self, engine, monkeypatch):
+        """Fix #3: a pre-set stop_event stops the batch at the file boundary.
+
+        With the event already set, NO file is processed and every file is
+        reported as unprocessed via errors + progress_cb.
+        """
+        processed = []
+
+        async def _fake_process_ledger(fp, *args, **kwargs):
+            processed.append(fp)
+            return fp
+
+        monkeypatch.setattr(engine, "process_ledger", _fake_process_ledger)
+        stop_event = threading.Event()
+        stop_event.set()
+        calls = []
+        success, failed, errors = asyncio.run(engine.process_batch(
+            ["a.xlsx", "b.xlsx", "c.xlsx"], dry_run=True,
+            stop_event=stop_event,
+            progress_cb=lambda i, t, n, e: calls.append((i, t, n, e)),
+        ))
+        # Nothing processed; all three reported unprocessed.
+        assert processed == []
+        assert success == 0
+        assert failed == 3
+        assert len(errors) == 3
+        assert all("cancelled" in m for m in errors)
+        assert all(c[3] == "cancelled" for c in calls)
+
+    def test_stop_event_set_after_first_file_stops_remainder(
+        self, engine, monkeypatch,
+    ):
+        """Fix #3: setting the event after file 1 lets file 1 finish but stops
+        files 2..N (checked at the safe between-file boundary)."""
+        processed = []
+        stop_event = threading.Event()
+
+        async def _fake_process_ledger(fp, *args, **kwargs):
+            processed.append(fp)
+            # Simulate the GUI requesting shutdown during the first file.
+            stop_event.set()
+            return fp
+
+        monkeypatch.setattr(engine, "process_ledger", _fake_process_ledger)
+        success, failed, errors = asyncio.run(engine.process_batch(
+            ["a.xlsx", "b.xlsx", "c.xlsx"], dry_run=True,
+            stop_event=stop_event,
+        ))
+        # Only the first file ran to completion; the rest were cancelled.
+        assert processed == ["a.xlsx"]
+        assert success == 1
+        assert failed == 2
+        assert len(errors) == 2
+        assert all("cancelled" in m for m in errors)
+
+    def test_no_stop_event_processes_all(self, engine, monkeypatch):
+        """Backward compat: stop_event defaults to None and changes nothing."""
+        processed = []
+
+        async def _fake_process_ledger(fp, *args, **kwargs):
+            processed.append(fp)
+            return fp
+
+        monkeypatch.setattr(engine, "process_ledger", _fake_process_ledger)
+        success, failed, errors = asyncio.run(
+            engine.process_batch(["a.xlsx", "b.xlsx"], dry_run=True)
+        )
+        assert processed == ["a.xlsx", "b.xlsx"]
+        assert (success, failed, errors) == (2, 0, [])
 
 
 # =========================================================================
@@ -421,6 +630,197 @@ class TestProcessLedgerEndToEnd:
             assert f.read() == before
         # Backup must be skipped on dry runs.
         engine.backup.create_backup.assert_not_called()
+
+
+# =========================================================================
+#  CACHE-FIRST INVARIANT (Core Rule 5)
+# =========================================================================
+
+class TestCacheFirstInvariant:
+    """End-to-end proof of Core Rule 5: SQLite is checked before the API.
+
+    ``_preload_api_data`` builds its weekday window from
+    ``min/max(target_dates ∪ {force_start, bot_today()})`` and only calls the
+    API for weekdays missing from the rates cache. Pre-populating EVERY weekday
+    in that window (plus a holiday per touched year) drives the API call count
+    to zero; a partial cache triggers exactly one fetch per currency covering
+    only the missing window.
+    """
+
+    # A fixed Bangkok "today" so the weekday window is fully deterministic.
+    _TODAY = date(2025, 1, 15)  # Wednesday
+
+    def _seed_cache(self, cache, start, end, *, base=33.0):
+        """Cache a flat rate for every weekday in [start, end] (inclusive).
+
+        Flat values keep the anomaly guard quiet; one holiday per touched year
+        is seeded so has_holidays_for_year short-circuits the holiday API call.
+        """
+        from datetime import timedelta as _td
+        bulk = []
+        d = start
+        while d <= end:
+            if d.weekday() < 5:  # weekdays only — matches all_needed logic
+                d_str = d.strftime("%Y-%m-%d")
+                bulk.append((d_str, base, base + 0.5, base + 3.0, base + 3.5))
+            d += _td(days=1)
+        cache.insert_rates_bulk(bulk)
+        for year in {start.year, end.year}:
+            cache.insert_holidays([(f"{year}-12-31", "Year-End Holiday")])
+
+    def _build_mocked_engine(self, tmp_cache):
+        """Engine whose api is an AsyncMock so call counts are assertable."""
+        api = AsyncMock()
+        api.get_holidays = AsyncMock(return_value=[])
+        api.get_exchange_rates = AsyncMock(return_value=[])
+        return LedgerEngine(api, backup=MagicMock(), cache=tmp_cache)
+
+    def test_full_cache_hit_makes_zero_api_calls(
+        self, ledger_xlsx, tmp_cache, monkeypatch,
+    ):
+        """Every target/today date cached → no API calls at all."""
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: self._TODAY)
+
+        target = date(2025, 1, 7)  # Tuesday
+        path = ledger_xlsx({"Jan": [(target, "USD")]})
+
+        # force_start = "{year-1}-12-20" (process_ledger default); the window
+        # spans 2024-12-20 .. 2025-01-15. Seed every weekday in that range.
+        self._seed_cache(tmp_cache, date(2024, 12, 20), self._TODAY)
+
+        engine = self._build_mocked_engine(tmp_cache)
+        result = asyncio.run(engine.process_ledger(path))
+        assert result == path
+
+        # Core Rule 5: the cache fully served the run.
+        engine.api.get_exchange_rates.assert_not_called()
+        engine.api.get_holidays.assert_not_called()
+
+    def test_partial_cache_fetches_only_missing_window(
+        self, ledger_xlsx, tmp_cache, monkeypatch,
+    ):
+        """A gap in the cache triggers exactly one fetch per currency over the
+        missing window (engine.py missing_dates path)."""
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: self._TODAY)
+
+        target = date(2025, 1, 7)
+        path = ledger_xlsx({"Jan": [(target, "USD")]})
+
+        # Seed all weekdays EXCEPT a contiguous early-January gap so the engine
+        # must fetch only that narrow window.
+        self._seed_cache(tmp_cache, date(2024, 12, 20), date(2024, 12, 31))
+        self._seed_cache(tmp_cache, date(2025, 1, 9), self._TODAY)
+        # Missing weekdays: 2025-01-01 (Wed) .. 2025-01-08 (Wed).
+
+        engine = self._build_mocked_engine(tmp_cache)
+        result = asyncio.run(engine.process_ledger(path))
+        assert result == path
+
+        # API consulted only for the missing dates — once for USD, once for EUR
+        # (concurrent gather), never for holidays (year already cached).
+        assert engine.api.get_exchange_rates.await_count == 2
+        engine.api.get_holidays.assert_not_called()
+        # Both fetches are bounded by the missing window, not the full range.
+        for call in engine.api.get_exchange_rates.await_args_list:
+            fetch_start, fetch_end, _ccy = call.args
+            assert fetch_start == date(2025, 1, 1)
+            assert fetch_end == date(2025, 1, 8)
+
+
+# =========================================================================
+#  DISK-SPACE GUARD — standard ledger path (Fix #2)
+# =========================================================================
+
+class TestLedgerDiskSpaceGuard:
+    """The pre-save free-space guard must fire on the STANDARD ledger path.
+
+    test_engine_multicurrency.py covers the custom standalone path; this proves
+    the same OSError guard protects process_ledger's WorkbookWriter save. Saves
+    are atomic (temp file + os.replace via workbook_io.atomic_save), so a
+    blocked save must leave the ORIGINAL .xlsx byte-for-byte intact and leave no
+    stray temp file behind.
+    """
+
+    def _build_engine(self, tmp_cache):
+        from types import SimpleNamespace as _SN
+
+        async def _rates(start, end, currency):
+            from datetime import timedelta as _td
+            base_b = 33.0 if currency == "USD" else 36.0
+            base_s = 33.5 if currency == "USD" else 36.5
+            out, d = [], start
+            while d <= end:
+                out.append(_SN(
+                    period=d.strftime("%Y-%m-%d"), currency=currency,
+                    buying_transfer=base_b, buying_sight=None,
+                    selling=base_s, mid_rate=None,
+                ))
+                d += _td(days=1)
+            return out
+
+        async def _holidays(year):
+            return []
+
+        api = MagicMock()
+        api.get_exchange_rates = _rates
+        api.get_holidays = _holidays
+        return LedgerEngine(api, backup=MagicMock(), cache=tmp_cache)
+
+    def test_insufficient_disk_surfaces_and_leaves_file_intact(
+        self, ledger_xlsx, tmp_cache, monkeypatch,
+    ):
+        from pathlib import Path
+
+        import core.workbook_io as workbook_io_mod
+
+        path = ledger_xlsx({"Jan": [(date(2025, 1, 7), "USD")]})
+        with open(path, "rb") as f:
+            original_bytes = f.read()
+
+        # Report zero free space as core.workbook_io sees it (module singleton).
+        from collections import namedtuple
+        _Usage = namedtuple("_Usage", ["total", "used", "free"])
+        monkeypatch.setattr(
+            workbook_io_mod.shutil, "disk_usage",
+            lambda _path: _Usage(total=10**12, used=10**12, free=0),
+        )
+
+        engine = self._build_engine(tmp_cache)
+        with pytest.raises(OSError, match="Insufficient disk space"):
+            asyncio.run(engine.process_ledger(path))
+
+        # Atomic save: original bytes unchanged, no leftover temp file.
+        with open(path, "rb") as f:
+            assert f.read() == original_bytes
+        leftover = list(Path(path).parent.glob("*.tmp~"))
+        assert leftover == []
+
+
+# =========================================================================
+#  BOT BUSINESS-DATE SWEEP
+# =========================================================================
+
+class TestPreloadUsesBotToday:
+    """_preload_api_data keys its 'today' upper bound off bot_today().
+
+    The sweep replaced the bare date.today() with bot_today() (Asia/Bangkok)
+    so the fetch range tracks the BOT trading calendar, not the local machine
+    clock. Patching bot_today proves the upper fetch bound follows it.
+    """
+
+    def test_fetch_upper_bound_follows_bot_today(self, engine, monkeypatch):
+        fixed_today = date(2025, 3, 14)
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: fixed_today)
+
+        asyncio.run(engine._preload_api_data(set(), "2025-03-10"))
+
+        # Empty cache → a fetch fires; its end date is the patched BOT today
+        # (the weekday upper bound of the [force_start, bot_today] window).
+        assert engine.api.get_exchange_rates.await_count >= 1
+        end_args = {
+            call.args[1] for call in engine.api.get_exchange_rates.await_args_list
+        }
+        assert end_args == {fixed_today}
 
 
 # =========================================================================

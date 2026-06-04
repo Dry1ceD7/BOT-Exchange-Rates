@@ -385,7 +385,7 @@ class BOTExrateApp(ctk.CTk):
                          text_color=t["text_secondary"]).pack()
             combo = ctk.CTkComboBox(
                 grp, values=values, width=width, height=36,
-                fg_color=t["section_bg"], border_color=t["combo_border"],
+                fg_color=t["combo_bg"], border_color=t["combo_border"],
                 button_color=t["trust_blue"], button_hover_color=t["blue_hover"],
                 dropdown_fg_color=t["card_bg"], text_color=t["text_primary"],
                 font=ctk.CTkFont(size=13), justify="center"
@@ -762,6 +762,20 @@ class BOTExrateApp(ctk.CTk):
         self.btn_revert.configure(state="normal")
         self.update_idletasks()
 
+    def _show_download_error(self, msg: str):
+        """Surface an update-install failure to the user.
+
+        Wired into VersionPanel(on_error=...) by the settings modal. A native
+        error popup plus a status-label update guarantees the failure is never
+        silent — the old getattr(app, '_show_download_error', None) resolved to
+        None, which the panel swallowed on the failure path.
+        """
+        messagebox.showerror("Update Failed", msg)
+        if hasattr(self, "lbl_status"):
+            self.lbl_status.configure(
+                text=f"Error:  {msg}", text_color=_get_colors()["error_text"]
+            )
+
     # ================================================================== #
     #  EXRATE SHEET — delegated to gui/panels/exrate_dialog.py
     # ================================================================== #
@@ -830,16 +844,18 @@ class BOTExrateApp(ctk.CTk):
             return
         try:
             system = platform.system()
+            # noqa S603/S607: fp is realpath-resolved and is_file()-checked above;
+            # each call uses the OS-standard file-manager launcher with a fixed argv.
             if system == "Darwin":
-                subprocess.Popen(["open", "-R", fp])
+                subprocess.Popen(["open", "-R", fp])  # noqa: S603, S607
             elif system == "Windows":
                 # os.path.normpath kept: shell needs the native path string.
-                subprocess.Popen(["explorer", "/select,", os.path.normpath(fp)])
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(fp)])  # noqa: S603, S607
             else:
                 # Keep parent as str: handed to the xdg-open subprocess.
                 parent = str(Path(fp).parent)
                 if Path(parent).is_dir():
-                    subprocess.Popen(["xdg-open", parent])
+                    subprocess.Popen(["xdg-open", parent])  # noqa: S603, S607
         except OSError as e:
             logger.debug("File manager open failed: %s", e)
             self.lbl_status.configure(
@@ -996,6 +1012,15 @@ class BOTExrateApp(ctk.CTk):
                     logger.warning("Workers did not exit cleanly: %s", hung)
             except RuntimeError as e:
                 logger.debug("thread_registry.shutdown_all() failed: %s", e)
+
+        # 6b. Close the rate-ticker cache DB. Done AFTER the ticker worker has
+        # been joined (steps 1 + 6) so no thread is still reading the handle.
+        cache_db = getattr(self, "_cache_db", None)
+        if cache_db is not None:
+            try:
+                cache_db.close()
+            except (RuntimeError, OSError) as e:
+                logger.debug("_cache_db.close() failed: %s", e)
 
         # 7. Destroy the Tk root.
         try:

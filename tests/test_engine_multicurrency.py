@@ -335,3 +335,106 @@ class TestCustomMultiCurrency:
         # File on disk is byte-for-byte unchanged — the guard prevented save.
         with open(exrate_file, "rb") as fh:
             assert fh.read() == original_bytes
+
+
+# =========================================================================
+#  STANDARD PATH — manual date range + backup cleanup
+# =========================================================================
+
+class TestStandardPathManualRange:
+    """update_exrate_standalone standard USD/EUR path with a manual range."""
+
+    def _parse_cell_date(self, value):
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        return None
+
+    def test_written_range_matches_manual_dr(
+        self, exrate_file, temp_backup, tmp_cache,
+    ):
+        """A manual (dr_start, dr_end) must bound the written ExRate sheet —
+        previously dr_end was ignored and the sheet ran out to today()."""
+        from core.logic import BOTLogicEngine
+
+        dr_start = date(2025, 3, 10)
+        dr_end = date(2025, 3, 12)
+
+        api = _make_api()
+        eng = LedgerEngine(api, backup=temp_backup, cache=tmp_cache)
+
+        # Mock the API preload so no network is hit; return rates only for the
+        # manual window. Live-binding contract: reassigning _preload_api_data
+        # after construction is honored at call time.
+        logic_engine = BOTLogicEngine(holidays=[], max_rollback_days=10)
+        usd_buying = {dr_start: Decimal("33.5000")}
+        usd_selling = {dr_start: Decimal("33.6000")}
+        eur_buying = {dr_start: Decimal("37.0000")}
+        eur_selling = {dr_start: Decimal("37.1000")}
+
+        async def _fake_preload(_dates, _start_str):
+            return (
+                logic_engine, usd_selling, eur_selling,
+                usd_buying, eur_buying, [], [],
+            )
+
+        eng._preload_api_data = _fake_preload
+
+        out = asyncio.run(eng.update_exrate_standalone(
+            exrate_file,
+            currencies=["USD", "EUR"],
+            rate_types={"Buying TT": "buying_transfer", "Selling": "selling"},
+            date_range=(dr_start, dr_end),
+        ))
+        assert out == exrate_file
+
+        wb = openpyxl.load_workbook(out)
+        ws = wb["ExRate"]
+        written = {
+            self._parse_cell_date(ws.cell(row=r, column=1).value)
+            for r in range(2, (ws.max_row or 1) + 1)
+        }
+        written.discard(None)
+        wb.close()
+
+        # Exactly the manual 3-day window — dr_end honored, not today().
+        assert written == {dr_start, date(2025, 3, 11), dr_end}
+
+    def test_standalone_run_prunes_old_backups(
+        self, exrate_file, temp_backup, tmp_cache,
+    ):
+        """The standalone path must run the 7-day backup cleanup (previously
+        only process_batch did), so a stale backup is pruned after a run."""
+        from pathlib import Path
+
+        # Seed a backup that is well past the 7-day cutoff. The cleanup derives
+        # age from the embedded timestamp, so an old timestamp = old backup.
+        backup_dir = Path(temp_backup.backup_dir)
+        old_backup = backup_dir / "ExRate_standalone__bak__20000101_000000_000000.xlsx"
+        old_backup.write_bytes(b"PK\x03\x04stale-backup")
+        assert old_backup.exists()
+
+        api = _make_api()
+        api.get_exchange_rates = AsyncMock(
+            side_effect=_make_currency_side_effect({
+                "GBP": [SimpleNamespace(
+                    period="2025-03-10", currency="GBP",
+                    buying_transfer=Decimal("42.0000"),
+                    selling=None, buying_sight=None, mid_rate=None,
+                )],
+            })
+        )
+        eng = LedgerEngine(api, backup=temp_backup, cache=tmp_cache)
+
+        asyncio.run(eng.update_exrate_standalone(
+            exrate_file,
+            currencies=["GBP"],
+            rate_types={"Buying TT": "buying_transfer"},
+            date_range=(date(2025, 3, 10), date(2025, 3, 10)),
+        ))
+
+        # The stale backup is gone; a fresh backup of this run remains.
+        assert not old_backup.exists()
+        fresh = list(backup_dir.glob("ExRate_standalone__bak__*.xlsx"))
+        assert fresh, "expected a fresh backup from the standalone run"

@@ -6,11 +6,12 @@ Unit tests for core/exrate_sheet.py — Master ExRate sheet builder.
 ---------------------------------------------------------------------------
 """
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import openpyxl
 
+import core.exrate_sheet as exrate_sheet_mod
 from core.exrate_sheet import (
     _build_date_range,
     _merge_rate_data,
@@ -160,6 +161,75 @@ class TestMergeRateData:
         assert "Weekend Holiday" in merged[sat]["holidays_weekend"]
 
 
+class TestRateRollbackCarryForward:
+    """Weekend/holiday rows carry forward the prior trading-day rate.
+
+    Mirrors resolve_rate's 10-day rollback so the ledger XLOOKUP (exact match)
+    resolves a Saturday-dated row to Friday's rate instead of a blank.
+    """
+
+    def test_saturday_carries_friday_rate(self):
+        fri = date(2025, 3, 7)   # Friday — trading day with a rate
+        sat = date(2025, 3, 8)   # Saturday — no rate from BOT
+        sun = date(2025, 3, 9)   # Sunday — no rate either
+        usd_b = {fri: Decimal("33.5000")}
+        merged = _merge_rate_data(
+            {fri, sat, sun}, {}, set(), {},
+            usd_b, {}, {}, {},
+        )
+        # Friday keeps its own rate.
+        assert merged[fri]["usd_buy"] == Decimal("33.5000")
+        # Saturday + Sunday carry Friday's rate forward (rollback rule).
+        assert merged[sat]["usd_buy"] == Decimal("33.5000")
+        assert merged[sun]["usd_buy"] == Decimal("33.5000")
+
+    def test_holiday_carries_prior_trading_day_rate(self):
+        fri = date(2025, 3, 7)   # Friday — trading day with a rate
+        mon = date(2025, 3, 10)  # Monday — BOT holiday, no rate
+        usd_b = {fri: Decimal("34.0000")}
+        merged = _merge_rate_data(
+            {fri, date(2025, 3, 8), date(2025, 3, 9), mon},
+            {}, {mon}, {mon: "Test Holiday"},
+            usd_b, {}, {}, {},
+        )
+        # Monday holiday carries Friday's rate (across the weekend, 3 days).
+        assert merged[mon]["usd_buy"] == Decimal("34.0000")
+
+    def test_gap_beyond_ten_days_stays_blank(self):
+        # Trading day far in the past, then a long weekend/holiday stretch.
+        last_rate_day = date(2025, 3, 7)   # Friday
+        far_weekend = date(2025, 3, 22)    # Saturday, 15 days later
+        usd_b = {last_rate_day: Decimal("33.0000")}
+        all_dates = {last_rate_day}
+        # Build a continuous calendar so the carry-forward sees every gap day.
+        d = last_rate_day
+        while d <= far_weekend:
+            all_dates.add(d)
+            d += timedelta(days=1)
+        merged = _merge_rate_data(
+            all_dates, {}, set(), {},
+            usd_b, {}, {}, {},
+        )
+        # 15 days > 10-day rollback limit → leave blank so IFERROR yields "".
+        assert merged[far_weekend]["usd_buy"] is None
+
+    def test_within_ten_days_still_carries(self):
+        last_rate_day = date(2025, 3, 7)   # Friday
+        usd_b = {last_rate_day: Decimal("33.0000")}
+        target = date(2025, 3, 16)         # Sunday, exactly 9 days later
+        all_dates = set()
+        d = last_rate_day
+        while d <= target:
+            all_dates.add(d)
+            d += timedelta(days=1)
+        merged = _merge_rate_data(
+            all_dates, {}, set(), {},
+            usd_b, {}, {}, {},
+        )
+        # 9 days ≤ 10 → still carried forward.
+        assert merged[target]["usd_buy"] == Decimal("33.0000")
+
+
 # =========================================================================
 #  FULL SHEET UPDATE
 # =========================================================================
@@ -202,4 +272,64 @@ class TestUpdateMasterExrateSheet:
         # Row 2 should have data (row 1 = header). Cells hold exact Decimal.
         assert ws.cell(row=2, column=2).value == Decimal("33.5")
         assert ws.cell(row=2, column=3).value == Decimal("33.6")
+        wb.close()
+
+    def test_default_end_date_uses_bot_today(self, monkeypatch):
+        """When end_date is None the range runs out to the BOT business date.
+
+        The sweep replaced the bare date.today() default with bot_today()
+        (Asia/Bangkok). Patching bot_today proves the default path now keys off
+        the BOT calendar rather than the machine's local date.
+        """
+        fixed_today = date(2025, 3, 12)
+        monkeypatch.setattr(
+            exrate_sheet_mod, "bot_today", lambda: fixed_today
+        )
+        wb = openpyxl.Workbook()
+        start = date(2025, 3, 10)
+        update_master_exrate_sheet(
+            wb,
+            usd_buying_rates={start: Decimal("33.5")},
+            usd_selling_rates={start: Decimal("33.6")},
+            eur_buying_rates={start: Decimal("37.0")},
+            eur_selling_rates={start: Decimal("37.1")},
+            holidays_list=[],
+            holidays_names={},
+            start_date=start,
+            # end_date omitted → defaults to bot_today() (patched).
+        )
+        ws = wb["ExRate"]
+        written = {
+            _parse_cell_date(ws.cell(row=r, column=1).value)
+            for r in range(2, (ws.max_row or 1) + 1)
+        }
+        written.discard(None)
+        # Range stops at the patched BOT today, inclusive.
+        assert written == {start, date(2025, 3, 11), fixed_today}
+        wb.close()
+
+    def test_explicit_end_date_bounds_written_range(self):
+        """A manual (start, end) writes exactly that range — end not today()."""
+        wb = openpyxl.Workbook()
+        start = date(2025, 3, 10)
+        end = date(2025, 3, 12)
+        update_master_exrate_sheet(
+            wb,
+            usd_buying_rates={start: Decimal("33.5")},
+            usd_selling_rates={start: Decimal("33.6")},
+            eur_buying_rates={start: Decimal("37.0")},
+            eur_selling_rates={start: Decimal("37.1")},
+            holidays_list=[],
+            holidays_names={},
+            start_date=start,
+            end_date=end,
+        )
+        ws = wb["ExRate"]
+        written = {
+            _parse_cell_date(ws.cell(row=r, column=1).value)
+            for r in range(2, (ws.max_row or 1) + 1)
+        }
+        written.discard(None)
+        # Exactly the 3-day manual window — nothing up to today().
+        assert written == {start, date(2025, 3, 11), end}
         wb.close()

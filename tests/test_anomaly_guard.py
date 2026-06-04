@@ -59,7 +59,26 @@ class TestAnomalyGuardSingleCheck:
         assert not result.is_anomaly
 
     def test_exact_threshold_not_anomaly(self):
-        """A change of exactly 5% should still trigger (> not >=)."""
+        """A change of EXACTLY 5% is NOT an anomaly (strict > comparison).
+
+        Production uses ``pct_change > self.threshold_pct`` (anomaly_guard.py),
+        so the boundary value sits just inside the allowed band.
+        """
+        guard = AnomalyGuard(threshold_pct=5.0)
+        prev = Decimal("100.0000")
+        new = Decimal("105.0000")  # Exactly 5% — on the boundary
+        result = guard.check_rate(
+            currency="USD",
+            rate_type="selling",
+            check_date=date(2025, 6, 1),
+            new_value=new,
+            prev_value=prev,
+        )
+        assert not result.is_anomaly
+        assert result.pct_change == 5.0
+
+    def test_just_over_threshold_is_anomaly(self):
+        """A change just over 5% triggers (> not >=)."""
         guard = AnomalyGuard(threshold_pct=5.0)
         prev = Decimal("100.0000")
         new = Decimal("105.0001")  # Just over 5%

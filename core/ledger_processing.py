@@ -117,9 +117,20 @@ def prescan_target_dates(
                 ]
                 if source_label in row_strs:
                     header_row_idx = row_idx
+                    # A duplicate source-date column is resolved
+                    # deterministically to the FIRST occurrence (not last-wins,
+                    # which silently depends on column order). Warn so the
+                    # operator can correct the sheet.
                     for ci, val in enumerate(row_strs):
                         if val == source_label:
-                            col_indices["source"] = ci
+                            if "source" in col_indices:
+                                logger.warning(
+                                    "Sheet '%s': duplicate '%s' header column "
+                                    "— using the first occurrence.",
+                                    sheet_name, source_label,
+                                )
+                            else:
+                                col_indices["source"] = ci
                     break
 
             if header_row_idx is None or "source" not in col_indices:
