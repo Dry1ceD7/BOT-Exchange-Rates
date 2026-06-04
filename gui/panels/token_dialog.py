@@ -20,6 +20,7 @@ from pathlib import Path
 import customtkinter as ctk
 
 from core.api_client import ping_token
+from core.i18n import tr
 from core.paths import get_project_root
 from core.secure_tokens import _keyring_available, set_token
 from gui.theme import MONO_FONT, get_theme
@@ -28,6 +29,25 @@ logger = logging.getLogger(__name__)
 
 BOT_PORTAL_URL = "https://apiportal.bot.or.th/"
 MIN_KEY_LENGTH = 8
+
+
+def _sanitize_key(raw: str) -> tuple[str, str | None]:
+    """Normalise a pasted API key and flag corruption.
+
+    Returns ``(cleaned, error)``. ``cleaned`` has surrounding whitespace and a
+    stray ``Bearer `` prefix removed so what gets stored matches what gets
+    tested. ``error`` is a human message when the key contains internal
+    whitespace/newlines (a wrapped paste), else ``None``. Keys pasted from an
+    email or PDF often wrap mid-string; those slip past a plain ``.strip()``
+    and only surface later as cryptic 401s.
+    """
+    cleaned = raw.strip()
+    # Drop a stray "Bearer " prefix some users paste from auth headers.
+    if cleaned[:7].lower() == "bearer ":
+        cleaned = cleaned[7:].strip()
+    if any(c.isspace() for c in cleaned):
+        return cleaned, "Key contains spaces or line breaks — check your paste."
+    return cleaned, None
 
 
 class TokenRegistrationDialog(ctk.CTkToplevel):
@@ -55,9 +75,12 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         self._env_path = env_path or str(Path(get_project_root()) / ".env")
         self._busy_test = False
         self._destroyed = False
+        # Set once a keychain write has failed and we fell back to plaintext
+        # .env; gates a one-time visible warning before the dialog dismisses.
+        self._keychain_warned = False
 
         t = get_theme()
-        self.title("BOT Exchange Rate — API Registration")
+        self.title(tr("token.window_title"))
         self.geometry("520x560")
         self.resizable(False, False)
         self.configure(fg_color=t["modal_bg"])
@@ -72,7 +95,12 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         self.grab_set()
 
         # ── Keyboard accessibility ─────────────────────────────────
+        # Enter submits (Activate), Escape cancels — first-run cancel handling
+        # lives in main.py; here we only distinguish submit from cancel.
+        self.bind("<Return>", lambda e: self._on_activate())
         self.bind("<Escape>", lambda e: self._on_close())
+        # Focus the first entry so a keyboard user can type immediately.
+        self._entry_exg.focus_set()
         self.focus_set()
 
     # ── Layout ───────────────────────────────────────────────────────────
@@ -89,13 +117,13 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
 
         # Header
         ctk.CTkLabel(
-            self, text="API Registration",
+            self, text=tr("token.heading"),
             font=ctk.CTkFont(size=22, weight="bold"),
             text_color=t["modal_text"],
         ).pack(pady=(28, 4))
 
         ctk.CTkLabel(
-            self, text="Enter your Bank of Thailand API keys to activate",
+            self, text=tr("token.subheading"),
             font=ctk.CTkFont(size=13),
             text_color=t["modal_muted"],
         ).pack(pady=(0, 20))
@@ -106,7 +134,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
 
         # ── Exchange Rate Key ────────────────────────────────────────
         ctk.CTkLabel(
-            card, text="EXCHANGE RATE API KEY",
+            card, text=tr("token.label_exg"),
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=t["modal_muted"],
         ).pack(anchor="w", padx=20, pady=(18, 4))
@@ -115,7 +143,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
             card, height=40, corner_radius=8,
             fg_color=t["modal_entry_bg"], border_color=t["modal_accent"],
             text_color=t["modal_text"], font=ctk.CTkFont(size=13, family=MONO_FONT),
-            placeholder_text="Paste your exchange rate API key here",
+            placeholder_text=tr("token.placeholder_exg"),
             show="•",
         )
         self._entry_exg.pack(padx=20, fill="x")
@@ -124,7 +152,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
 
         # ── Holiday Key ──────────────────────────────────────────────
         ctk.CTkLabel(
-            card, text="HOLIDAY API KEY",
+            card, text=tr("token.label_hol"),
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=t["modal_muted"],
         ).pack(anchor="w", padx=20, pady=(14, 4))
@@ -133,7 +161,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
             card, height=40, corner_radius=8,
             fg_color=t["modal_entry_bg"], border_color=t["modal_accent"],
             text_color=t["modal_text"], font=ctk.CTkFont(size=13, family=MONO_FONT),
-            placeholder_text="Paste your holiday API key here",
+            placeholder_text=tr("token.placeholder_hol"),
             show="•",
         )
         self._entry_hol.pack(padx=20, fill="x")
@@ -142,7 +170,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
 
         # ── Show Keys toggle ─────────────────────────────────────────
         self._chk_show = ctk.CTkCheckBox(
-            card, text="Show keys",
+            card, text=tr("token.show_keys"),
             font=ctk.CTkFont(size=12), text_color=t["modal_muted"],
             command=self._toggle_visibility,
             checkbox_height=18, checkbox_width=18,
@@ -160,7 +188,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         # Lets a first-run user verify the entered keys reach + authenticate
         # against the BOT API before committing them via Activate.
         self._btn_test = ctk.CTkButton(
-            self, text="Test Keys",
+            self, text=tr("token.btn_test"),
             fg_color=t["btn_secondary"], hover_color=t["btn_secondary_hover"],
             font=ctk.CTkFont(size=13, weight="bold"),
             corner_radius=10, height=38,
@@ -169,18 +197,19 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         self._btn_test.pack(padx=30, fill="x", pady=(0, 8))
 
         # ── Activate Button ──────────────────────────────────────────
-        ctk.CTkButton(
-            self, text="Activate",
+        self._btn_activate = ctk.CTkButton(
+            self, text=tr("token.btn_activate"),
             fg_color=t["modal_success"], hover_color=t["success_hover"],
             font=ctk.CTkFont(size=15, weight="bold"),
             corner_radius=10, height=44,
             command=self._on_activate,
-        ).pack(padx=30, fill="x", pady=(0, 8))
+        )
+        self._btn_activate.pack(padx=30, fill="x", pady=(0, 8))
 
         # ── Portal Link ──────────────────────────────────────────────
         link = ctk.CTkLabel(
             self,
-            text="Don't have keys? Register at apiportal.bot.or.th",
+            text=tr("token.portal_link"),
             font=ctk.CTkFont(size=12, underline=True),
             text_color=t["modal_accent"], cursor="hand2",
         )
@@ -213,19 +242,24 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         if self._busy_test:
             return
 
-        exg = self._entry_exg.get().strip()
-        hol = self._entry_hol.get().strip()
+        exg, exg_err = _sanitize_key(self._entry_exg.get())
+        hol, hol_err = _sanitize_key(self._entry_hol.get())
         if not exg or not hol:
             self._lbl_status.configure(
-                text="Enter both keys before testing.",
+                text=tr("token.err_enter_before_test"),
                 text_color=t["error_text"],
+            )
+            return
+        if exg_err or hol_err:
+            self._lbl_status.configure(
+                text=exg_err or hol_err, text_color=t["error_text"],
             )
             return
 
         self._busy_test = True
         self._btn_test.configure(state="disabled")
         self._lbl_status.configure(
-            text="Testing keys…", text_color=t["modal_muted"],
+            text=tr("token.testing"), text_color=t["modal_muted"],
         )
         self.update_idletasks()
 
@@ -246,7 +280,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
                 return
             self._safe_after(
                 0, self._test_done, True,
-                "✓ Both keys accepted — connection verified.",
+                tr("token.test_ok"),
             )
 
         threading.Thread(target=_worker, daemon=True, name="TokenTest").start()
@@ -263,29 +297,44 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
 
     def _on_activate(self):
         t = get_theme()
-        exg = self._entry_exg.get().strip()
-        hol = self._entry_hol.get().strip()
+        exg, exg_err = _sanitize_key(self._entry_exg.get())
+        hol, hol_err = _sanitize_key(self._entry_hol.get())
 
         # Validate
         if not exg or not hol:
             self._lbl_status.configure(
-                text="Both API keys are required.", text_color=t["error_text"],
+                text=tr("token.err_both_required"), text_color=t["error_text"],
+            )
+            return
+        if exg_err or hol_err:
+            # Internal whitespace/newlines corrupt the key and only surface
+            # later as cryptic 401s — reject up front with actionable feedback.
+            self._lbl_status.configure(
+                text=exg_err or hol_err, text_color=t["error_text"],
             )
             return
         if len(exg) < MIN_KEY_LENGTH or len(hol) < MIN_KEY_LENGTH:
             self._lbl_status.configure(
-                text="API keys appear too short. Please check and try again.",
+                text=tr("token.err_too_short"),
                 text_color=t["error_text"],
             )
             return
 
         # SECURITY: prefer the OS keychain. Only write plaintext to .env when
         # no secure keychain backend is available, and lock the file to 0o600.
+        keyring_present = _keyring_available()
         stored_in_keychain = False
-        if _keyring_available():
+        if keyring_present:
             exg_ok = set_token("BOT_TOKEN_EXG", exg)
             hol_ok = set_token("BOT_TOKEN_HOL", hol)
             stored_in_keychain = exg_ok and hol_ok
+
+        # A keychain backend existed but the write failed (e.g. macOS user
+        # clicked 'Deny', or a locked Windows Credential Manager). We still
+        # fall back to .env so activation succeeds, but the user MUST be told
+        # their keys landed in plaintext rather than the secure store they
+        # expected — silently degrading defeats the keychain feature.
+        keychain_fell_back = keyring_present and not stored_in_keychain
 
         if not stored_in_keychain:
             try:
@@ -304,7 +353,23 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         self.activated = True
         if stored_in_keychain:
             logger.info("API tokens activated and stored in OS keychain.")
-        else:
+        elif keychain_fell_back and not self._keychain_warned:
+            # Surface the degraded-storage warning and keep the dialog open so
+            # the user actually sees it. Tokens are already saved (.env +
+            # os.environ) so activation has succeeded; a second press of the
+            # relabelled button dismisses without re-storing.
+            self._keychain_warned = True
+            logger.warning(
+                "Keychain write failed; tokens saved to plaintext .env instead."
+            )
+            self._lbl_status.configure(
+                text=tr("token.keychain_fallback"),
+                text_color=t["warning"],
+            )
+            with contextlib.suppress(Exception):
+                self._btn_activate.configure(text=tr("token.btn_continue"))
+            return
+        elif not keychain_fell_back:
             logger.info("API tokens activated and saved to .env (no keychain available).")
         self._destroyed = True
         self.grab_release()
@@ -345,7 +410,10 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
             env_file.chmod(0o600)
 
     def _on_close(self):
-        self.activated = False
+        # Leave self.activated untouched: it is False for a genuine cancel and
+        # only True once tokens were already stored (the keychain-fallback
+        # warning path keeps the dialog open with activated=True). Closing the
+        # window in that state must NOT discard the successful activation.
         self._destroyed = True
         self.grab_release()
         self.destroy()

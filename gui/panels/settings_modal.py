@@ -11,15 +11,58 @@ SFFB: Strict < 200 lines.  (Previously 731 → now ~130)
 """
 
 import logging
+import platform
+import subprocess
 from pathlib import Path
 
 import customtkinter as ctk
 
 from core.config_manager import SettingsManager
+from core.i18n import (
+    DEFAULT_LANGUAGE,
+    LANGUAGE_LABELS,
+    SUPPORTED_LANGUAGES,
+    set_language,
+    tr,
+)
+from core.paths import get_project_root
 from core.secure_tokens import get_token
 from gui.theme import get_theme
 
 logger = logging.getLogger(__name__)
+
+
+def _open_folder(folder: str) -> bool:
+    """Open ``folder`` in the OS file manager.
+
+    Mirrors app.py:_reveal_file's platform-safe launch logic but targets a
+    directory (no file selection). The path is realpath-resolved and checked
+    to be a directory before handing a fixed argv to the OS launcher, so the
+    subprocess call never receives untrusted/shell-interpolated input.
+
+    Returns True on a successful launch, False otherwise (missing dir or
+    OSError). Never raises — callers surface failure to the user.
+    """
+    # SEC: resolve symlinks for the security check, then verify it's a dir.
+    resolved = Path(folder).resolve()
+    if not resolved.is_dir():
+        logger.warning("Open-folder target is not a directory: %s", folder)
+        return False
+    target = str(resolved)
+    try:
+        system = platform.system()
+        # noqa S603/S607: target is resolve()-d and is_dir()-checked above;
+        # each call uses the OS-standard file-manager launcher with fixed argv.
+        if system == "Darwin":
+            subprocess.Popen(["open", target])  # noqa: S603, S607
+        elif system == "Windows":
+            subprocess.Popen(["explorer", target])  # noqa: S603, S607
+        else:
+            subprocess.Popen(["xdg-open", target])  # noqa: S603, S607
+        return True
+    except OSError as e:
+        logger.debug("File manager open failed: %s", e)
+        return False
 
 
 class SettingsModal(ctk.CTkToplevel):
@@ -36,7 +79,7 @@ class SettingsModal(ctk.CTkToplevel):
 
         t = get_theme()
 
-        self.title("Settings")
+        self.title(tr("settings.title"))
         self.geometry("420x720")
         self.resizable(False, False)
         self.configure(fg_color=t["modal_bg"])
@@ -66,14 +109,14 @@ class SettingsModal(ctk.CTkToplevel):
 
         # Title
         ctk.CTkLabel(
-            self, text="Application Settings",
+            self, text=tr("settings.heading"),
             font=ctk.CTkFont(size=18, weight="bold"),
             text_color=t["modal_text"],
         ).pack(pady=(20, 16))
 
         # ── Appearance ───────────────────────────────────────────────
         ctk.CTkLabel(
-            self, text="APPEARANCE",
+            self, text=tr("settings.section_appearance"),
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=t["modal_muted"],
         ).pack(anchor="w", padx=30)
@@ -89,9 +132,46 @@ class SettingsModal(ctk.CTkToplevel):
             font=ctk.CTkFont(size=13),
         ).pack(padx=30, pady=(4, 16), fill="x")
 
+        # ── Language ─────────────────────────────────────────────────
+        # A Thai accounting office needs the UI in Thai. The selector shows
+        # human-readable language NAMES; the persisted value is the lowercase
+        # code ('en'/'th'). Most surfaces re-read tr() when rebuilt, so a
+        # restart-style note tells the user the change applies on reopen.
+        ctk.CTkLabel(
+            self, text=tr("settings.section_language"),
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=t["modal_muted"],
+        ).pack(anchor="w", padx=30)
+
+        current_lang = self._settings.get("language", DEFAULT_LANGUAGE)
+        if current_lang not in SUPPORTED_LANGUAGES:
+            current_lang = DEFAULT_LANGUAGE
+        # Map display name <-> code so the segmented button can show names.
+        self._lang_label_to_code = {
+            LANGUAGE_LABELS[code]: code for code in SUPPORTED_LANGUAGES
+        }
+        self._lang_code_to_label = {
+            code: label for label, code in self._lang_label_to_code.items()
+        }
+        self._language_var = ctk.StringVar(
+            value=self._lang_code_to_label[current_lang]
+        )
+        ctk.CTkSegmentedButton(
+            self,
+            values=[LANGUAGE_LABELS[c] for c in SUPPORTED_LANGUAGES],
+            variable=self._language_var,
+            font=ctk.CTkFont(size=13),
+        ).pack(padx=30, pady=(4, 2), fill="x")
+        ctk.CTkLabel(
+            self, text=tr("settings.language_restart_note"),
+            font=ctk.CTkFont(size=10),
+            text_color=t["modal_muted"],
+            anchor="w", justify="left", wraplength=340,
+        ).pack(anchor="w", padx=30, pady=(0, 16))
+
         # ── Rate Type ─────────────────────────────────────────────────
         ctk.CTkLabel(
-            self, text="RATE TYPE",
+            self, text=tr("settings.section_rate_type"),
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=t["modal_muted"],
         ).pack(anchor="w", padx=30)
@@ -118,7 +198,7 @@ class SettingsModal(ctk.CTkToplevel):
 
         # ── Anomaly Threshold ─────────────────────────────────────────
         ctk.CTkLabel(
-            self, text="ANOMALY THRESHOLD (%)",
+            self, text=tr("settings.section_anomaly"),
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=t["modal_muted"],
         ).pack(anchor="w", padx=30)
@@ -131,7 +211,16 @@ class SettingsModal(ctk.CTkToplevel):
             textvariable=self._anomaly_threshold_var,
             font=ctk.CTkFont(size=13),
         )
-        self._anomaly_entry.pack(padx=30, pady=(4, 16), fill="x")
+        self._anomaly_entry.pack(padx=30, pady=(4, 4), fill="x")
+
+        # Inline validation error (hidden until a bad threshold is entered).
+        self._anomaly_error = ctk.CTkLabel(
+            self, text="",
+            font=ctk.CTkFont(size=11),
+            text_color=t["error_text"],
+            anchor="w",
+        )
+        self._anomaly_error.pack(anchor="w", padx=30, pady=(0, 12))
 
         # ── Auto-Update ──────────────────────────────────────────────
         self._auto_update_var = ctk.StringVar(
@@ -139,7 +228,7 @@ class SettingsModal(ctk.CTkToplevel):
         )
         ctk.CTkSwitch(
             self,
-            text="  Check for updates on startup",
+            text=tr("settings.auto_update_toggle"),
             variable=self._auto_update_var,
             onvalue="on", offvalue="off",
             font=ctk.CTkFont(size=13),
@@ -149,12 +238,22 @@ class SettingsModal(ctk.CTkToplevel):
 
         # ── Manage API Keys ──────────────────────────────────────────
         ctk.CTkButton(
-            self, text="Manage API Keys",
+            self, text=tr("settings.btn_manage_keys"),
             fg_color=t["btn_secondary"],
             hover_color=t["btn_secondary_hover"],
             font=ctk.CTkFont(size=13, weight="bold"),
             corner_radius=8, height=38,
             command=self._on_manage_keys,
+        ).pack(padx=30, fill="x", pady=(0, 8))
+
+        # ── Open Logs / Audit Folder ─────────────────────────────────
+        ctk.CTkButton(
+            self, text=tr("settings.btn_open_logs"),
+            fg_color=t["btn_secondary"],
+            hover_color=t["btn_secondary_hover"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            corner_radius=8, height=38,
+            command=self._on_open_logs,
         ).pack(padx=30, fill="x", pady=(0, 8))
 
         # ── CSV Panel (extracted) ─────────────────────────────────────
@@ -174,7 +273,7 @@ class SettingsModal(ctk.CTkToplevel):
 
         # ── Save & Close ─────────────────────────────────────────────
         ctk.CTkButton(
-            self, text="Save and Close",
+            self, text=tr("settings.btn_save"),
             fg_color=t["modal_success"],
             font=ctk.CTkFont(size=14, weight="bold"),
             corner_radius=8, height=42,
@@ -187,8 +286,25 @@ class SettingsModal(ctk.CTkToplevel):
         if hasattr(parent, "_apply_theme"):
             self.after(150, parent._apply_theme)
 
+    def _on_open_logs(self):
+        """Reveal data/logs (audit CSVs + rotated logs) in the OS file manager.
+
+        Creates the directory if it does not exist yet so a fresh install with
+        no logs still opens an (empty) folder rather than dead-ending. Surfaces
+        a failed launch inline on the anomaly-error label, the only inline
+        status surface this modal owns.
+        """
+        logs_dir = Path(get_project_root()) / "data" / "logs"
+        try:
+            logs_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.debug("Could not create logs dir: %s", e)
+        if not _open_folder(str(logs_dir)):
+            self._anomaly_error.configure(
+                text=tr("settings.open_logs_failed")
+            )
+
     def _on_manage_keys(self):
-        from core.paths import get_project_root
         from gui.panels.token_dialog import TokenRegistrationDialog
 
         env_path = str(Path(get_project_root()) / ".env")
@@ -200,20 +316,50 @@ class SettingsModal(ctk.CTkToplevel):
         )
         self.wait_window(dialog)
 
+    def _validate_anomaly_threshold(self) -> float | None:
+        """Return a positive float threshold, or None if the entry is invalid.
+
+        On invalid/non-positive input, shows an inline error and parks focus in
+        the entry so a typo can't silently keep the old guardrail value while
+        the modal pretends the save succeeded.
+        """
+        raw = self._anomaly_threshold_var.get().strip()
+        try:
+            threshold = float(raw)
+        except (TypeError, ValueError):
+            self._anomaly_error.configure(
+                text=tr("settings.anomaly_invalid")
+            )
+            self._anomaly_entry.focus_set()
+            return None
+        if threshold <= 0:
+            self._anomaly_error.configure(
+                text=tr("settings.anomaly_nonpositive")
+            )
+            self._anomaly_entry.focus_set()
+            return None
+        self._anomaly_error.configure(text="")
+        return threshold
+
     def _save_and_close(self):
+        # Validate the anomaly threshold FIRST: on a bad/typo'd value, surface
+        # an inline error and abort the save+close so the user can correct it.
+        threshold = self._validate_anomaly_threshold()
+        if threshold is None:
+            return
         self._settings["appearance"] = self._appearance_var.get()
         self._settings["auto_update"] = self._auto_update_var.get() == "on"
         selected_label = self._rate_type_var.get()
         self._settings["rate_type"] = self._rate_type_map.get(
             selected_label, "buying_transfer"
         )
-        # Anomaly threshold — keep the prior value on a non-positive/invalid
-        # entry so a typo can't silently disable the guardrail.
-        try:
-            threshold = float(self._anomaly_threshold_var.get())
-            if threshold > 0:
-                self._settings["anomaly_threshold_pct"] = threshold
-        except (TypeError, ValueError):
-            logger.debug("Invalid anomaly threshold input — keeping previous")
+        self._settings["anomaly_threshold_pct"] = threshold
+        # Persist the chosen UI language (lowercase code) and refresh the
+        # i18n cache so newly-built surfaces pick it up without a full restart.
+        lang_code = self._lang_label_to_code.get(
+            self._language_var.get(), DEFAULT_LANGUAGE
+        )
+        self._settings["language"] = lang_code
+        set_language(lang_code)
         self._mgr.save(self._settings)
         self.destroy()

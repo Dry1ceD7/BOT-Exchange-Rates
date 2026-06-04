@@ -17,6 +17,7 @@ All tests require a display; the tk_root fixture skips them on headless CI.
 No real filesystem I/O, network, or threads are started.
 """
 
+import contextlib
 from datetime import date
 from unittest.mock import patch
 
@@ -90,6 +91,27 @@ def _collect_checkboxes(dialog):
 
     _walk(dialog)
     return result
+
+
+def _invoke_binding(widget, sequence):
+    """Trigger a widget's key binding deterministically.
+
+    event_generate on a withdrawn, unfocused TopLevel is unreliable, so we
+    briefly map + focus the window, generate the event with when='now' (so the
+    handler runs synchronously), then re-withdraw. This proves the bound
+    callback actually fires without depending on real keyboard focus.
+    """
+    import contextlib as _ctx
+
+    with _ctx.suppress(Exception):
+        widget.deiconify()
+        widget.update_idletasks()
+        widget.focus_force()
+        widget.update()
+    widget.event_generate(sequence, when="now")
+    with _ctx.suppress(Exception):
+        if widget.winfo_exists():
+            widget.withdraw()
 
 
 def _collect_switches(dialog):
@@ -501,3 +523,386 @@ class TestExrateDialogOnCreateCallsWorker:
         start, end = dr
         assert isinstance(start, date)
         assert isinstance(end, date)
+
+
+# ---------------------------------------------------------------------------
+# Finding 3 — Escape / Enter key handling on the dialog
+# ---------------------------------------------------------------------------
+
+
+class TestExrateDialogKeyBindings:
+    """The modal must support Escape-to-cancel and Return-to-confirm (#3)."""
+
+    def test_escape_binding_present(self, tk_root):
+        dialog = _open_dialog(tk_root)
+        # bind() with no callback returns the bound script(s) as a string.
+        binding = dialog.bind("<Escape>")
+        assert binding, "Dialog must bind <Escape> to cancel"
+        dialog.destroy()
+
+    def test_return_binding_present(self, tk_root):
+        dialog = _open_dialog(tk_root)
+        binding = dialog.bind("<Return>")
+        assert binding, "Dialog must bind <Return> to confirm"
+        dialog.destroy()
+
+    def test_return_invokes_create(self, tk_root):
+        """The <Return> binding runs the same path as the Create button.
+
+        event_generate is unreliable on a withdrawn, unfocused TopLevel, so we
+        invoke the bound callback directly via the funcid Tcl registered for
+        the binding — this proves the wiring without needing window focus.
+        """
+        dialog = _open_dialog(tk_root)
+        called = []
+        with patch(
+            "gui.panels.exrate_dialog._create_exrate_file",
+            side_effect=lambda *a, **kw: called.append(a),
+        ):
+            _invoke_binding(dialog, "<Return>")
+        assert called, "<Return> must trigger ExRate creation"
+
+    def test_escape_destroys_dialog(self, tk_root):
+        dialog = _open_dialog(tk_root)
+        _invoke_binding(dialog, "<Escape>")
+        exists = 1
+        with contextlib.suppress(Exception):
+            exists = dialog.winfo_exists()
+        assert exists == 0, "<Escape> must destroy the dialog"
+
+
+# ---------------------------------------------------------------------------
+# Finding 4 — refuse to start while a batch is running
+# ---------------------------------------------------------------------------
+
+
+class TestExrateDialogBatchGuard:
+    """ExRate creation must not hijack the shared progress UI mid-batch (#4)."""
+
+    def _get_error_label(self, dialog):
+        import customtkinter as ctk
+
+        from gui.theme import get_theme
+
+        error_color = get_theme()["error_text"]
+        for widget in dialog.winfo_children():
+            if isinstance(widget, ctk.CTkLabel) and (
+                str(widget.cget("text_color")) == error_color
+            ):
+                return widget
+        return None
+
+    def test_on_create_blocked_while_batch_running(self, tk_root):
+        """_on_create refuses (inline error, no worker) when a batch runs."""
+        dialog = _open_dialog(tk_root)
+        # Simulate an in-flight batch on the app object.
+        tk_root._batch_running = True
+        try:
+            called = []
+            with patch(
+                "gui.panels.exrate_dialog._create_exrate_file",
+                side_effect=lambda *a, **kw: called.append(a),
+            ):
+                btn = _find_button(dialog, "Create ExRate")
+                btn.cget("command")()
+            assert not called, "Must NOT start ExRate creation during a batch"
+            lbl = self._get_error_label(dialog)
+            assert lbl is not None
+            assert "batch" in lbl.cget("text").lower(), (
+                f"Expected a batch-busy message, got {lbl.cget('text')!r}"
+            )
+            # Dialog stays open so the user can retry after the batch.
+            assert dialog.winfo_exists() == 1
+        finally:
+            tk_root._batch_running = False
+            with contextlib.suppress(Exception):
+                dialog.destroy()
+
+    def test_create_file_early_returns_while_batch_running(self, tk_root):
+        """_create_exrate_file itself bails before the save picker (#4)."""
+        from gui.panels import exrate_dialog
+
+        tk_root._batch_running = True
+        opened = []
+        try:
+            with patch.object(
+                exrate_dialog.filedialog,
+                "asksaveasfilename",
+                side_effect=lambda *a, **kw: opened.append(True) or "",
+            ):
+                exrate_dialog._create_exrate_file(
+                    tk_root, ["USD"], {"Buying TT": "buying_transfer"},
+                )
+            assert not opened, "Save picker must not open during a batch"
+        finally:
+            tk_root._batch_running = False
+
+
+# ---------------------------------------------------------------------------
+# Finding 1 — result summary (row count / date span / currency list)
+# ---------------------------------------------------------------------------
+
+
+class TestExrateSummary:
+    """_build_exrate_summary surfaces span + currencies + rate types (#1)."""
+
+    def test_manual_range_day_count_inclusive(self):
+        from gui.panels.exrate_dialog import _build_exrate_summary
+
+        dr = (date(2026, 1, 1), date(2026, 1, 10))
+        summary = _build_exrate_summary(["USD"], {"Buying TT": "x"}, dr)
+        assert "10 days" in summary  # inclusive span
+        assert "2026-01-01" in summary
+        assert "2026-01-10" in summary
+
+    def test_single_day_is_singular(self):
+        from gui.panels.exrate_dialog import _build_exrate_summary
+
+        dr = (date(2026, 3, 5), date(2026, 3, 5))
+        summary = _build_exrate_summary(["USD"], {"Selling": "x"}, dr)
+        assert "1 day " in summary and "1 days" not in summary
+
+    def test_currencies_and_rate_types_listed(self):
+        from gui.panels.exrate_dialog import _build_exrate_summary
+
+        dr = (date(2026, 1, 1), date(2026, 1, 2))
+        summary = _build_exrate_summary(
+            ["USD", "GBP"], {"Buying TT": "x", "Selling": "y"}, dr
+        )
+        assert "USD" in summary and "GBP" in summary
+        assert "Buying TT" in summary and "Selling" in summary
+
+    def test_auto_mode_uses_current_year(self):
+        from gui.panels.exrate_dialog import _build_exrate_summary
+
+        today = date.today()
+        summary = _build_exrate_summary(["EUR"], {"Mid Rate": "x"}, None)
+        assert f"{today.year}-01-01" in summary
+        assert today.strftime("%Y-%m-%d") in summary
+
+
+# ---------------------------------------------------------------------------
+# Worker-path tests (Findings 2 + 5) — no real BOTClient / network.
+# ---------------------------------------------------------------------------
+
+
+class _FakeStatusLabel:
+    """Minimal stand-in for app.lbl_status capturing configure() calls."""
+
+    def __init__(self):
+        self.kwargs = {}
+
+    def configure(self, **kwargs):
+        self.kwargs.update(kwargs)
+
+    def cget(self, key):
+        return self.kwargs.get(key, "")
+
+
+class _FakeApp:
+    """Headless app stub: no Tk, runs after() callbacks synchronously."""
+
+    def __init__(self):
+        self.lbl_status = _FakeStatusLabel()
+        self.event_bus = None
+        self._batch_running = False
+        self.last_processed_path = None
+
+    def after(self, _delay, func=None, *args):
+        if func is not None:
+            func(*args)
+
+    def update_idletasks(self):
+        pass
+
+
+def _run_worker_sync(monkeypatch, fake_engine_factory):
+    """Run _create_exrate_file's worker inline (no thread) and return the app.
+
+    Stubs out BOTClient / LedgerEngine / httpx.AsyncClient so no tokens or
+    network are required, and patches threading.Thread so .start() runs the
+    target synchronously inside the test.
+    """
+    import sys
+    import threading as _threading
+    import types
+
+    from gui.panels import exrate_dialog
+
+    # Fake httpx.AsyncClient as an async context manager.
+    class _FakeAsyncClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(exrate_dialog.httpx, "AsyncClient", _FakeAsyncClient)
+
+    # Fake core.api_client.BOTClient and core.engine.LedgerEngine (imported
+    # inside the worker, so patch them on their source modules).
+    fake_api_mod = types.ModuleType("core.api_client")
+    fake_api_mod.CLIENT_TIMEOUT = 1.0
+    fake_api_mod.BOTClient = lambda *a, **kw: object()
+    fake_engine_mod = types.ModuleType("core.engine")
+    fake_engine_mod.LedgerEngine = fake_engine_factory
+    monkeypatch.setitem(sys.modules, "core.api_client", fake_api_mod)
+    monkeypatch.setitem(sys.modules, "core.engine", fake_engine_mod)
+
+    # Run the worker thread body inline.
+    class _InlineThread:
+        def __init__(self, target=None, **kw):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(exrate_dialog.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(_threading, "Thread", _InlineThread, raising=False)
+
+    return exrate_dialog
+
+
+class _RaisingEngine:
+    """LedgerEngine stub whose standalone update raises a chosen error."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def __call__(self, *a, **kw):
+        return self
+
+    async def update_exrate_standalone(self, *a, **kw):
+        raise self._exc
+
+
+class _SuccessEngine:
+    """LedgerEngine stub whose standalone update writes a marker + succeeds."""
+
+    def __call__(self, *a, **kw):
+        return self
+
+    async def update_exrate_standalone(self, filepath, *a, **kw):
+        # The real engine fills the temp file; emulate by writing a marker so
+        # the test can prove the temp was moved into place (not a blank save).
+        from pathlib import Path as _P
+
+        _P(filepath).write_bytes(b"FILLED-EXRATE")
+        return filepath
+
+
+class TestExrateWorkerSuccess:
+    """Findings 1 + 2 happy path: move temp into place, surface a summary."""
+
+    def test_success_moves_temp_and_reports_summary(self, monkeypatch, tmp_path):
+        from gui.panels import exrate_dialog
+
+        dest = tmp_path / "ExRate.xlsx"
+        _run_worker_sync(monkeypatch, lambda *a, **kw: _SuccessEngine())
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+
+        app = _FakeApp()
+        exrate_dialog._create_exrate_file(
+            app, ["USD", "EUR"],
+            {"Buying TT": "buying_transfer"},
+            date_range=(date(2026, 1, 1), date(2026, 1, 10)),
+        )
+
+        # Temp was moved into the destination (engine-written content present).
+        assert dest.read_bytes() == b"FILLED-EXRATE"
+        assert not list(tmp_path.glob(".exrate_tmp_*")), "Temp not cleaned up"
+        # Success status carries the summary (span + currencies).
+        msg = app.lbl_status.cget("text")
+        assert "ExRate created" in msg
+        assert "10 days" in msg
+        assert "USD" in msg and "EUR" in msg
+        assert app.last_processed_path == str(dest)
+
+
+class TestExrateWorkerDataSafety:
+    """Finding 2: a failed fetch must NOT destroy the user's chosen file."""
+
+    def test_existing_dest_untouched_on_api_failure(self, monkeypatch, tmp_path):
+        import httpx
+
+        from gui.panels import exrate_dialog
+
+        # A pre-existing file the user picked (e.g. a real ledger).
+        dest = tmp_path / "ExRate.xlsx"
+        dest.write_bytes(b"ORIGINAL-CONTENT")
+
+        engine = _RaisingEngine(httpx.ConnectError("boom"))
+        _run_worker_sync(monkeypatch, lambda *a, **kw: engine)
+
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+
+        app = _FakeApp()
+        exrate_dialog._create_exrate_file(
+            app, ["USD"], {"Buying TT": "buying_transfer"},
+        )
+
+        # The original file must be byte-for-byte intact (never blank-saved).
+        assert dest.read_bytes() == b"ORIGINAL-CONTENT", (
+            "A failed fetch destroyed the user's existing file"
+        )
+        # No leftover temp siblings.
+        leftovers = list(tmp_path.glob(".exrate_tmp_*"))
+        assert not leftovers, f"Temp file not cleaned up: {leftovers}"
+
+    def test_network_error_shows_friendly_message(self, monkeypatch, tmp_path):
+        import httpx
+
+        from gui.panels import exrate_dialog
+
+        dest = tmp_path / "ExRate.xlsx"
+        engine = _RaisingEngine(httpx.ConnectError("boom"))
+        _run_worker_sync(monkeypatch, lambda *a, **kw: engine)
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+
+        app = _FakeApp()
+        exrate_dialog._create_exrate_file(
+            app, ["USD"], {"Buying TT": "buying_transfer"},
+        )
+
+        msg = app.lbl_status.cget("text")
+        assert "BOT server" in msg, f"Expected friendly network msg, got {msg!r}"
+
+
+class TestExrateWorkerHumanizedSaveError:
+    """Finding 5: a locked/open file yields 'close it in Excel', not raw errno."""
+
+    def test_locked_file_humanized(self, monkeypatch, tmp_path):
+        from gui.panels import exrate_dialog
+
+        dest = tmp_path / "ExRate.xlsx"
+        # PermissionError is what a Windows/macOS lock surfaces as.
+        exc = PermissionError(13, "Permission denied")
+        engine = _RaisingEngine(exc)
+        _run_worker_sync(monkeypatch, lambda *a, **kw: engine)
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+
+        app = _FakeApp()
+        exrate_dialog._create_exrate_file(
+            app, ["USD"], {"Buying TT": "buying_transfer"},
+        )
+
+        msg = app.lbl_status.cget("text")
+        assert "open in Excel" in msg, (
+            f"Locked-file error not humanized, got {msg!r}"
+        )
+        assert "Errno" not in msg, "Raw errno leaked to the user"

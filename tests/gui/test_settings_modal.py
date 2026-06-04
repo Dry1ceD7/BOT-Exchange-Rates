@@ -390,24 +390,194 @@ class TestAnomalyThreshold:
         saved = mock_mgr.save.call_args[0][0]
         assert saved["anomaly_threshold_pct"] == 12.5
 
-    def test_save_keeps_previous_on_invalid_input(self, tk_root):
+    def test_invalid_input_blocks_save_and_close(self, tk_root):
+        """A non-numeric threshold must NOT save and must NOT close the modal.
+
+        Audit finding: the old code silently closed and kept the previous value
+        with no feedback. The corrected contract aborts the save+close so the
+        user sees their typo was not accepted.
+        """
         modal, mock_mgr = _make_modal(
             tk_root, settings={"anomaly_threshold_pct": 5.0}
         )
         modal._anomaly_threshold_var.set("not-a-number")
         modal._save_and_close()
-        saved = mock_mgr.save.call_args[0][0]
-        # Invalid input must not overwrite or zero out the guardrail
-        assert saved["anomaly_threshold_pct"] == 5.0
+        mock_mgr.save.assert_not_called()
+        assert modal.winfo_exists()
+        modal.destroy()
 
-    def test_save_keeps_previous_on_non_positive(self, tk_root):
+    def test_non_positive_input_blocks_save_and_close(self, tk_root):
         modal, mock_mgr = _make_modal(
             tk_root, settings={"anomaly_threshold_pct": 5.0}
         )
         modal._anomaly_threshold_var.set("0")
         modal._save_and_close()
+        mock_mgr.save.assert_not_called()
+        assert modal.winfo_exists()
+        modal.destroy()
+
+    def test_invalid_input_shows_inline_error(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        modal._anomaly_threshold_var.set("abc")
+        modal._save_and_close()
+        assert modal._anomaly_error.cget("text")  # non-empty error text
+        modal.destroy()
+
+    def test_invalid_input_keeps_focus_in_entry(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        with patch.object(modal._anomaly_entry, "focus_set") as mock_focus:
+            modal._anomaly_threshold_var.set("")
+            modal._save_and_close()
+            mock_focus.assert_called_once()
+        modal.destroy()
+
+    def test_negative_input_blocks_save(self, tk_root):
+        modal, mock_mgr = _make_modal(tk_root)
+        modal._anomaly_threshold_var.set("-3")
+        modal._save_and_close()
+        mock_mgr.save.assert_not_called()
+        modal.destroy()
+
+    def test_valid_input_clears_prior_error_and_saves(self, tk_root):
+        """A prior error is cleared once a valid value is entered and saved."""
+        modal, mock_mgr = _make_modal(tk_root)
+        # First trip an error
+        modal._anomaly_threshold_var.set("bad")
+        modal._save_and_close()
+        assert modal._anomaly_error.cget("text")
+        assert modal.winfo_exists()
+        # Then correct it
+        modal._anomaly_threshold_var.set("8.0")
+        modal._save_and_close()
         saved = mock_mgr.save.call_args[0][0]
-        assert saved["anomaly_threshold_pct"] == 5.0
+        assert saved["anomaly_threshold_pct"] == 8.0
+        assert not modal.winfo_exists()
+
+    def test_whitespace_padded_value_is_accepted(self, tk_root):
+        modal, mock_mgr = _make_modal(tk_root)
+        modal._anomaly_threshold_var.set("  6.25  ")
+        modal._save_and_close()
+        saved = mock_mgr.save.call_args[0][0]
+        assert saved["anomaly_threshold_pct"] == 6.25
+
+
+# ---------------------------------------------------------------------------
+# Open Logs / Audit Folder
+# ---------------------------------------------------------------------------
+
+class TestOpenLogsFolder:
+    """_on_open_logs reveals data/logs via a platform-safe folder launcher."""
+
+    def test_open_logs_calls_open_folder_with_logs_path(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        with (
+            patch(
+                "gui.panels.settings_modal.get_project_root",
+                return_value="/tmp/botexrate-root",
+            ),
+            patch(
+                "gui.panels.settings_modal._open_folder", return_value=True
+            ) as mock_open,
+            patch("pathlib.Path.mkdir"),
+        ):
+            modal._on_open_logs()
+        mock_open.assert_called_once()
+        called_path = mock_open.call_args[0][0]
+        assert called_path.endswith("data/logs") or called_path.endswith(
+            "data\\logs"
+        )
+        modal.destroy()
+
+    def test_open_logs_surfaces_failure_inline(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        with (
+            patch(
+                "gui.panels.settings_modal.get_project_root",
+                return_value="/tmp/botexrate-root",
+            ),
+            patch(
+                "gui.panels.settings_modal._open_folder", return_value=False
+            ),
+            patch("pathlib.Path.mkdir"),
+        ):
+            modal._on_open_logs()
+        assert modal._anomaly_error.cget("text")  # failure surfaced inline
+        modal.destroy()
+
+    def test_open_logs_no_error_text_on_success(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        with (
+            patch(
+                "gui.panels.settings_modal.get_project_root",
+                return_value="/tmp/botexrate-root",
+            ),
+            patch(
+                "gui.panels.settings_modal._open_folder", return_value=True
+            ),
+            patch("pathlib.Path.mkdir"),
+        ):
+            modal._on_open_logs()
+        assert modal._anomaly_error.cget("text") == ""
+        modal.destroy()
+
+
+# ---------------------------------------------------------------------------
+# _open_folder helper (module-level, no widgets required)
+# ---------------------------------------------------------------------------
+
+class TestOpenFolderHelper:
+    """_open_folder validates the target and dispatches a fixed-argv launcher."""
+
+    def test_returns_false_for_nonexistent_dir(self):
+        from gui.panels.settings_modal import _open_folder
+        assert _open_folder("/no/such/dir/anywhere/12345") is False
+
+    def test_returns_false_for_file_not_dir(self, tmp_path):
+        from gui.panels.settings_modal import _open_folder
+        f = tmp_path / "a_file.txt"
+        f.write_text("x", encoding="utf-8")
+        assert _open_folder(str(f)) is False
+
+    def test_launches_open_on_darwin(self, tmp_path):
+        from gui.panels import settings_modal
+        with (
+            patch.object(settings_modal.platform, "system", return_value="Darwin"),
+            patch.object(settings_modal.subprocess, "Popen") as mock_popen,
+        ):
+            assert settings_modal._open_folder(str(tmp_path)) is True
+        argv = mock_popen.call_args[0][0]
+        assert argv[0] == "open"
+        assert argv[1] == str(tmp_path.resolve())
+
+    def test_launches_explorer_on_windows(self, tmp_path):
+        from gui.panels import settings_modal
+        with (
+            patch.object(settings_modal.platform, "system", return_value="Windows"),
+            patch.object(settings_modal.subprocess, "Popen") as mock_popen,
+        ):
+            assert settings_modal._open_folder(str(tmp_path)) is True
+        argv = mock_popen.call_args[0][0]
+        assert argv[0] == "explorer"
+
+    def test_launches_xdg_open_on_linux(self, tmp_path):
+        from gui.panels import settings_modal
+        with (
+            patch.object(settings_modal.platform, "system", return_value="Linux"),
+            patch.object(settings_modal.subprocess, "Popen") as mock_popen,
+        ):
+            assert settings_modal._open_folder(str(tmp_path)) is True
+        argv = mock_popen.call_args[0][0]
+        assert argv[0] == "xdg-open"
+
+    def test_returns_false_on_oserror(self, tmp_path):
+        from gui.panels import settings_modal
+        with (
+            patch.object(settings_modal.platform, "system", return_value="Linux"),
+            patch.object(
+                settings_modal.subprocess, "Popen", side_effect=OSError("boom")
+            ),
+        ):
+            assert settings_modal._open_folder(str(tmp_path)) is False
 
 
 # ---------------------------------------------------------------------------

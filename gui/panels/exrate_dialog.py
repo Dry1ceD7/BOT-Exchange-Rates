@@ -10,6 +10,9 @@ Extracted from gui/app.py to reduce God Object line count.
 import asyncio
 import contextlib
 import logging
+import os
+import shutil
+import tempfile
 import threading
 from datetime import date
 from pathlib import Path
@@ -18,9 +21,15 @@ from tkinter import filedialog
 import customtkinter as ctk
 import httpx
 
+from core.constants import humanize_save_error
+from core.i18n import tr
 from gui.theme import get_theme
 
 logger = logging.getLogger(__name__)
+
+# Remembered across dialog invocations so the save picker reopens where the
+# user last saved instead of defaulting to an arbitrary directory each time.
+_LAST_SAVE_DIR: str | None = None
 
 # ── Constants ────────────────────────────────────────────────────────────
 EXRATE_CURRENCIES = [
@@ -45,7 +54,7 @@ def show_exrate_dialog(app) -> None:
     t = get_theme()
 
     dialog = ctk.CTkToplevel(app)
-    dialog.title("Create ExRate File")
+    dialog.title(tr("exrate.window_title"))
     dialog.geometry("440x680")
     dialog.resizable(False, False)
     dialog.configure(fg_color=t["card_bg"])
@@ -58,14 +67,14 @@ def show_exrate_dialog(app) -> None:
     dialog.geometry(f"440x680+{sx}+{sy}")
 
     ctk.CTkLabel(
-        dialog, text="ExRate Sheet Options",
+        dialog, text=tr("exrate.heading"),
         font=ctk.CTkFont(size=18, weight="bold"),
         text_color=t["text_primary"],
     ).pack(pady=(16, 12))
 
     # ── Currencies ────────────────────────────────────────────────────
     ctk.CTkLabel(
-        dialog, text="Currencies",
+        dialog, text=tr("exrate.section_currencies"),
         font=ctk.CTkFont(size=14, weight="bold"),
         text_color=t["text_secondary"],
     ).pack(anchor="w", padx=24, pady=(0, 4))
@@ -94,7 +103,7 @@ def show_exrate_dialog(app) -> None:
 
     # ── Rate Types ────────────────────────────────────────────────────
     ctk.CTkLabel(
-        dialog, text="Rate Types",
+        dialog, text=tr("exrate.section_rate_types"),
         font=ctk.CTkFont(size=14, weight="bold"),
         text_color=t["text_secondary"],
     ).pack(anchor="w", padx=24, pady=(0, 4))
@@ -123,7 +132,7 @@ def show_exrate_dialog(app) -> None:
 
     # ── Date Range ────────────────────────────────────────────────────
     ctk.CTkLabel(
-        dialog, text="Date Range",
+        dialog, text=tr("exrate.section_date_range"),
         font=ctk.CTkFont(size=14, weight="bold"),
         text_color=t["text_secondary"],
     ).pack(anchor="w", padx=24, pady=(0, 4))
@@ -145,7 +154,7 @@ def show_exrate_dialog(app) -> None:
 
     ctk.CTkSwitch(
         date_range_frame,
-        text="  Select dates manually",
+        text=tr("exrate.manual_toggle"),
         variable=date_mode_var,
         onvalue="manual", offvalue="auto",
         font=ctk.CTkFont(size=13),
@@ -165,7 +174,8 @@ def show_exrate_dialog(app) -> None:
     # Start date row
     start_row = ctk.CTkFrame(manual_frame, fg_color="transparent")
     start_row.pack(fill="x", padx=8, pady=2)
-    ctk.CTkLabel(start_row, text="Start:", font=ctk.CTkFont(size=12),
+    ctk.CTkLabel(start_row, text=tr("exrate.label_start"),
+                 font=ctk.CTkFont(size=12),
                  text_color=t["text_secondary"], width=40).pack(side="left")
     start_year = ctk.CTkComboBox(
         start_row, values=years, width=80,
@@ -195,7 +205,8 @@ def show_exrate_dialog(app) -> None:
     # End date row
     end_row = ctk.CTkFrame(manual_frame, fg_color="transparent")
     end_row.pack(fill="x", padx=8, pady=2)
-    ctk.CTkLabel(end_row, text="End:", font=ctk.CTkFont(size=12),
+    ctk.CTkLabel(end_row, text=tr("exrate.label_end"),
+                 font=ctk.CTkFont(size=12),
                  text_color=t["text_secondary"], width=40).pack(side="left")
     end_year = ctk.CTkComboBox(
         end_row, values=years, width=80,
@@ -242,16 +253,25 @@ def show_exrate_dialog(app) -> None:
     def _on_create():
         _err_label.configure(text="")  # clear previous error
 
+        # Refuse to start while a batch owns the shared status/progress UI.
+        # The ExRate Sheet button is disabled during a batch, but the dialog
+        # may have been opened first; without this guard a batch started after
+        # the dialog opened would have its progress bar/status hijacked by a
+        # second concurrent engine run (#4).
+        if getattr(app, "_batch_running", False):
+            _err_label.configure(text=tr("exrate.err_batch_running"))
+            return
+
         currencies = [c for c, v in cur_vars.items() if v.get()]
         rate_types = {
             lbl: EXRATE_RATE_TYPES[lbl]
             for lbl, v in rate_vars.items() if v.get()
         }
         if not currencies:
-            _err_label.configure(text="Select at least one currency")
+            _err_label.configure(text=tr("exrate.err_no_currency"))
             return
         if not rate_types:
-            _err_label.configure(text="Select at least one rate type")
+            _err_label.configure(text=tr("exrate.err_no_rate_type"))
             return
 
         # Get date range
@@ -262,7 +282,7 @@ def show_exrate_dialog(app) -> None:
                 e_date = date(int(end_year.get()), int(end_month.get()),
                               int(end_day.get()))
             except ValueError:
-                _err_label.configure(text="Invalid date entered")
+                _err_label.configure(text=tr("exrate.err_invalid_date"))
                 return
             date_range = (s_date, e_date)
         else:
@@ -271,13 +291,53 @@ def show_exrate_dialog(app) -> None:
         dialog.destroy()
         _create_exrate_file(app, currencies, rate_types, date_range=date_range)
 
-    ctk.CTkButton(
-        dialog, text="Create ExRate File",
+    create_btn = ctk.CTkButton(
+        dialog, text=tr("exrate.btn_create"),
         fg_color=t["accent_indigo"], hover_color=t["accent_indigo_hover"],
         font=ctk.CTkFont(size=14, weight="bold"),
         corner_radius=10, height=44,
         command=_on_create,
-    ).pack(padx=24, fill="x", pady=(0, 12))
+    )
+    create_btn.pack(padx=24, fill="x", pady=(0, 12))
+
+    # ── Keyboard handling — match every other modal in the app (#3) ─────
+    # Escape cancels, Return confirms. focus_set gives the dialog keyboard
+    # focus so the bindings fire without a prior mouse click.
+    dialog.bind("<Escape>", lambda _e: dialog.destroy())
+    dialog.bind("<Return>", lambda _e: _on_create())
+    dialog.focus_set()
+    create_btn.focus_set()
+
+
+def _build_exrate_summary(currencies, rate_types, date_range) -> str:
+    """Build a one-line summary of what an ExRate creation will write (#1).
+
+    Reports the populated date span (day count), the currencies, and the rate
+    types requested, so a file full of blanks no longer looks identical to a
+    full success. The day count is the inclusive calendar span the standalone
+    writer iterates (it writes one row per day in the range).
+
+    Args:
+        currencies: List of currency codes.
+        rate_types: Dict of {label: api_key} (only the labels are surfaced).
+        date_range: Optional (start_date, end_date) tuple; None means auto
+            (current year, Jan 1 → today).
+
+    Returns:
+        A human-readable summary string (no leading/trailing markers).
+    """
+    if date_range:
+        s_date, e_date = date_range
+    else:
+        today = date.today()
+        s_date, e_date = date(today.year, 1, 1), today
+    days = (e_date - s_date).days + 1 if e_date >= s_date else 0
+    ccy_list = ", ".join(currencies)
+    rate_list = ", ".join(rate_types.keys())
+    return (
+        f"{days} day{'s' if days != 1 else ''} "
+        f"({s_date:%Y-%m-%d} → {e_date:%Y-%m-%d}) · {ccy_list} · {rate_list}"
+    )
 
 
 def _create_exrate_file(app, currencies, rate_types, date_range=None):
@@ -296,16 +356,34 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
         rate_types: Dict of {label: api_key}.
         date_range: Optional (start_date, end_date) tuple.
     """
+    global _LAST_SAVE_DIR
     t = get_theme()
+
+    # Belt-and-suspenders: never let an ExRate run start while a batch owns the
+    # shared progress/status widgets (#4). _on_create already guards, but the
+    # save picker below can sit open long enough for a batch to start.
+    if getattr(app, "_batch_running", False):
+        if hasattr(app, "lbl_status"):
+            app.lbl_status.configure(
+                text=tr("exrate.err_batch_running"),
+                text_color=t["warning"],
+            )
+        return
 
     dest = filedialog.asksaveasfilename(
         title="Save ExRate File",
+        initialdir=_LAST_SAVE_DIR or None,
         initialfile="ExRate.xlsx",
         filetypes=[("Excel files", "*.xlsx")],
         defaultextension=".xlsx",
+        confirmoverwrite=True,
     )
     if not dest:
         return
+    # Remember the chosen directory so the next save reopens there (#2).
+    _LAST_SAVE_DIR = str(Path(dest).parent) or _LAST_SAVE_DIR
+
+    summary = _build_exrate_summary(currencies, rate_types, date_range)
 
     # ── Callback interface — decoupled from widget internals ─────────
     def _set_export_button(state: str):
@@ -334,7 +412,7 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
 
     # ── Start: disable button + indeterminate progress ───────────────
     _set_export_button("disabled")
-    _set_status("Creating ExRate file...", t["text_secondary"])
+    _set_status(tr("exrate.creating"), t["text_secondary"])
     _set_progress("indeterminate", running=True)
     app.update_idletasks()
 
@@ -353,6 +431,20 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
             _set_status(message, t["error_text"])
         _set_export_button("normal")
 
+    def _fail_message(exc: BaseException) -> str:
+        """Translate a worker exception into actionable guidance (#5).
+
+        A locked/open destination becomes the shared "close it in Excel"
+        message via humanize_save_error; everything else keeps a short
+        plain-language reason instead of leaking a raw errno/traceback string.
+        """
+        humanized = humanize_save_error(Path(dest).name, exc)
+        if humanized:
+            return humanized
+        if isinstance(exc, (httpx.RequestError, httpx.HTTPStatusError)):
+            return "Could not reach the BOT server — check your connection."
+        return f"Failed: {exc}"
+
     event_bus = getattr(app, "event_bus", None)
 
     def _worker():
@@ -361,11 +453,23 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
         from core.api_client import CLIENT_TIMEOUT, BOTClient
         from core.engine import LedgerEngine
 
+        # Build into a temp file in the destination directory and only move it
+        # into place once the fetch+write fully succeeds (#2). The previous
+        # flow saved a BLANK workbook straight over `dest` before fetching, so
+        # an API/network failure left the user's chosen file destroyed. Writing
+        # to a sibling temp keeps the original intact until success; on failure
+        # the temp is discarded and `dest` is never touched.
+        tmp_path: str | None = None
         try:
+            dest_dir = Path(dest).parent
+            fd, tmp_path = tempfile.mkstemp(
+                suffix=".xlsx", prefix=".exrate_tmp_", dir=dest_dir
+            )
+            os.close(fd)
             wb = Workbook()
             ws = wb.active
             ws.title = "ExRate"
-            wb.save(dest)
+            wb.save(tmp_path)
             wb.close()
 
             async def _run():
@@ -373,7 +477,7 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
                     api = BOTClient(client)
                     engine = LedgerEngine(api, event_bus=event_bus)
                     return await engine.update_exrate_standalone(
-                        dest,
+                        tmp_path,
                         progress_cb=_status_cb,
                         currencies=currencies,
                         rate_types=rate_types,
@@ -383,20 +487,29 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
             loop = asyncio.new_event_loop()
             try:
                 loop.run_until_complete(_run())
+                # Success: atomically move the fully-written temp over dest.
+                shutil.move(tmp_path, dest)
+                tmp_path = None
                 with contextlib.suppress(RuntimeError):
                     app.after(0, _done, True,
-                              f"✓ ExRate created: {Path(dest).name}")
+                              f"✓ ExRate created: {Path(dest).name} — {summary}")
             except (httpx.RequestError, httpx.HTTPStatusError,
                     OSError, ValueError) as e:
                 logger.error("ExRate standalone failed: %s", e)
                 with contextlib.suppress(RuntimeError):
-                    app.after(0, _done, False, f"Failed: {e}")
+                    app.after(0, _done, False, _fail_message(e))
             finally:
                 loop.close()
         except (OSError, ValueError) as e:
             logger.error("ExRate file creation failed: %s", e)
             with contextlib.suppress(RuntimeError):
-                app.after(0, _done, False, f"Failed: {e}")
+                app.after(0, _done, False, _fail_message(e))
+        finally:
+            # Discard the temp file on any failure path so we never leave a
+            # blank/partial sibling behind next to the user's real files.
+            if tmp_path:
+                with contextlib.suppress(OSError):
+                    Path(tmp_path).unlink()
 
     threading.Thread(target=_worker, daemon=True, name="ExRateWorker").start()
 

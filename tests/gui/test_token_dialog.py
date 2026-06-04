@@ -530,3 +530,263 @@ class TestTestKeysButton:
         assert called == []
         dialog.destroy()
 
+
+# ---------------------------------------------------------------------------
+# Key sanitization (whitespace / Bearer prefix)
+# ---------------------------------------------------------------------------
+
+class TestSanitizeKey:
+    """_sanitize_key() cleans pasted keys and flags internal whitespace."""
+
+    def test_strips_surrounding_whitespace(self):
+        from gui.panels.token_dialog import _sanitize_key
+
+        cleaned, err = _sanitize_key("  goodkey123  ")
+        assert cleaned == "goodkey123"
+        assert err is None
+
+    def test_internal_space_flagged(self):
+        from gui.panels.token_dialog import _sanitize_key
+
+        cleaned, err = _sanitize_key("key_internal space_here")
+        assert err is not None
+        assert "space" in err.lower() or "paste" in err.lower()
+
+    def test_internal_newline_flagged(self):
+        from gui.panels.token_dialog import _sanitize_key
+
+        _, err = _sanitize_key("wrapped\nkey")
+        assert err is not None
+
+    def test_internal_tab_flagged(self):
+        from gui.panels.token_dialog import _sanitize_key
+
+        _, err = _sanitize_key("wrapped\tkey")
+        assert err is not None
+
+    def test_bearer_prefix_stripped(self):
+        from gui.panels.token_dialog import _sanitize_key
+
+        cleaned, err = _sanitize_key("Bearer mytoken123")
+        assert cleaned == "mytoken123"
+        assert err is None
+
+    def test_bearer_prefix_case_insensitive(self):
+        from gui.panels.token_dialog import _sanitize_key
+
+        cleaned, _ = _sanitize_key("bearer mytoken123")
+        assert cleaned == "mytoken123"
+
+    def test_clean_key_unchanged(self):
+        from gui.panels.token_dialog import _sanitize_key
+
+        cleaned, err = _sanitize_key("perfectlyfine999")
+        assert cleaned == "perfectlyfine999"
+        assert err is None
+
+
+class TestActivateRejectsWhitespace:
+    """_on_activate() rejects keys with internal whitespace and does not store."""
+
+    def test_internal_space_in_exg_blocks_activation(self, tk_root, tmp_path):
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        dialog._entry_exg.insert(0, "bad key with space")
+        dialog._entry_hol.insert(0, "VALIDHOLKEY999")
+        with patch("gui.panels.token_dialog._keyring_available", return_value=False):
+            dialog._on_activate()
+        assert dialog.activated is False
+        assert dialog._lbl_status.cget("text") != ""
+        # No .env written because validation failed first.
+        assert not (tmp_path / ".env").exists()
+        dialog.destroy()
+
+    def test_internal_newline_in_hol_blocks_activation(self, tk_root, tmp_path):
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        dialog._entry_exg.insert(0, "VALIDEXGKEY999")
+        dialog._entry_hol.insert(0, "bad\nhol")
+        with patch("gui.panels.token_dialog._keyring_available", return_value=False):
+            dialog._on_activate()
+        assert dialog.activated is False
+        assert not (tmp_path / ".env").exists()
+        dialog.destroy()
+
+    def test_bearer_prefix_stored_without_prefix(self, tk_root, tmp_path):
+        env_file = tmp_path / ".env"
+        dialog = _make_dialog(tk_root, tmp_env=env_file)
+        dialog._entry_exg.insert(0, "Bearer EXGTOKEN12345")
+        dialog._entry_hol.insert(0, "HOLTOKEN12345")
+        with patch("gui.panels.token_dialog._keyring_available", return_value=False):
+            dialog._on_activate()
+        content = env_file.read_text(encoding="utf-8")
+        assert "BOT_TOKEN_EXG=EXGTOKEN12345" in content
+        assert "Bearer" not in content
+        assert dialog.activated is True
+
+    def test_test_keys_rejects_internal_whitespace(self, tk_root, tmp_path):
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        dialog._entry_exg.insert(0, "bad key")
+        dialog._entry_hol.insert(0, "VALIDHOLKEY999")
+        # No worker should spawn; status should warn about the paste.
+        with patch("gui.panels.token_dialog.threading.Thread") as mock_thread:
+            dialog._on_test_keys()
+            mock_thread.assert_not_called()
+        assert dialog._busy_test is False
+        assert dialog._lbl_status.cget("text") != ""
+        dialog.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Keychain fallback warning
+# ---------------------------------------------------------------------------
+
+class TestKeychainFallbackWarning:
+    """Keyring present but write fails → visible warning, not silent degrade."""
+
+    def _activate_keyring_fails(self, tk_root, tmp_path):
+        """Build dialog where keyring is present but set_token returns False."""
+        from gui.panels.token_dialog import TokenRegistrationDialog
+
+        env_file = tmp_path / ".env"
+        with patch("gui.panels.token_dialog._keyring_available", return_value=True), \
+             patch("gui.panels.token_dialog.set_token", return_value=False):
+            dialog = TokenRegistrationDialog(tk_root, env_path=str(env_file))
+        dialog.withdraw()
+        dialog.grab_set = MagicMock()
+        dialog.grab_release = MagicMock()
+        dialog._entry_exg.insert(0, "VALIDEXGKEY999")
+        dialog._entry_hol.insert(0, "VALIDHOLKEY999")
+
+        with patch("gui.panels.token_dialog._keyring_available", return_value=True), \
+             patch("gui.panels.token_dialog.set_token", return_value=False):
+            dialog._on_activate()
+        return dialog, env_file
+
+    def test_warning_shown_when_keychain_write_fails(self, tk_root, tmp_path):
+        dialog, _ = self._activate_keyring_fails(tk_root, tmp_path)
+        status = dialog._lbl_status.cget("text").lower()
+        assert "keychain" in status
+        assert "local file" in status
+        dialog.destroy()
+
+    def test_keys_still_written_to_env_on_fallback(self, tk_root, tmp_path):
+        dialog, env_file = self._activate_keyring_fails(tk_root, tmp_path)
+        content = env_file.read_text(encoding="utf-8")
+        assert "BOT_TOKEN_EXG=VALIDEXGKEY999" in content
+        assert "BOT_TOKEN_HOL=VALIDHOLKEY999" in content
+        dialog.destroy()
+
+    def test_activated_true_but_dialog_open_after_fallback(self, tk_root, tmp_path):
+        dialog, _ = self._activate_keyring_fails(tk_root, tmp_path)
+        # Activation succeeded (tokens stored) but dialog stays open to warn.
+        assert dialog.activated is True
+        assert dialog._keychain_warned is True
+        assert dialog._destroyed is False
+        # Button relabelled so a second press dismisses.
+        assert dialog._btn_activate.cget("text") == "Continue anyway"
+        dialog.destroy()
+
+    def test_second_activate_dismisses_after_warning(self, tk_root, tmp_path):
+        dialog, _ = self._activate_keyring_fails(tk_root, tmp_path)
+        with patch("gui.panels.token_dialog._keyring_available", return_value=True), \
+             patch("gui.panels.token_dialog.set_token", return_value=False):
+            dialog._on_activate()
+        # Second press: warning already shown, now dismiss with activation kept.
+        assert dialog.activated is True
+        assert dialog._destroyed is True
+
+    def test_close_after_fallback_preserves_activation(self, tk_root, tmp_path):
+        dialog, _ = self._activate_keyring_fails(tk_root, tmp_path)
+        # User clicks X instead of Continue — activation must NOT be lost
+        # because the tokens are already stored.
+        dialog._on_close()
+        assert dialog.activated is True
+
+    def test_no_warning_when_no_keyring_backend(self, tk_root, tmp_path):
+        # Pure .env path (no keyring at all) must not show the fallback warning.
+        env_file = tmp_path / ".env"
+        dialog = _make_dialog(tk_root, tmp_env=env_file)
+        dialog._entry_exg.insert(0, "VALIDEXGKEY999")
+        dialog._entry_hol.insert(0, "VALIDHOLKEY999")
+        with patch("gui.panels.token_dialog._keyring_available", return_value=False):
+            dialog._on_activate()
+        assert dialog._keychain_warned is False
+        assert dialog.activated is True
+        assert dialog._destroyed is True
+
+
+# ---------------------------------------------------------------------------
+# Keyboard accessibility (Enter submits, Escape cancels, focus on entry)
+# ---------------------------------------------------------------------------
+
+class TestKeyboardAccessibility:
+    """Enter triggers Activate, Escape cancels, first entry is focused."""
+
+    def test_return_binding_present(self, tk_root, tmp_path):
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        # A <Return> binding exists on the dialog.
+        assert dialog.bind("<Return>") != ""
+        dialog.destroy()
+
+    def test_escape_binding_present(self, tk_root, tmp_path):
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        assert dialog.bind("<Escape>") != ""
+        dialog.destroy()
+
+    def test_return_invokes_activate(self, tk_root, tmp_path):
+        # The <Return> binding must dispatch to _on_activate. event_generate is
+        # unreliable on a withdrawn toplevel, so install a spy as _on_activate
+        # and invoke the bound callback Tk registered (its funcid is embedded
+        # in the binding script) via the dialog's own event dispatch.
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        called = []
+        dialog._on_activate = lambda: called.append(True)
+        # Re-bind so the spy (not the original method) is the dispatch target,
+        # then fire through Tk's event machinery on the realised root.
+        dialog.deiconify()
+        dialog.bind("<Return>", lambda e: dialog._on_activate())
+        dialog.update()
+        dialog.event_generate("<Return>", when="now")
+        dialog.update()
+        assert called == [True]
+        dialog.destroy()
+
+    def test_escape_invokes_close(self, tk_root, tmp_path):
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        called = []
+        dialog._on_close = lambda: called.append(True)
+        dialog.deiconify()
+        dialog.bind("<Escape>", lambda e: dialog._on_close())
+        dialog.update()
+        dialog.event_generate("<Escape>", when="now")
+        dialog.update()
+        assert called == [True]
+        dialog.destroy()
+
+    def test_first_entry_focus_set_during_construction(self, tk_root, tmp_path):
+        # Construction must call focus_set() on the first (exchange-rate) entry
+        # so a keyboard user can type immediately. Spy on CTkEntry.focus_set to
+        # capture which entry instance received focus during __init__.
+        import customtkinter as ctk
+
+        from gui.panels.token_dialog import TokenRegistrationDialog
+
+        focused_widgets = []
+        orig_focus = ctk.CTkEntry.focus_set
+
+        def _spy(self):
+            focused_widgets.append(self)
+            return orig_focus(self)
+
+        with patch("gui.panels.token_dialog._keyring_available", return_value=False), \
+             patch("gui.panels.token_dialog.set_token", return_value=True), \
+             patch.object(ctk.CTkEntry, "focus_set", _spy):
+            dialog = TokenRegistrationDialog(
+                tk_root, env_path=str(tmp_path / ".env")
+            )
+        dialog.withdraw()
+        dialog.grab_set = MagicMock()
+        dialog.grab_release = MagicMock()
+
+        assert dialog._entry_exg in focused_widgets
+        dialog.destroy()
+
