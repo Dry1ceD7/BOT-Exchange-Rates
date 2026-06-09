@@ -18,12 +18,6 @@ from openpyxl.utils import get_column_letter
 from core.constants import bot_today
 from core.constants import parse_date as _shared_parse_date
 
-# Mirror resolve_rate's guardrail (core/logic.py): a weekend/holiday row
-# carries forward the prior trading-day rate, but no further back than this
-# many days. Beyond the limit the rate stays blank so the ledger IFERROR
-# yields "" rather than a stale rate older than the documented rollback.
-_MAX_ROLLBACK_DAYS = 10
-
 
 def update_master_exrate_sheet(
     wb: openpyxl.Workbook,
@@ -57,8 +51,9 @@ def update_master_exrate_sheet(
         extra_currency_rates: Optional ``{ccy: {date: Decimal}}`` for non-USD/
             EUR currencies. Each gets ONE appended column (the user's selected
             rate type) inserted between EUR Selling and Holidays, with the same
-            10-day weekend/holiday carry-forward. Iterated in dict order, so
-            callers pass an order-stable mapping (e.g. built from sorted codes).
+            blank weekend/holiday handling (no rate written on those rows).
+            Iterated in dict order, so callers pass an order-stable mapping
+            (e.g. built from sorted codes).
 
     Returns:
         ``{ccy: column_letter}`` for every appended extra currency so the
@@ -198,33 +193,27 @@ def _merge_rate_data(
 ) -> dict[date, dict]:
     """Merge API rates with existing sheet data (API priority).
 
-    Weekend/holiday rows carry no BOT rate of their own, so the ledger
-    XLOOKUP (exact match) would resolve a Saturday-dated row to a blank
-    cell, silently skipping the documented 10-day rollback. To honor that
-    rule inside the formula path we carry forward the prior TRADING-DAY rate
-    into each weekend/holiday row, bounded to ``_MAX_ROLLBACK_DAYS`` (mirrors
-    resolve_rate in core/logic.py). Beyond the window the cell stays blank.
+    Weekend/holiday rows carry no BOT rate of their own, so their rate cells
+    are left BLANK — only the Date and the Holidays/Weekend label are written.
+    BOT publishes no rate on those days, so no value is fabricated for them:
+    no carry-forward of the prior trading-day rate. The ledger XLOOKUP is
+    exact-match and intentionally yields "" for a weekend/holiday-dated
+    transaction. This matches the v3.2.8 behavior.
 
-    ``extra_currency_rates`` ({ccy: {date: Decimal}}) gets the IDENTICAL
-    carry-forward treatment under per-currency keys ``f"extra:{ccy}"`` so a
-    GBP/JPY weekend row resolves to the prior trading-day rate just like USD.
+    ``extra_currency_rates`` ({ccy: {date: Decimal}}) is treated identically
+    under per-currency keys ``f"extra:{ccy}"`` — a GBP/JPY weekend row also
+    stays blank.
     """
     extra_currency_rates = extra_currency_rates or {}
     extra_keys = {ccy: f"extra:{ccy}" for ccy in extra_currency_rates}
     rate_keys = ("usd_buy", "usd_sell", "eur_buy", "eur_sell")
     all_keys = list(rate_keys) + list(extra_keys.values())
-    # Per-column last seen trading-day value + the date it came from, used to
-    # bound the carry-forward to the rollback window.
-    last_trading: dict[str, tuple[date, Decimal] | None] = {
-        key: None for key in all_keys
-    }
 
     merged: dict[date, dict] = {}
     for d in sorted(all_dates):
         existing = existing_data.get(d, {})
         is_weekend = d.weekday() >= 5
         is_holiday = d in holidays_set
-        is_trading_day = not (is_weekend or is_holiday)
 
         # Keep rate values as Decimal end-to-end — NEVER cast to float.
         # float() corrupts 4dp precision (34.5650 -> 34.564999...).
@@ -248,25 +237,14 @@ def _merge_rate_data(
 
         entry: dict = {}
         for key in all_keys:
-            # API value wins; otherwise fall back to whatever was on the sheet.
-            # Extra-currency columns are appended fresh each run, so existing
-            # sheet data only ever backs the fixed USD/EUR keys.
-            value = (
+            # API value wins; otherwise fall back to whatever was already on
+            # the sheet. NO weekend/holiday carry-forward — those rows keep a
+            # blank rate cell (only Date + label survive), matching v3.2.8.
+            entry[key] = (
                 row_rates[key]
                 if row_rates[key] is not None
                 else existing.get(key)
             )
-            if is_trading_day:
-                # Record the freshest trading-day rate for downstream rollback.
-                if value is not None:
-                    last_trading[key] = (d, value)
-            elif value is None:
-                # Weekend/holiday with no own rate → carry the prior trading
-                # day's rate forward, but only within the rollback window.
-                prior = last_trading[key]
-                if prior is not None and (d - prior[0]).days <= _MAX_ROLLBACK_DAYS:
-                    value = prior[1]
-            entry[key] = value
 
         entry["holidays_weekend"] = holiday_label
         merged[d] = entry

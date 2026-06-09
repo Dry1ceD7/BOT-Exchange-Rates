@@ -6,7 +6,7 @@ Unit tests for core/exrate_sheet.py — Master ExRate sheet builder.
 ---------------------------------------------------------------------------
 """
 
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 
 import openpyxl
@@ -161,14 +161,16 @@ class TestMergeRateData:
         assert "Weekend Holiday" in merged[sat]["holidays_weekend"]
 
 
-class TestRateRollbackCarryForward:
-    """Weekend/holiday rows carry forward the prior trading-day rate.
+class TestWeekendHolidayRatesBlank:
+    """Weekend/holiday rows keep BLANK rate cells — no carry-forward.
 
-    Mirrors resolve_rate's 10-day rollback so the ledger XLOOKUP (exact match)
-    resolves a Saturday-dated row to Friday's rate instead of a blank.
+    BOT publishes no rate on weekends/holidays, so those rows show only the
+    Date + Holidays/Weekend label; no prior trading-day rate is fabricated for
+    them. The ledger XLOOKUP is exact-match and intentionally yields "" for a
+    weekend/holiday-dated transaction. This matches the v3.2.8 behavior.
     """
 
-    def test_saturday_carries_friday_rate(self):
+    def test_saturday_and_sunday_stay_blank(self):
         fri = date(2025, 3, 7)   # Friday — trading day with a rate
         sat = date(2025, 3, 8)   # Saturday — no rate from BOT
         sun = date(2025, 3, 9)   # Sunday — no rate either
@@ -179,11 +181,11 @@ class TestRateRollbackCarryForward:
         )
         # Friday keeps its own rate.
         assert merged[fri]["usd_buy"] == Decimal("33.5000")
-        # Saturday + Sunday carry Friday's rate forward (rollback rule).
-        assert merged[sat]["usd_buy"] == Decimal("33.5000")
-        assert merged[sun]["usd_buy"] == Decimal("33.5000")
+        # Saturday + Sunday carry NO rate forward — cells stay blank.
+        assert merged[sat]["usd_buy"] is None
+        assert merged[sun]["usd_buy"] is None
 
-    def test_holiday_carries_prior_trading_day_rate(self):
+    def test_holiday_stays_blank(self):
         fri = date(2025, 3, 7)   # Friday — trading day with a rate
         mon = date(2025, 3, 10)  # Monday — BOT holiday, no rate
         usd_b = {fri: Decimal("34.0000")}
@@ -192,42 +194,19 @@ class TestRateRollbackCarryForward:
             {}, {mon}, {mon: "Test Holiday"},
             usd_b, {}, {}, {},
         )
-        # Monday holiday carries Friday's rate (across the weekend, 3 days).
-        assert merged[mon]["usd_buy"] == Decimal("34.0000")
+        # Monday holiday has no own rate and none is carried forward.
+        assert merged[mon]["usd_buy"] is None
 
-    def test_gap_beyond_ten_days_stays_blank(self):
-        # Trading day far in the past, then a long weekend/holiday stretch.
-        last_rate_day = date(2025, 3, 7)   # Friday
-        far_weekend = date(2025, 3, 22)    # Saturday, 15 days later
-        usd_b = {last_rate_day: Decimal("33.0000")}
-        all_dates = {last_rate_day}
-        # Build a continuous calendar so the carry-forward sees every gap day.
-        d = last_rate_day
-        while d <= far_weekend:
-            all_dates.add(d)
-            d += timedelta(days=1)
+    def test_weekend_with_own_api_rate_is_kept(self):
+        # Defensive: API priority still holds. If BOT ever returns a rate for
+        # a weekend date, that real value is used — only MISSING rates blank.
+        sat = date(2025, 3, 8)   # Saturday
+        usd_b = {sat: Decimal("33.9999")}
         merged = _merge_rate_data(
-            all_dates, {}, set(), {},
+            {sat}, {}, set(), {},
             usd_b, {}, {}, {},
         )
-        # 15 days > 10-day rollback limit → leave blank so IFERROR yields "".
-        assert merged[far_weekend]["usd_buy"] is None
-
-    def test_within_ten_days_still_carries(self):
-        last_rate_day = date(2025, 3, 7)   # Friday
-        usd_b = {last_rate_day: Decimal("33.0000")}
-        target = date(2025, 3, 16)         # Sunday, exactly 9 days later
-        all_dates = set()
-        d = last_rate_day
-        while d <= target:
-            all_dates.add(d)
-            d += timedelta(days=1)
-        merged = _merge_rate_data(
-            all_dates, {}, set(), {},
-            usd_b, {}, {}, {},
-        )
-        # 9 days ≤ 10 → still carried forward.
-        assert merged[target]["usd_buy"] == Decimal("33.0000")
+        assert merged[sat]["usd_buy"] == Decimal("33.9999")
 
 
 # =========================================================================
@@ -395,8 +374,8 @@ class TestExtraCurrencyColumns:
         assert cell.number_format == "0.0000"
         wb.close()
 
-    def test_extra_currency_weekend_carry_forward(self):
-        """A GBP weekend row carries Friday's rate forward (rollback rule)."""
+    def test_extra_currency_weekend_stays_blank(self):
+        """A GBP weekend row keeps a blank rate — no carry-forward."""
         fri = date(2025, 3, 7)   # Friday
         sat = date(2025, 3, 8)   # Saturday
         merged = _merge_rate_data(
@@ -405,7 +384,7 @@ class TestExtraCurrencyColumns:
             {"GBP": {fri: Decimal("42.5000")}},
         )
         assert merged[fri]["extra:GBP"] == Decimal("42.5000")
-        assert merged[sat]["extra:GBP"] == Decimal("42.5000")
+        assert merged[sat]["extra:GBP"] is None
 
     def test_no_extra_currencies_keeps_six_column_layout(self):
         """Backward compat: omitting extra rates keeps the legacy 6 columns and

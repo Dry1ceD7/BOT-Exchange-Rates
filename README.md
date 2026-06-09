@@ -40,7 +40,7 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 |---------|-------------|
 | **Credential Hygiene** | Keychain-aware log redaction and Sentry event scrubber; new `--purge-credentials` CLI flag and uninstaller keyring purge hook remove stored tokens on demand. |
 | **Resilient API Client** | HTTP 5xx responses now retry with exponential backoff instead of failing the batch immediately. |
-| **Excel Write Integrity** | Weekend/holiday carry-forward capped at 10 days (fixes blank XLOOKUP cells), atomic saves via temp-file + `os.replace`, and custom date-range end (`dr_end`) honored. |
+| **Excel Write Integrity** | Weekend/holiday rows keep blank rate cells (only the Date + "Weekend"/holiday label — no fabricated rate), atomic saves via temp-file + `os.replace`, and custom date-range end (`dr_end`) honored. |
 | **Batch Robustness** | Batch processing continues past per-file API errors, honors `stop_event` cancellation mid-run, and auto-recovers from a corrupted `cache.db`. |
 | **Thai Date Correctness** | Buddhist-Era years auto-detected in `parse_date`; "today" resolved in Asia/Bangkok (UTC+7) regardless of PC timezone; audit-log retention policy added. |
 | **GUI Consistency** | Theme-token consistency pass, live-console line cap (memory bound), update-install progress surfacing, tray/banner features gated Windows-only. |
