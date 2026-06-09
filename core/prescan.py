@@ -94,9 +94,12 @@ def _scan_xlsx(filepath: str, target_col_name: str) -> date | None:
                     if parsed is not None and (oldest is None or parsed < oldest):
                         oldest = parsed
     except (
-        ValueError, TypeError, KeyError,
+        OSError, ValueError, TypeError, KeyError,
         openpyxl.utils.exceptions.InvalidFileException,
     ):
+        # OSError covers a locked/permission-denied .xlsx (e.g. open in Excel
+        # on the Windows target): skip that file rather than crash the whole
+        # headless/scheduled prescan — other queued files still scan.
         pass
     finally:
         if wb is not None:

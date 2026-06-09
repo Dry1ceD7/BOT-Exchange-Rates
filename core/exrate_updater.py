@@ -71,10 +71,7 @@ class WorkbookWriter:
         unsupported_currencies: list[str] | None = None,
         audit: AuditCollector | None = None,
     ) -> str:
-        try:
-            wb = openpyxl.load_workbook(filepath)
-        except (OSError, openpyxl.utils.exceptions.InvalidFileException):
-            raise
+        wb = openpyxl.load_workbook(filepath)
 
         # rate_type is snapshotted by process_ledger at the start of this
         # file's run and threaded through here, so a Settings "Save" mid-batch

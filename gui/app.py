@@ -1894,17 +1894,24 @@ class BOTExrateApp(ctk.CTk):
         Locks the same controls a manual run does and reflects the run in
         lbl_status so a desk-side user sees it and cannot collide with a manual
         Process/Revert/ExRate. Skip (log + return) when a batch is already
-        running (manual or a prior scheduled fire) OR when a manual revert is in
-        flight. The revert check is essential: start_revert spawns a RevertWorker
-        that never sets _batch_running, so without consulting _revert_running the
-        scheduler would spawn a BatchWorker that reads/writes the same .xlsx a
-        RevertWorker is restoring a backup over — two threads on one workbook (#3).
+        running (manual or a prior scheduled fire), when a manual revert is in
+        flight, OR when an ExRate build is running. The revert check is
+        essential: start_revert spawns a RevertWorker that never sets
+        _batch_running, so without consulting _revert_running the scheduler
+        would spawn a BatchWorker that reads/writes the same .xlsx a
+        RevertWorker is restoring a backup over — two threads on one workbook.
+        The ExRate check is the same hazard: an ExRateWorker writing the master
+        sheet must not race a scheduler-fired BatchWorker on the shared cache
+        and progress widgets (#3).
         """
         if self._batch_running:
             logger.info("Scheduled batch skipped — a batch is already running")
             return
         if self._revert_running:
             logger.info("Scheduled batch skipped — a manual revert is in progress")
+            return
+        if self._exrate_running:
+            logger.info("Scheduled batch skipped — an ExRate build is in progress")
             return
         self._lock_ui_for_batch()
         # Mark this run as scheduler-fired so the completion path knows to raise

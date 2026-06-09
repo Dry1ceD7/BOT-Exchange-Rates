@@ -53,9 +53,6 @@ class _HoverTooltip:
         widget.bind("<ButtonPress>", self._hide, add="+")
         widget.bind("<Destroy>", self._hide, add="+")
 
-    def set_text(self, text: str) -> None:
-        self._text = text
-
     def _schedule(self, _event=None):
         self._cancel()
         with contextlib.suppress(tkinter.TclError, RuntimeError):

@@ -126,3 +126,29 @@ class TestPrescanOldestDate:
         oldest, detected = prescan_oldest_date([str(f1), str(f2)])
         assert detected is True
         assert oldest == date(2025, 2, 15)
+
+    def test_unreadable_file_is_skipped_not_crashed(self, tmp_path):
+        """A locked/permission-denied .xlsx is skipped, not fatal.
+
+        Simulated with a directory at an .xlsx path: ``exists()`` is True but
+        ``open('rb')`` raises IsADirectoryError (an OSError), exactly like a
+        file held open by Excel on the Windows target. Before the OSError guard
+        this aborted the whole headless/scheduled prescan; now the bad file is
+        skipped and the readable ledger still yields its date.
+        """
+        bad = tmp_path / "locked.xlsx"
+        bad.mkdir()
+
+        good = tmp_path / "good.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Date", "Amount"])
+        ws.append([date(2025, 3, 3), 100])
+        wb.save(str(good))
+        wb.close()
+
+        # Bad file listed first so a regression (un-caught OSError) would abort
+        # before the good file is ever scanned.
+        oldest, detected = prescan_oldest_date([str(bad), str(good)])
+        assert detected is True
+        assert oldest == date(2025, 3, 3)

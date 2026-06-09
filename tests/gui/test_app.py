@@ -99,6 +99,7 @@ class TestScheduledRunFlag:
             _batch_running=False,
             _scheduled_run_active=False,
             _revert_running=False,
+            _exrate_running=False,
             btn_process=_btn(),
             btn_revert=_btn(),
             btn_export_exrate=_btn(),
@@ -158,6 +159,21 @@ class TestScheduledBatchHonorsRevert:
 
         # No UI lock, no run flag, and crucially no batch dispatched onto the
         # workbook the RevertWorker is restoring.
+        app._lock_ui_for_batch.assert_not_called()
+        app.batch_handler.start_batch.assert_not_called()
+        assert app._scheduled_run_active is False
+
+    def test_scheduled_batch_skipped_while_exrate_running(self):
+        from gui.app import BOTExrateApp
+
+        app = self._app()
+        app._exrate_running = True
+        app._lock_ui_for_batch = MagicMock()
+
+        BOTExrateApp._begin_scheduled_batch(app, ["x.xlsx"], "2026-01-01")
+
+        # An ExRateWorker is writing the master sheet + touching the shared
+        # cache/progress widgets; the scheduler must not dispatch a batch over it.
         app._lock_ui_for_batch.assert_not_called()
         app.batch_handler.start_batch.assert_not_called()
         assert app._scheduled_run_active is False

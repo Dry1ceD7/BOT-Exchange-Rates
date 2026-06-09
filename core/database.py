@@ -430,17 +430,6 @@ class CacheDB:
     #  EXPORT HELPERS
     # ================================================================== #
 
-    def get_all_rates(self) -> list:
-        """
-        Returns all cached rates as a list of tuples:
-        [(date_str, usd_buying, usd_selling, eur_buying, eur_selling), ...]
-        Ordered by date ascending. Used by csv_export.
-        """
-        return self._conn().execute(
-            "SELECT date, usd_buying, usd_selling, eur_buying, eur_selling "
-            "FROM rates ORDER BY date ASC"
-        ).fetchall()
-
     def get_all_multi_rates(self) -> list[tuple[str, str, str, Decimal | None]]:
         """
         Returns every multi-currency rate as a list of tuples:
