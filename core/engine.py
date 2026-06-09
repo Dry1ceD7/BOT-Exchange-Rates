@@ -304,6 +304,18 @@ class LedgerEngine:
         )
         self._anomaly_guard = AnomalyGuard(threshold_pct=threshold)
         self._rate_type = _settings.get("rate_type", "buying_transfer")
+        # Only Buying TT and Selling are fetched/stored for USD/EUR (the ExRate
+        # master sheet has just those columns). Any other persisted value — e.g.
+        # a legacy "buying_sight"/"mid_rate" from an older build — is normalized
+        # to buying_transfer here so it can never silently resolve to the wrong
+        # column downstream in inject_xlookup_formulas.
+        if self._rate_type not in ("buying_transfer", "selling"):
+            logger.warning(
+                "Unsupported ledger rate_type %r; using 'buying_transfer'. "
+                "Only 'buying_transfer' and 'selling' are available.",
+                self._rate_type,
+            )
+            self._rate_type = "buying_transfer"
         self._last_anomaly_count = 0
         self._last_batch_anomaly_count = 0
         # Path to the audit CSV written by the most recent process_batch run

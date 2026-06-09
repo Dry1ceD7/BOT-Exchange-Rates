@@ -1325,6 +1325,39 @@ class TestSettingsSnapshotContract:
         # Exactly one settings read happened at construction time.
         assert len(loads) == 1
 
+    def test_unsupported_rate_type_coerced_to_buying_transfer(
+        self, mock_api, tmp_cache, monkeypatch
+    ):
+        """A legacy/unsupported rate_type normalizes to buying_transfer.
+
+        Only buying_transfer and selling are fetched/stored for USD/EUR (the
+        ExRate sheet has just those columns). A persisted 'buying_sight' or
+        'mid_rate' from an older build must NOT silently resolve to the Buying
+        TT column — it is explicitly coerced at construction so the behavior is
+        honest rather than a silent fallback.
+        """
+        for legacy in ("buying_sight", "mid_rate", "nonsense"):
+            class _FakeSettings:
+                def load(self, _v=legacy):
+                    return {"rate_type": _v, "anomaly_threshold_pct": 5.0}
+
+            monkeypatch.setattr(engine_mod, "SettingsManager", _FakeSettings)
+            eng = LedgerEngine(mock_api, cache=tmp_cache, backup=MagicMock())
+            assert eng._rate_type == "buying_transfer"
+
+    def test_supported_rate_types_pass_through(
+        self, mock_api, tmp_cache, monkeypatch
+    ):
+        """buying_transfer and selling are preserved unchanged."""
+        for supported in ("buying_transfer", "selling"):
+            class _FakeSettings:
+                def load(self, _v=supported):
+                    return {"rate_type": _v, "anomaly_threshold_pct": 5.0}
+
+            monkeypatch.setattr(engine_mod, "SettingsManager", _FakeSettings)
+            eng = LedgerEngine(mock_api, cache=tmp_cache, backup=MagicMock())
+            assert eng._rate_type == supported
+
     def test_process_ledger_uses_snapshot_not_live_settings(
         self, mock_api, tmp_cache, sample_xlsx, monkeypatch
     ):

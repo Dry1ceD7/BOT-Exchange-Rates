@@ -226,7 +226,9 @@ def inject_xlookup_formulas(
         usd_col = "C"
         eur_col = "E"
     else:
-        # "buying_transfer", "buying_sight", "mid_rate" → buying columns
+        # "buying_transfer" → USD/EUR Buying TT columns. The ledger rate_type
+        # is restricted to buying_transfer/selling and normalized upstream in
+        # engine, so no other value reaches here.
         usd_col = "B"
         eur_col = "D"
 

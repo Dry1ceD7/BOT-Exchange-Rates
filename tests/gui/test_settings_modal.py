@@ -175,17 +175,17 @@ class TestAppearanceSegmentedButton:
 class TestRateTypeSegmentedButton:
     """Rate type control maps labels to internal API field names."""
 
-    def test_rate_type_map_contains_all_four_entries(self, tk_root):
+    def test_rate_type_map_contains_buying_tt_and_selling(self, tk_root):
+        # Only Buying TT and Selling are offered — Buying Sight / Mid Rate have
+        # no ExRate column and were removed to avoid silently writing Buying TT.
         modal, _ = _make_modal(tk_root)
-        expected_labels = {"Buying TT", "Selling", "Buying Sight", "Mid Rate"}
+        expected_labels = {"Buying TT", "Selling"}
         assert set(modal._rate_type_map.keys()) == expected_labels
         modal.destroy()
 
     def test_rate_type_map_values_are_api_field_names(self, tk_root):
         modal, _ = _make_modal(tk_root)
-        expected_values = {
-            "buying_transfer", "selling", "buying_sight", "mid_rate"
-        }
+        expected_values = {"buying_transfer", "selling"}
         assert set(modal._rate_type_map.values()) == expected_values
         modal.destroy()
 
@@ -199,9 +199,10 @@ class TestRateTypeSegmentedButton:
         assert modal._rate_type_var.get() == "Selling"
         modal.destroy()
 
-    def test_rate_type_default_mid_rate(self, tk_root):
+    def test_rate_type_legacy_value_defaults_to_buying_tt(self, tk_root):
+        # A persisted legacy rate_type (no longer offered) shows Buying TT.
         modal, _ = _make_modal(tk_root, settings={"rate_type": "mid_rate"})
-        assert modal._rate_type_var.get() == "Mid Rate"
+        assert modal._rate_type_var.get() == "Buying TT"
         modal.destroy()
 
     def test_rate_type_reverse_map_is_inverse_of_forward(self, tk_root):
@@ -372,10 +373,10 @@ class TestSaveAndClose:
 
     def test_save_persists_rate_type_api_field(self, tk_root):
         modal, mock_mgr = _make_modal(tk_root)
-        modal._rate_type_var.set("Mid Rate")
+        modal._rate_type_var.set("Selling")
         modal._save_and_close()
         saved = mock_mgr.save.call_args[0][0]
-        assert saved["rate_type"] == "mid_rate"
+        assert saved["rate_type"] == "selling"
 
     def test_save_persists_buying_tt(self, tk_root):
         modal, mock_mgr = _make_modal(tk_root)
@@ -384,12 +385,14 @@ class TestSaveAndClose:
         saved = mock_mgr.save.call_args[0][0]
         assert saved["rate_type"] == "buying_transfer"
 
-    def test_save_persists_buying_sight(self, tk_root):
+    def test_save_unknown_label_defaults_to_buying_transfer(self, tk_root):
+        # Removed options can't be selected; an unmapped label (defensive)
+        # falls back to buying_transfer rather than persisting a bad value.
         modal, mock_mgr = _make_modal(tk_root)
         modal._rate_type_var.set("Buying Sight")
         modal._save_and_close()
         saved = mock_mgr.save.call_args[0][0]
-        assert saved["rate_type"] == "buying_sight"
+        assert saved["rate_type"] == "buying_transfer"
 
     def test_save_calls_mgr_save_once(self, tk_root):
         modal, mock_mgr = _make_modal(tk_root)

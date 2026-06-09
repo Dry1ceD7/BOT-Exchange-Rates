@@ -10,9 +10,11 @@ Composes: CSVPanel (csv_panel.py) + VersionPanel (version_panel.py).
 SFFB: Strict < 200 lines.  (Previously 731 → now ~130)
 """
 
+import contextlib
 import logging
 import platform
 import subprocess
+import tkinter
 from pathlib import Path
 
 import customtkinter as ctk
@@ -76,6 +78,12 @@ class SettingsModal(ctk.CTkToplevel):
 
     def __init__(self, master, config_dir: str | None = None, **kwargs):
         super().__init__(master, **kwargs)
+
+        # Keep the modal above its owner in the window stack (and iconified/
+        # raised with it) — mirrors every other dialog in the app. Pure WM
+        # hint; guarded because some platforms raise if master isn't mapped.
+        with contextlib.suppress(RuntimeError, tkinter.TclError):
+            self.transient(master)
 
         t = get_theme()
 
@@ -213,11 +221,13 @@ class SettingsModal(ctk.CTkToplevel):
             text_color=t["modal_muted"],
         ).pack(anchor="w", padx=30)
 
+        # Only Buying TT and Selling are fetched/stored for USD/EUR — the
+        # ExRate master sheet has exactly those columns. (Buying Sight / Mid
+        # Rate are published by BOT but have no column here, so offering them
+        # would silently write the Buying TT value. Removed.)
         self._rate_type_map = {
             "Buying TT": "buying_transfer",
             "Selling": "selling",
-            "Buying Sight": "buying_sight",
-            "Mid Rate": "mid_rate",
         }
         self._rate_type_reverse = {v: k for k, v in self._rate_type_map.items()}
 
@@ -228,7 +238,7 @@ class SettingsModal(ctk.CTkToplevel):
         self._rate_type_var = ctk.StringVar(value=current_label)
         ctk.CTkSegmentedButton(
             self.body,
-            values=["Buying TT", "Selling", "Buying Sight", "Mid Rate"],
+            values=["Buying TT", "Selling"],
             variable=self._rate_type_var,
             font=ctk.CTkFont(size=12),
         ).pack(padx=30, pady=(4, 16), fill="x")

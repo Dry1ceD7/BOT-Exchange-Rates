@@ -26,8 +26,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "language": "en",
     "auto_update": True,
     "api_timeout_seconds": 10,
-    # v3.1.0: Rate type for formula injection (buying_transfer, selling,
-    #          buying_sight, mid_rate)
+    # Rate type for ledger formula injection. USD/EUR (and extra currencies)
+    # support buying_transfer ("Buying TT") and selling only — those are the
+    # rates fetched/stored and the only ExRate columns that exist.
     "rate_type": "buying_transfer",
     # v3.1.0: Anomaly guardian threshold (±percentage)
     "anomaly_threshold_pct": 5.0,
