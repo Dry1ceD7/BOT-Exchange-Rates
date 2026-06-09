@@ -203,8 +203,12 @@ def _show_report_dialog(app, report, csv_path: str | None) -> None:
 
     if report.applied and report.backup_path and report.changes:
         def _revert() -> None:
+            # Restore the EXACT pre-correction backup we captured, not merely
+            # the latest — a batch could have snapshotted the file since.
             with contextlib.suppress(Exception):
-                app.batch_handler.start_revert(report.file)
+                app.batch_handler.start_revert(
+                    report.file, backup_path=report.backup_path,
+                )
             with contextlib.suppress(Exception):
                 dlg.destroy()
 

@@ -34,7 +34,7 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 
 from core.audit_logger import AuditLogger
-from core.constants import MIN_DISK_SPACE_MB, bot_today
+from core.constants import MIN_DISK_SPACE_MB
 from core.constants import parse_date as _parse_date
 from core.logic import safe_to_decimal
 from core.workbook_io import atomic_save, ensure_disk_space
@@ -136,19 +136,29 @@ def scan_exrate_corrections(
 
         for col, label, ccy, rate_type in EXRATE_RATE_COLUMNS:
             bot_val = bot_rates.get(rate_key(ccy, rate_type), {}).get(rate_date)
-            old_val = safe_to_decimal(ws.cell(row=row, column=col).value)
+            raw = ws.cell(row=row, column=col).value
+            old_val = safe_to_decimal(raw)
+            # A non-empty cell we cannot parse (e.g. a stray formula string) is
+            # neither a blank to fill nor a value we can verify — leave it.
+            unparseable = old_val is None and raw not in (None, "")
 
             if bot_val is None:
                 # No authoritative value to compare against — cannot verify.
-                if old_val is not None:
+                if raw not in (None, ""):
                     report.unverifiable += 1
                 continue
 
-            bot_q = (
-                bot_val if isinstance(bot_val, Decimal)
-                else safe_to_decimal(bot_val)
-            )
+            # Quantize the BOT value to 4dp through the SAME helper as every
+            # other rate write: the cache path can hand back an unquantized
+            # Decimal(str(float)), and a >4dp value must never reach a cell
+            # (the "exact 4dp Decimal" invariant). safe_to_decimal accepts a
+            # Decimal and re-quantizes it.
+            bot_q = safe_to_decimal(bot_val)
             if bot_q is None:
+                continue
+
+            if unparseable:
+                report.unverifiable += 1
                 continue
 
             report.compared_cells += 1
@@ -213,11 +223,12 @@ def write_audit_csv(report: RateAuditReport) -> str:
                 rate_source="Rate Audit (BOT re-verify)",
             )
         return audit.finalize()
-    finally:
-        # finalize() is idempotent; guard against a mid-loop error leaking the
-        # handle (atexit is the last-resort net, but close deterministically).
+    except Exception:
+        # Close the handle on the error path (finalize is idempotent), then
+        # re-raise — the caller treats a failed CSV write as non-fatal.
         with contextlib.suppress(Exception):
             audit.finalize()
+        raise
 
 
 class StandaloneRateAuditor:
@@ -268,7 +279,11 @@ class StandaloneRateAuditor:
         _status("Fetching BOT rates for verification...")
         target_year = min(existing_dates).year
         start_str = f"{target_year - 1}-12-20"
-        all_target_dates = existing_dates | {bot_today()}
+        # Audit only verifies dates already in the sheet, so bound the BOT
+        # fetch to the sheet's own span. Do NOT inject bot_today() (the
+        # standard build does, to extend to today): for an old archived ledger
+        # that would pull years of unrelated rates on the 4GB target.
+        all_target_dates = set(existing_dates)
         (
             logic_engine, usd_selling, eur_selling,
             usd_buying, eur_buying, _usd_data, _eur_data,

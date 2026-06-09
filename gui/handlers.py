@@ -188,12 +188,18 @@ class BatchHandler:
             except RuntimeError:
                 logger.debug("App already destroyed during completion callback")
 
-    def start_revert(self, filepath: str):
-        """Launch the revert operation in a background thread."""
+    def start_revert(self, filepath: str, backup_path: str | None = None):
+        """Launch the revert operation in a background thread.
+
+        When ``backup_path`` is supplied, that EXACT backup is restored — the
+        Rate Audit dialog passes the pre-correction snapshot it captured so
+        Revert always rolls back to the pre-audit state, even if a newer backup
+        of the same file was created meanwhile. Otherwise the latest backup is
+        restored (the manual-revert default)."""
         self.bus.push({"type": "log", "msg": f"Reverting: {Path(filepath).name}..."})
         thread = threading.Thread(
             target=self._revert_thread,
-            args=(filepath,),
+            args=(filepath, backup_path),
             daemon=True,
             name="RevertWorker",
         )
@@ -201,12 +207,15 @@ class BatchHandler:
             self.registry.register(thread, name="RevertWorker")
         thread.start()
 
-    def _revert_thread(self, filepath: str):
+    def _revert_thread(self, filepath: str, backup_path: str | None = None):
         """Thread target for the revert operation."""
         from core.backup_manager import BackupError, BackupManager
         try:
             backup_mgr = BackupManager()
-            backup_used = backup_mgr.restore_latest(filepath)
+            if backup_path:
+                backup_used = backup_mgr.restore_specific(filepath, backup_path)
+            else:
+                backup_used = backup_mgr.restore_latest(filepath)
             backup_name = Path(backup_used).name
             self.bus.push({"type": "success", "msg": f"Reverted from: {backup_name}"})
             try:

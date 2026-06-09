@@ -129,6 +129,40 @@ class TestScanCorrections:
         assert report.change_count == 0
         wb.close()
 
+    def test_bot_value_over_4dp_does_not_false_flag_correct_cell(self):
+        # A >4dp BOT value must be quantized to 4dp before comparing, so an
+        # already-correct 4dp cell is NOT spuriously flagged by extra digits.
+        d = date(2026, 5, 27)
+        wb, ws = _sheet([(d, D("32.4507"), None, None, None, "")])
+        bot = _bot(USD_buy={d: D("32.45071")})  # 5dp → 32.4507 at 4dp
+        report = scan_exrate_corrections(ws, bot, set())
+        assert report.change_count == 0
+        wb.close()
+
+    def test_correction_value_is_always_4dp(self):
+        # When a correction IS written, the new value is quantized to exactly
+        # 4dp — a >4dp BOT/cache value must never reach the rate cell.
+        d = date(2026, 5, 27)
+        wb, ws = _sheet([(d, D("99.0000"), None, None, None, "")])
+        bot = _bot(USD_buy={d: D("32.45079")})  # 5dp → 32.4508 at 4dp
+        report = scan_exrate_corrections(ws, bot, set())
+        assert report.change_count == 1
+        nv = report.changes[0].new_value
+        assert nv == D("32.4508")
+        assert nv.as_tuple().exponent == -4  # exactly 4dp, never 5
+        wb.close()
+
+    def test_unparseable_nonempty_cell_is_not_overwritten(self):
+        # A formula/garbage string in a rate cell is unverifiable — NOT a blank
+        # to fill. The auditor must leave it untouched (no silent overwrite).
+        d = date(2026, 5, 27)
+        wb, ws = _sheet([(d, "=B1*2", None, None, None, "")])
+        bot = _bot(USD_buy={d: D("32.4507")})
+        report = scan_exrate_corrections(ws, bot, set())
+        assert report.change_count == 0
+        assert report.unverifiable >= 1
+        wb.close()
+
     def test_multiple_currencies_and_types(self):
         d = date(2026, 5, 27)
         wb, ws = _sheet([(d, D("1.0"), D("2.0"), D("3.0"), D("4.0"), "")])
