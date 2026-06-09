@@ -4,11 +4,11 @@
 
 **Enterprise Desktop Application for Bank of Thailand Exchange Rate Automation**
 
-Version 3.5.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
+Version 3.5.1  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-1173%20Passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-1347%20Passed-brightgreen)](tests/)
 
 ---
 
@@ -19,6 +19,15 @@ Version 3.5.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Rele
 The **BOT Exchange Rate Processor** is a standalone desktop application that automates the extraction, resolution, and embedding of official Bank of Thailand (BOT) exchange rates into financial accounting ledgers (`.xlsx`).
 
 It replaces a fragmented, error-prone multi-script workflow with a single, production-grade GUI application — built for **zero-downtime corporate environments**, legacy office hardware (4GB RAM, low-resolution monitors), and strict Thai accounting compliance.
+
+### What's New in V3.5.1 (Weekend/Holiday Correctness, Rate-Type Fix, Rate Audit)
+
+| Feature | Description |
+|---------|-------------|
+| **Weekend/Holiday rates blank (v3.2.8 restored)** | The ExRate master sheet no longer carries a prior trading-day rate forward into weekend/holiday rows — those rows keep only the Date and the "Weekend"/holiday label. No fabricated rate on non-trading days. |
+| **Ledger rate type corrected** | The rate-type selector is restricted to the two BOT rates actually fetched/stored for USD/EUR — **Buying TT** and **Selling**. "Buying Sight" / "Mid Rate" (which silently wrote Buying TT) were removed; a legacy/unsupported saved value is normalized to Buying TT with a warning. |
+| **Rate Audit (new)** | A **Verify Rates** button re-checks an existing workbook's ExRate values against the **live BOT API** and corrects any differing trading-day cell to the exact 4dp value (file backed up first). A report dialog lists every change — date, cell, old → new, and why — with a **Revert** button. Weekend/holiday rows are never touched. |
+| **Hardening** | The scheduler can no longer collide with an in-flight ExRate run; a locked `.xlsx` no longer crashes the headless/scheduled prescan; dead code removed; the Settings modal stays above its owner. Added an opt-in live BOT API smoke test (`BOT_LIVE_TEST=1`). |
 
 ### What's New in V3.5.0 (Behavior Audit — 58 Findings Resolved, Thai UI, Backup Browser)
 
@@ -375,6 +384,6 @@ See [LICENSE](LICENSE) for the full terms.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.5.0*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.5.1*
 
 </div>
