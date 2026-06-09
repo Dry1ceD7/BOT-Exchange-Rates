@@ -5,12 +5,12 @@ customtkinter==5.2.2
 openpyxl==3.1.5
 httpx==0.28.1
 tenacity==9.1.4
-pydantic==2.12.5
+pydantic==2.13.4
 python-dotenv==1.2.2
 tkinterdnd2-universal==1.7.3
-packaging==26.0
+packaging==26.2
 keyring==25.7.0
-sentry-sdk==2.57.0
+sentry-sdk==2.62.0
 # pystray's Windows backend depends on pywin32; keep it explicit, win32-only.
 pywin32>=306 ; sys_platform == 'win32'
 pystray>=0.19.5 ; sys_platform == 'win32'
