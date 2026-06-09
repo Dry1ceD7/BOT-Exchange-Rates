@@ -633,6 +633,17 @@ class BOTExrateApp(ctk.CTk):
         )
         self.btn_export_exrate.pack(side="left")
 
+        # Verify an existing workbook's ExRate rates against BOT and correct
+        # any differing trading-day cells (file backed up first; revertable).
+        self.btn_verify_rates = ctk.CTkButton(
+            secondary_row, text="Verify Rates",
+            height=42, width=150,
+            fg_color=t["btn_secondary"], hover_color=t["btn_secondary_hover"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            corner_radius=10, command=self._open_rate_audit,
+        )
+        self.btn_verify_rates.pack(side="left", padx=(10, 0))
+
         # Revert starts disabled — there is nothing to revert until at least one
         # file with a backup exists. _refresh_revert_state re-evaluates it from
         # the available backups so the button is greyed when it would be a
@@ -1569,6 +1580,38 @@ class BOTExrateApp(ctk.CTk):
             state="normal" if self.file_queue else "disabled"
         )
         # Revert/Backups only when a backup actually exists (#6).
+        self._refresh_revert_state()
+
+    # ================================================================== #
+    #  RATE AUDIT — delegated to gui/panels/rate_audit_dialog.py
+    # ================================================================== #
+    def _open_rate_audit(self):
+        """Verify an existing workbook's ExRate rates against BOT and correct
+        any differing trading-day cell. Shares the ExRate concurrency guard so
+        it can never collide with a batch, a revert, or an ExRate build; the
+        worker (or a file-picker cancel) clears ``_exrate_running``."""
+        if self._batch_running or self._revert_running or self._exrate_running:
+            self._flash_busy_status()
+            return
+        self._exrate_running = True
+        self.btn_process.configure(state="disabled")
+        self.btn_revert.configure(state="disabled")
+        from gui.panels.rate_audit_dialog import show_rate_audit_dialog
+        show_rate_audit_dialog(self)
+        self._poll_rate_audit_done()
+
+    def _poll_rate_audit_done(self):
+        """Release the Process/Revert lock once the rate-audit flow finishes.
+
+        The worker clears ``_exrate_running`` on success/error and the file
+        picker clears it on cancel; until then we re-check via after() without
+        blocking Tk (mirrors _poll_exrate_done, keyed on the flag)."""
+        if self._exrate_running:
+            self.after(150, self._poll_rate_audit_done)
+            return
+        self.btn_process.configure(
+            state="normal" if self.file_queue else "disabled"
+        )
         self._refresh_revert_state()
 
     # ================================================================== #

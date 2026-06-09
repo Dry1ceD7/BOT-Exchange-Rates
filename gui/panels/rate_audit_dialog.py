@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""
+gui/panels/rate_audit_dialog.py
+---------------------------------------------------------------------------
+BOT Exchange Rate Processor — Rate Audit (verify old data against BOT)
+---------------------------------------------------------------------------
+Lets the operator pick an existing workbook, re-verify the hard USD/EUR rate
+values in its "ExRate" master sheet against the live Bank of Thailand values,
+and auto-correct any differing trading-day cell (the file is backed up first).
+A report dialog then lists every change — date, cell, currency, old → new, and
+why — with a Revert button that restores the pre-correction backup.
+
+Weekend/holiday rows are never touched (they are blank by design); the scan +
+correction logic lives in core/rate_audit.py. This module is only the UI + the
+background worker that drives it without blocking Tk.
+"""
+import asyncio
+import contextlib
+import logging
+import threading
+from pathlib import Path
+from tkinter import filedialog
+
+import customtkinter as ctk
+
+from core.rate_audit import write_audit_csv
+from gui.theme import get_theme
+
+logger = logging.getLogger(__name__)
+
+
+def show_rate_audit_dialog(app) -> None:
+    """Entry point: pick a workbook, then run the audit in the background.
+
+    Called by app._open_rate_audit, which has already set ``_exrate_running``
+    and disabled the sibling Process/Revert buttons. If the user cancels the
+    file picker, release that lock immediately so the UI is not left stuck.
+    """
+    filepath = filedialog.askopenfilename(
+        title="Verify a workbook's ExRate rates against BOT",
+        filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")],
+    )
+    if not filepath:
+        app._exrate_running = False  # nothing spawned — release the guard
+        return
+    _launch_worker(app, filepath)
+
+
+def _set_status(app, text: str, color: str | None = None) -> None:
+    t = get_theme()
+    if hasattr(app, "lbl_status"):
+        with contextlib.suppress(Exception):
+            app.lbl_status.configure(
+                text=text, text_color=color or t["text_secondary"]
+            )
+
+
+def _launch_worker(app, filepath: str) -> None:
+    """Run StandaloneRateAuditor on ``filepath`` in a daemon worker thread."""
+    t = get_theme()
+    event_bus = getattr(app, "event_bus", None)
+
+    def _status_cb(msg: str) -> None:
+        with contextlib.suppress(RuntimeError):
+            app.after(0, _set_status, app, f"Rate audit: {msg}")
+
+    def _done_ok(report, csv_path) -> None:
+        app._exrate_running = False
+        n = report.change_count
+        _set_status(
+            app,
+            f"Rate audit: applied {n} correction(s)"
+            if n else "Rate audit: all rates already match BOT",
+            t["process_text"] if n else t["text_secondary"],
+        )
+        with contextlib.suppress(Exception):
+            _show_report_dialog(app, report, csv_path)
+
+    def _done_err(msg: str) -> None:
+        app._exrate_running = False
+        _set_status(app, f"Rate audit failed: {msg}", t["warning"])
+
+    def _worker() -> None:
+        import httpx
+
+        from core.api_client import CLIENT_TIMEOUT, BOTClient
+        from core.engine import LedgerEngine
+        from core.rate_audit import StandaloneRateAuditor
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            async def _run():
+                async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT) as client:
+                    api = BOTClient(client)
+                    engine = LedgerEngine(api, event_bus=event_bus)
+                    return await StandaloneRateAuditor(engine).run(
+                        filepath, apply=True, status_cb=_status_cb,
+                    )
+
+            report = loop.run_until_complete(_run())
+            csv_path = None
+            with contextlib.suppress(Exception):
+                csv_path = write_audit_csv(report)
+            with contextlib.suppress(RuntimeError):
+                app.after(0, _done_ok, report, csv_path)
+        except Exception as e:  # noqa: BLE001 — surfaced to the user via _done_err
+            logger.exception("Rate audit worker failed")
+            with contextlib.suppress(RuntimeError):
+                app.after(0, _done_err, str(e))
+        finally:
+            with contextlib.suppress(Exception):
+                loop.close()
+            if hasattr(app, "thread_registry"):
+                with contextlib.suppress(Exception):
+                    app.thread_registry.unregister("RateAuditWorker")
+
+    worker = threading.Thread(
+        target=_worker, daemon=True, name="RateAuditWorker"
+    )
+    if hasattr(app, "_register_worker"):
+        with contextlib.suppress(Exception):
+            app._register_worker(worker, "RateAuditWorker")
+    _set_status(app, "Rate audit: starting…", t["text_secondary"])
+    worker.start()
+
+
+def _show_report_dialog(app, report, csv_path: str | None) -> None:
+    """Modal report listing every correction (date, cell, old → new, why)."""
+    t = get_theme()
+    dlg = ctk.CTkToplevel(app)
+    dlg.title("Rate Audit Report")
+    dlg.geometry("720x480")
+    with contextlib.suppress(Exception):
+        dlg.transient(app)
+    with contextlib.suppress(Exception):
+        dlg.grab_set()
+    with contextlib.suppress(Exception):
+        dlg.configure(fg_color=t["modal_bg"])
+
+    fname = Path(report.file).name if report.file else "(workbook)"
+    n = report.change_count
+    if report.applied and n:
+        head = f"Corrected {n} rate(s) in {fname}"
+    elif n:
+        head = f"{n} difference(s) found in {fname}"
+    else:
+        head = f"All rates already match BOT — {fname}"
+    ctk.CTkLabel(
+        dlg, text=head, font=ctk.CTkFont(size=16, weight="bold"),
+        text_color=t["modal_text"], wraplength=680,
+    ).pack(pady=(16, 4), padx=16)
+
+    sub = (
+        f"Scanned {report.scanned_rows} trading-day row(s); "
+        f"compared {report.compared_cells} cell(s)."
+    )
+    if report.unverifiable:
+        sub += f"  {report.unverifiable} cell(s) had no BOT data to verify."
+    ctk.CTkLabel(
+        dlg, text=sub, font=ctk.CTkFont(size=11), text_color=t["modal_muted"],
+        wraplength=680,
+    ).pack(padx=16)
+
+    body = ctk.CTkScrollableFrame(dlg, fg_color="transparent")
+    body.pack(fill="both", expand=True, padx=16, pady=12)
+
+    if report.changes:
+        hdr_font = ctk.CTkFont(size=11, weight="bold")
+        cell_font = ctk.CTkFont(size=11)
+        headers = ("Date", "Cell", "Currency / Type", "Old", "New", "Why")
+        for col, label in enumerate(headers):
+            ctk.CTkLabel(
+                body, text=label, font=hdr_font, text_color=t["modal_muted"],
+                anchor="w",
+            ).grid(row=0, column=col, sticky="w", padx=6, pady=(0, 6))
+        for r, ch in enumerate(report.changes, start=1):
+            values = (
+                ch.rate_date.strftime("%Y-%m-%d"),
+                ch.cell,
+                f"{ch.currency} {ch.rate_type}",
+                "(blank)" if ch.old_value is None else str(ch.old_value),
+                str(ch.new_value),
+                ch.reason,
+            )
+            for col, val in enumerate(values):
+                ctk.CTkLabel(
+                    body, text=val, font=cell_font, text_color=t["modal_text"],
+                    anchor="w", justify="left",
+                    wraplength=240 if col == 5 else 0,
+                ).grid(row=r, column=col, sticky="w", padx=6, pady=2)
+    else:
+        ctk.CTkLabel(
+            body,
+            text="No corrections were needed — every trading-day rate "
+                 "already matched the official BOT value.",
+            font=ctk.CTkFont(size=12), text_color=t["modal_text"],
+            wraplength=640,
+        ).pack(pady=24)
+
+    btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
+    btn_row.pack(fill="x", padx=16, pady=(0, 14))
+
+    if report.applied and report.backup_path and report.changes:
+        def _revert() -> None:
+            with contextlib.suppress(Exception):
+                app.batch_handler.start_revert(report.file)
+            with contextlib.suppress(Exception):
+                dlg.destroy()
+
+        ctk.CTkButton(
+            btn_row, text="Revert these changes",
+            fg_color=t["warning"],
+            hover_color=t.get("warning_hover", t["warning"]),
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=_revert,
+        ).pack(side="left")
+
+    if csv_path:
+        ctk.CTkLabel(
+            btn_row, text=f"CSV: {Path(csv_path).name}",
+            font=ctk.CTkFont(size=10), text_color=t["modal_muted"],
+        ).pack(side="left", padx=12)
+
+    ctk.CTkButton(
+        btn_row, text="Close", command=dlg.destroy,
+    ).pack(side="right")
