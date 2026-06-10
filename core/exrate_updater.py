@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import openpyxl
+from openpyxl.utils import column_index_from_string
 
 from core.audit_logger import AuditCollector, AuditRecord
 from core.constants import BACKUP_MAX_AGE_DAYS, MIN_DISK_SPACE_MB, bot_today
@@ -41,9 +42,62 @@ from core.logic import (
     safe_to_decimal,
 )
 from core.workbook_io import atomic_save as _atomic_save
-from core.workbook_io import ensure_disk_space
+from core.workbook_io import build_cell_verifier, ensure_disk_space
 
 logger = logging.getLogger(__name__)
+
+
+def _snapshot_cells(
+    ws, cols, start_row: int = 2,
+) -> dict[int, dict[int, object]]:
+    """Snapshot the in-memory values of ``cols`` (1-based) for every data row.
+
+    The result feeds ``core.workbook_io.build_cell_verifier``: after the
+    save, the TEMP file is reopened and each snapshotted cell must round-trip
+    to exactly this value (Decimal-string equality for numbers, blank for
+    None) BEFORE the temp replaces the original — the Layer-1 exactness gate.
+    """
+    rows: dict[int, dict[int, object]] = {}
+    for row_idx in range(start_row, (ws.max_row or 0) + 1):
+        rows[row_idx] = {
+            col: ws.cell(row=row_idx, column=col).value for col in cols
+        }
+    return rows
+
+
+def _collect_ledger_expectations(
+    wb, sheet_maps: dict, exrate_col_map: dict[str, str] | None,
+) -> dict[str, dict[int, dict[int, object]]]:
+    """Expected post-save cell values for everything THIS RUN wrote.
+
+    - ExRate sheet: every rate cell (fixed B-E plus appended extra-currency
+      columns). update_master_exrate_sheet rebuilds ALL data rows in one
+      shot (delete_rows + rewrite), so the whole range is this run's output;
+      blank weekend/holiday cells are asserted blank.
+    - Monthly tabs: every EX Rate cell now holding a formula string — the
+      IFS formula injected (or confirmed identical) this run must round-trip
+      verbatim. ExRate is in SKIP_SHEET_NAMES, so sheet_maps never collides
+      with the ExRate entry above.
+    """
+    expected: dict[str, dict[int, dict[int, object]]] = {}
+    if "ExRate" in wb.sheetnames:
+        rate_cols = [2, 3, 4, 5] + [
+            column_index_from_string(letter)
+            for letter in (exrate_col_map or {}).values()
+        ]
+        expected["ExRate"] = _snapshot_cells(wb["ExRate"], rate_cols)
+    for sheet_name, mapping in sheet_maps.items():
+        out_idx = mapping["columns"].get("out_rate")
+        if out_idx is None:
+            continue
+        out_col = out_idx + 1
+        ws = wb[sheet_name]
+        rows = expected.setdefault(sheet_name, {})
+        for row_idx in range(mapping["header_row"] + 1, ws.max_row + 1):
+            value = ws.cell(row=row_idx, column=out_col).value
+            if isinstance(value, str) and value.startswith("="):
+                rows.setdefault(row_idx, {})[out_col] = value
+    return expected
 
 
 def _is_macro_workbook(filepath) -> bool:
@@ -188,7 +242,16 @@ class WorkbookWriter:
             else:
                 # ERR-03: Check disk space before saving
                 ensure_disk_space(Path(filepath).parent, MIN_DISK_SPACE_MB)
-                _atomic_save(wb, filepath)
+                # Layer-1 hard gate (F50/F63/F72): reopen the saved TEMP and
+                # prove every cell this run wrote round-trips exactly (rates
+                # as 4dp Decimals, formulas verbatim) BEFORE it replaces the
+                # original. A mismatch aborts the swap — file untouched.
+                expected = _collect_ledger_expectations(
+                    wb, sheet_maps, exrate_col_map
+                )
+                _atomic_save(
+                    wb, filepath, verify=build_cell_verifier(expected)
+                )
                 logger.info(
                     "Overwritten in-place: %s",
                     Path(filepath).name,
@@ -553,7 +616,15 @@ class StandaloneExRateUpdater:
                 )
                 # ERR-03: Check disk space before saving
                 ensure_disk_space(Path(filepath).parent, MIN_DISK_SPACE_MB)
-                _atomic_save(wb, filepath)
+                # Layer-1 hard gate: every rebuilt ExRate rate cell (B-E)
+                # must round-trip from the TEMP file before it replaces the
+                # original — a mismatch leaves the user's file untouched.
+                expected = {
+                    "ExRate": _snapshot_cells(wb["ExRate"], (2, 3, 4, 5))
+                }
+                _atomic_save(
+                    wb, filepath, verify=build_cell_verifier(expected)
+                )
                 _status(f"✓ ExRate updated: {Path(filepath).name}")
                 return filepath
             finally:
@@ -649,7 +720,15 @@ class StandaloneExRateUpdater:
 
             # ERR-03: Check disk space before saving
             ensure_disk_space(Path(filepath).parent, MIN_DISK_SPACE_MB)
-            _atomic_save(wb, filepath)
+            # Layer-1 hard gate: every custom-layout rate cell written above
+            # (one column per (ccy, rate_type) spec) must round-trip from
+            # the TEMP file before it replaces the original.
+            expected = {
+                "ExRate": _snapshot_cells(
+                    ws, tuple(range(2, 2 + len(col_specs)))
+                )
+            }
+            _atomic_save(wb, filepath, verify=build_cell_verifier(expected))
             _status(f"✓ ExRate created: {Path(filepath).name}")
             return filepath
         finally:

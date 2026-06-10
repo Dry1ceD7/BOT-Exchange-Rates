@@ -782,6 +782,40 @@ def _run_worker_sync(monkeypatch, fake_engine_factory):
     return exrate_dialog
 
 
+def _write_engine_workbook(filepath, marker="FILLED-EXRATE"):
+    """Write a minimal REAL ExRate workbook with a marker cell.
+
+    The success path now read-back-verifies dest (structure: ExRate sheet +
+    populated row 2), so success-path fakes must produce a real workbook —
+    raw byte markers would fail verification. The C2 marker still proves the
+    temp was moved into place (not a blank save).
+    """
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "ExRate"
+    ws.append(["Date", "USD Buying TT Rate", "Marker"])
+    ws.append([date(2026, 1, 2), 32.4507, marker])
+    wb.save(filepath)
+    wb.close()
+
+
+def _read_marker(path):
+    """Return the C2 marker of a workbook written by _write_engine_workbook."""
+    import openpyxl
+
+    wb = openpyxl.load_workbook(str(path), read_only=True)
+    try:
+        row2 = next(
+            wb["ExRate"].iter_rows(min_row=2, max_row=2, values_only=True),
+            None,
+        )
+        return row2[2] if row2 and len(row2) >= 3 else None
+    finally:
+        wb.close()
+
+
 class _RaisingEngine:
     """LedgerEngine stub whose standalone update raises a chosen error."""
 
@@ -802,11 +836,10 @@ class _SuccessEngine:
         return self
 
     async def update_exrate_standalone(self, filepath, *a, **kw):
-        # The real engine fills the temp file; emulate by writing a marker so
-        # the test can prove the temp was moved into place (not a blank save).
-        from pathlib import Path as _P
-
-        _P(filepath).write_bytes(b"FILLED-EXRATE")
+        # The real engine fills the temp file; emulate with a real minimal
+        # ExRate workbook (passes the dest read-back verification) carrying
+        # a marker that proves the temp was moved into place.
+        _write_engine_workbook(filepath)
         return filepath
 
 
@@ -831,7 +864,7 @@ class TestExrateWorkerSuccess:
         )
 
         # Temp was moved into the destination (engine-written content present).
-        assert dest.read_bytes() == b"FILLED-EXRATE"
+        assert _read_marker(dest) == "FILLED-EXRATE"
         assert not list(tmp_path.glob(".exrate_tmp_*")), "Temp not cleaned up"
         # Success status carries the summary (span + currencies).
         msg = app.lbl_status.cget("text")
@@ -933,7 +966,7 @@ class TestExrateWorkerBackupFirst:
         )
 
         # Dest was replaced by the engine-written temp...
-        assert dest.read_bytes() == b"FILLED-EXRATE"
+        assert _read_marker(dest) == "FILLED-EXRATE"
         # ...and a real backup of the ORIGINAL dest exists, taken BEFORE the
         # move (its bytes are the pre-overwrite content, not the new sheet).
         backups = list(backup_dir.glob("ExRate__bak__*.xlsx"))
@@ -963,7 +996,7 @@ class TestExrateWorkerBackupFirst:
             app, ["USD"], {"Buying TT": "buying_transfer"},
         )
 
-        assert dest.read_bytes() == b"FILLED-EXRATE"
+        assert _read_marker(dest) == "FILLED-EXRATE"
         assert not list(backup_dir.glob("*.xlsx")), (
             "No backup expected when dest did not exist"
         )
@@ -1219,9 +1252,7 @@ class TestExrateCancelAffordance:
                 for child in app.card.winfo_children():
                     if isinstance(child, ctk.CTkButton):
                         seen["had_cancel_button"] = True
-                from pathlib import Path as _P
-
-                _P(filepath).write_bytes(b"FILLED")
+                _write_engine_workbook(filepath)
                 return filepath
 
         _run_worker_sync(monkeypatch, lambda *a, **kw: _ObservingEngine())
@@ -1305,3 +1336,94 @@ class TestExrateCancelAffordance:
             assert not remaining, "Cancel button must be removed after completion"
         finally:
             app.card.destroy()
+
+
+# ---------------------------------------------------------------------------
+# F50/F201 — post-move structural read-back of the destination file
+# ---------------------------------------------------------------------------
+
+
+class TestExrateDestVerification:
+    """The moved dest must reopen as a real workbook with a populated
+    ExRate sheet; failures surface via the existing worker error path."""
+
+    def test_verify_passes_on_real_exrate_file(self, tmp_path):
+        from gui.panels.exrate_dialog import _verify_exrate_dest
+
+        dest = tmp_path / "ok.xlsx"
+        _write_engine_workbook(str(dest))
+        _verify_exrate_dest(str(dest))  # must not raise
+
+    def test_verify_rejects_missing_exrate_sheet(self, tmp_path):
+        import openpyxl
+
+        from gui.panels.exrate_dialog import _verify_exrate_dest
+
+        dest = tmp_path / "no_sheet.xlsx"
+        wb = openpyxl.Workbook()
+        wb.active.title = "Sheet1"
+        wb.save(str(dest))
+        wb.close()
+        with pytest.raises(ValueError, match="Post-write verification failed"):
+            _verify_exrate_dest(str(dest))
+
+    def test_verify_rejects_empty_row_2(self, tmp_path):
+        import openpyxl
+
+        from gui.panels.exrate_dialog import _verify_exrate_dest
+
+        dest = tmp_path / "empty.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "ExRate"
+        ws.append(["Date", "USD Buying TT Rate"])  # header only, no data
+        wb.save(str(dest))
+        wb.close()
+        with pytest.raises(ValueError, match="Post-write verification failed"):
+            _verify_exrate_dest(str(dest))
+
+    def test_verify_rejects_unreadable_file(self, tmp_path):
+        from gui.panels.exrate_dialog import _verify_exrate_dest
+
+        dest = tmp_path / "garbage.xlsx"
+        dest.write_bytes(b"NOT-A-ZIP")
+        # zipfile.BadZipFile is NOT an OSError — it must be wrapped in
+        # ValueError so the worker's existing except tuple catches it.
+        with pytest.raises(ValueError, match="Post-write verification failed"):
+            _verify_exrate_dest(str(dest))
+
+    def test_worker_surfaces_verification_failure(self, monkeypatch, tmp_path):
+        """An engine run that 'succeeds' but leaves a structurally bad dest
+        must be reported as a failure, never as 'ExRate created'."""
+        from gui.panels import exrate_dialog
+
+        class _BadFileEngine:
+            def __call__(self, *a, **kw):
+                return self
+
+            async def update_exrate_standalone(self, filepath, *a, **kw):
+                import openpyxl
+
+                wb = openpyxl.Workbook()
+                wb.active.title = "Sheet1"  # no ExRate sheet
+                wb.save(filepath)
+                wb.close()
+                return filepath
+
+        dest = tmp_path / "ExRate.xlsx"
+        _run_worker_sync(monkeypatch, lambda *a, **kw: _BadFileEngine())
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+
+        app = _FakeApp()
+        exrate_dialog._create_exrate_file(
+            app, ["USD"], {"Buying TT": "buying_transfer"},
+        )
+
+        msg = app.lbl_status.cget("text")
+        assert "ExRate created" not in msg, "must not report success"
+        assert "Failed" in msg and "verification" in msg.lower(), (
+            f"Expected a verification failure status, got {msg!r}"
+        )

@@ -24,6 +24,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
+from core.logic import safe_to_decimal
+
 logger = logging.getLogger(__name__)
 
 # Per-column upsert for the legacy rates table. ON CONFLICT + COALESCE keeps
@@ -42,6 +44,16 @@ _RATES_UPSERT_SQL = (
     "eur_buying  = COALESCE(excluded.eur_buying,  eur_buying), "
     "eur_selling = COALESCE(excluded.eur_selling, eur_selling)"
 )
+
+
+def _rate_text(value: float | str | Decimal | None) -> str | None:
+    """Normalize a rate to its TEXT storage form (str), preserving None.
+
+    Explicit Python-side stringification keeps the stored representation
+    deterministic (e.g. str(Decimal('34.5050')) == '34.5050') instead of
+    relying on SQLite's own numeric-to-text affinity conversion.
+    """
+    return None if value is None else str(value)
 
 
 class CacheDB:
@@ -148,10 +160,10 @@ class CacheDB:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS rates (
                 date          TEXT PRIMARY KEY,
-                usd_buying    REAL,
-                usd_selling   REAL,
-                eur_buying    REAL,
-                eur_selling   REAL
+                usd_buying    TEXT,
+                usd_selling   TEXT,
+                eur_buying    TEXT,
+                eur_selling   TEXT
             );
 
             CREATE TABLE IF NOT EXISTS holidays (
@@ -172,9 +184,13 @@ class CacheDB:
     def _migrate_schema(self):
         """
         Auto-migrate from old 2-column schema to new 4-column schema.
-        If old columns (usd_rate, eur_rate) exist, add new columns and
-        copy data: selling gets the old rate, buying also gets it as
-        best-available fallback for historical data.
+        If old columns (usd_rate, eur_rate) exist, add the new columns and
+        copy the legacy single rate into the SELLING columns only. The
+        Buying TT columns are left NULL (F32): the legacy schema never
+        recorded which rate type its single value was, so fabricating
+        Buying TT from it wrote unauthentic values. A NULL column counts as
+        a per-column cache miss, so authentic Buying TT values are
+        re-fetched from the API on the next run.
 
         Each ALTER is guarded by an existence check (idempotent) rather than
         relying on an unguarded multi-statement executescript that cannot
@@ -187,26 +203,50 @@ class CacheDB:
             # Old schema detected — add only the columns that are missing.
             for col in ("usd_buying", "usd_selling", "eur_buying", "eur_selling"):
                 if col not in columns:
-                    conn.execute(f"ALTER TABLE rates ADD COLUMN {col} REAL")
+                    conn.execute(f"ALTER TABLE rates ADD COLUMN {col} TEXT")
             conn.execute("""
                 UPDATE rates SET
-                    usd_buying  = usd_rate,
                     usd_selling = usd_rate,
-                    eur_buying  = eur_rate,
                     eur_selling = eur_rate
             """)
             conn.commit()
-        elif "usd_rate" in columns and "usd_buying" in columns:
-            # Migration ran before but didn't backfill buying — fix it
-            conn.execute("""
-                UPDATE rates SET
-                    usd_buying  = COALESCE(usd_buying, usd_selling, usd_rate),
-                    eur_buying  = COALESCE(eur_buying, eur_selling, eur_rate)
-                WHERE usd_buying IS NULL OR eur_buying IS NULL
-            """)
-            conn.commit()
 
+        self._migrate_rates_value_text(conn)
         self._migrate_rates_multi_value_text(conn)
+
+    def _migrate_rates_value_text(self, conn: sqlite3.Connection) -> None:
+        """
+        Ensure the four rate columns of the legacy ``rates`` table use TEXT
+        affinity so exact 4dp Decimal strings round-trip verbatim. Older DBs
+        created them as REAL, which coerces every stored rate through a
+        lossy float. Recreate the table preserving existing rows when any
+        legacy REAL column is detected (mirrors
+        :meth:`_migrate_rates_multi_value_text`). Legacy float junk that
+        survives the copy is normalized at the read boundary
+        (get_rate/get_rates_bulk quantize via safe_to_decimal).
+        """
+        info = conn.execute("PRAGMA table_info(rates)").fetchall()
+        decls = {row[1]: (row[2] or "") for row in info}
+        rate_cols = ("usd_buying", "usd_selling", "eur_buying", "eur_selling")
+        if not any(decls.get(col, "TEXT").upper() == "REAL" for col in rate_cols):
+            return
+
+        conn.executescript("""
+            CREATE TABLE rates_new (
+                date          TEXT PRIMARY KEY,
+                usd_buying    TEXT,
+                usd_selling   TEXT,
+                eur_buying    TEXT,
+                eur_selling   TEXT
+            );
+            INSERT INTO rates_new
+                (date, usd_buying, usd_selling, eur_buying, eur_selling)
+                SELECT date, usd_buying, usd_selling, eur_buying, eur_selling
+                FROM rates;
+            DROP TABLE rates;
+            ALTER TABLE rates_new RENAME TO rates;
+        """)
+        conn.commit()
 
     def _migrate_rates_multi_value_text(self, conn: sqlite3.Connection) -> None:
         """
@@ -244,6 +284,12 @@ class CacheDB:
         """
         Cache lookup for a single date's rates.
 
+        Read-boundary exactness gate: every value is rebuilt string-safe and
+        quantized to 4dp via safe_to_decimal, so consumers receive an exact
+        4dp Decimal regardless of any legacy float junk stored by older
+        builds (pre-TEXT-affinity REAL rows). Unparseable junk maps to None
+        (a per-column cache miss, self-healed by the API refetch).
+
         Returns:
             Dict with keys: usd_buying, usd_selling, eur_buying, eur_selling
             or None if not cached.
@@ -258,16 +304,19 @@ class CacheDB:
             return None
 
         return {
-            "usd_buying": Decimal(str(row[0])) if row[0] is not None else None,
-            "usd_selling": Decimal(str(row[1])) if row[1] is not None else None,
-            "eur_buying": Decimal(str(row[2])) if row[2] is not None else None,
-            "eur_selling": Decimal(str(row[3])) if row[3] is not None else None,
+            "usd_buying": safe_to_decimal(row[0]),
+            "usd_selling": safe_to_decimal(row[1]),
+            "eur_buying": safe_to_decimal(row[2]),
+            "eur_selling": safe_to_decimal(row[3]),
         }
 
     def get_rates_bulk(self, start: date, end: date) -> dict:
         """
         Returns all cached rates in a date range as:
         {date_obj: {"usd_buying": ..., "usd_selling": ..., "eur_buying": ..., "eur_selling": ...}}
+
+        Same read-boundary exactness gate as :meth:`get_rate`: every value is
+        an exact 4dp Decimal via safe_to_decimal (legacy junk maps to None).
         """
         s_str = start.strftime("%Y-%m-%d")
         e_str = end.strftime("%Y-%m-%d")
@@ -281,17 +330,23 @@ class CacheDB:
         for r in rows:
             d = datetime.strptime(r[0], "%Y-%m-%d").date()
             result[d] = {
-                "usd_buying": Decimal(str(r[1])) if r[1] is not None else None,
-                "usd_selling": Decimal(str(r[2])) if r[2] is not None else None,
-                "eur_buying": Decimal(str(r[3])) if r[3] is not None else None,
-                "eur_selling": Decimal(str(r[4])) if r[4] is not None else None,
+                "usd_buying": safe_to_decimal(r[1]),
+                "usd_selling": safe_to_decimal(r[2]),
+                "eur_buying": safe_to_decimal(r[3]),
+                "eur_selling": safe_to_decimal(r[4]),
             }
         return result
 
-    def insert_rate(self, target_date: date, usd_buying: float = None,
-                    usd_selling: float = None, eur_buying: float = None,
-                    eur_selling: float = None):
+    def insert_rate(self, target_date: date,
+                    usd_buying: float | str | Decimal | None = None,
+                    usd_selling: float | str | Decimal | None = None,
+                    eur_buying: float | str | Decimal | None = None,
+                    eur_selling: float | str | Decimal | None = None):
         """Insert or update a single rate entry.
+
+        Values are stored as TEXT (str of the given value) so exact Decimal
+        strings round-trip verbatim — never a lossy REAL coercion. The read
+        boundary (get_rate/get_rates_bulk) quantizes to 4dp.
 
         Per-column upsert: columns passed as None preserve any value already
         cached for that date instead of nulling it (see _RATES_UPSERT_SQL).
@@ -300,7 +355,8 @@ class CacheDB:
         conn = self._conn()
         conn.execute(
             _RATES_UPSERT_SQL,
-            (date_str, usd_buying, usd_selling, eur_buying, eur_selling)
+            (date_str, _rate_text(usd_buying), _rate_text(usd_selling),
+             _rate_text(eur_buying), _rate_text(eur_selling))
         )
         conn.commit()
 
@@ -308,13 +364,19 @@ class CacheDB:
         """
         Bulk insert/update rates.
         Each entry is (date_str, usd_buying, usd_selling, eur_buying, eur_selling).
+        Values are stored as TEXT (str of the given value) so exact Decimal
+        strings round-trip verbatim (see insert_rate).
         Per-column upsert: None values preserve existing cached columns
         instead of nulling them (see _RATES_UPSERT_SQL).
         """
         if not entries:
             return
+        normalized = [
+            (d, _rate_text(ub), _rate_text(us), _rate_text(eb), _rate_text(es))
+            for (d, ub, us, eb, es) in entries
+        ]
         conn = self._conn()
-        conn.executemany(_RATES_UPSERT_SQL, entries)
+        conn.executemany(_RATES_UPSERT_SQL, normalized)
         conn.commit()
 
     # ================================================================== #

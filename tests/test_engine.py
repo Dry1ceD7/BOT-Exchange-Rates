@@ -1782,3 +1782,116 @@ class TestProcessBatchManifestLifecycle:
             ["a.xlsx"], dry_run=True, manifest=m,
         ))
         assert not mpath.exists()
+
+
+# =========================================================================
+#  FLOAT-CONTAMINATION CACHE REGRESSION (Layer-1 exactness hard gate)
+# =========================================================================
+
+class TestCacheFloatContamination:
+    """A float-contaminated cache must still yield exact 4dp Excel writes.
+
+    Layer-1 invariant: every value written to Excel exactly matches the
+    parsed BOT source value — Decimal built from a string, quantized to 4dp.
+    Legacy builds cached raw API floats into REAL columns, so a cache HIT
+    could replay >4dp float junk straight into the workbook. The read
+    boundary (CacheDB.get_rate/get_rates_bulk) now quantizes via
+    safe_to_decimal, making the written value exact regardless of what the
+    cache holds.
+    """
+
+    _TODAY = date(2025, 1, 15)  # Wednesday — deterministic weekday window
+
+    # Seeded 6dp float contamination → the exact 4dp Decimals that MUST land
+    # in the ExRate master sheet columns B-E (half-even quantization).
+    _SEED = (34.123456, 34.567891, 37.123456, 37.654321)
+    _EXPECTED = {
+        2: Decimal("34.1235"),  # B: USD Buying TT
+        3: Decimal("34.5679"),  # C: USD Selling
+        4: Decimal("37.1235"),  # D: EUR Buying TT
+        5: Decimal("37.6543"),  # E: EUR Selling
+    }
+
+    def test_cache_hit_process_ledger_writes_exact_4dp_cells(
+        self, ledger_xlsx, tmp_cache, monkeypatch,
+    ):
+        from datetime import timedelta
+
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: self._TODAY)
+        target = date(2025, 1, 7)  # Tuesday
+        path = ledger_xlsx({"Jan": [(target, "USD")]})
+
+        # Seed EVERY weekday in the engine's window with the 6dp float so the
+        # run is a pure cache hit (zero API calls — Core Rule 5).
+        bulk = []
+        d = date(2024, 12, 20)
+        while d <= self._TODAY:
+            if d.weekday() < 5:
+                bulk.append((d.strftime("%Y-%m-%d"), *self._SEED))
+            d += timedelta(days=1)
+        tmp_cache.insert_rates_bulk(bulk)
+        for year in (2024, 2025):
+            tmp_cache.insert_holidays([(f"{year}-12-31", "Year-End Holiday")])
+
+        api = AsyncMock()
+        api.get_holidays = AsyncMock(return_value=[])
+        api.get_exchange_rates = AsyncMock(return_value=[])
+        engine = LedgerEngine(api, backup=MagicMock(), cache=tmp_cache)
+
+        result = asyncio.run(engine.process_ledger(path))
+        assert result == path
+        # Pure cache hit — the contaminated values came from SQLite, not API.
+        api.get_exchange_rates.assert_not_called()
+
+        wb = openpyxl.load_workbook(path)
+        try:
+            ws = wb["ExRate"]
+            checked = 0
+            for row in range(2, ws.max_row + 1):
+                for col, expected in self._EXPECTED.items():
+                    value = ws.cell(row=row, column=col).value
+                    if value is None:
+                        continue  # weekend/holiday rows carry no rate
+                    got = Decimal(str(value))
+                    assert got == expected, (
+                        f"row {row} col {col}: {got!r} != {expected!r}"
+                    )
+                    # Exactly 4dp — the 6dp float junk must never leak out.
+                    assert got != Decimal(str(self._SEED[col - 2]))
+                    checked += 1
+            # Every trading-day row was verified across all four columns.
+            assert checked >= 4
+        finally:
+            wb.close()
+
+    def test_api_writeback_caches_exact_4dp_text(
+        self, engine, mock_api, tmp_cache, monkeypatch,
+    ):
+        """The engine's API write-back persists quantized 4dp Decimal strings
+        (TEXT), never the raw API value — a later cache hit replays exactly
+        what the writer was given."""
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: date(2025, 3, 10))
+        target = date(2025, 3, 10)  # Monday — one-day weekday window
+
+        async def _rates(start, end, currency):
+            buy, sell = {
+                "USD": (Decimal("34.123456"), Decimal("34.567891")),
+                "EUR": (Decimal("37.123456"), Decimal("37.654321")),
+            }[currency]
+            return [SimpleNamespace(
+                period=target.strftime("%Y-%m-%d"), currency=currency,
+                buying_transfer=buy, buying_sight=None,
+                selling=sell, mid_rate=None,
+            )]
+
+        mock_api.get_exchange_rates = AsyncMock(side_effect=_rates)
+        asyncio.run(engine._preload_api_data({target}, "2025-03-10"))
+
+        raw = tmp_cache._conn().execute(
+            "SELECT usd_buying, typeof(usd_buying), "
+            "usd_selling, eur_buying, eur_selling "
+            "FROM rates WHERE date = '2025-03-10'"
+        ).fetchone()
+        assert raw == (
+            "34.1235", "text", "34.5679", "37.1235", "37.6543",
+        )

@@ -579,25 +579,32 @@ class LedgerEngine:
                 self.api.get_exchange_rates(fetch_start, fetch_end, "EUR"),
             )
 
-            rate_cache = {}
+            # Exactness gate: cache the quantized 4dp Decimal as a string
+            # (the rates table has TEXT affinity) — NEVER the raw API value,
+            # so a cache hit replays exactly what the writer was given.
+            rate_cache: dict[str, list[str | None]] = {}
             for r in usd_data:
                 d = datetime.strptime(r.period, "%Y-%m-%d").date()
-                if r.buying_transfer is not None:
-                    usd_buying[d] = safe_to_decimal(r.buying_transfer)
-                if r.selling is not None:
-                    usd_selling[d] = safe_to_decimal(r.selling)
+                buy = safe_to_decimal(r.buying_transfer)
+                sell = safe_to_decimal(r.selling)
+                if buy is not None:
+                    usd_buying[d] = buy
+                if sell is not None:
+                    usd_selling[d] = sell
                 rate_cache.setdefault(r.period, [None] * 4)
-                rate_cache[r.period][0] = r.buying_transfer
-                rate_cache[r.period][1] = r.selling
+                rate_cache[r.period][0] = None if buy is None else str(buy)
+                rate_cache[r.period][1] = None if sell is None else str(sell)
             for r in eur_data:
                 d = datetime.strptime(r.period, "%Y-%m-%d").date()
-                if r.buying_transfer is not None:
-                    eur_buying[d] = safe_to_decimal(r.buying_transfer)
-                if r.selling is not None:
-                    eur_selling[d] = safe_to_decimal(r.selling)
+                buy = safe_to_decimal(r.buying_transfer)
+                sell = safe_to_decimal(r.selling)
+                if buy is not None:
+                    eur_buying[d] = buy
+                if sell is not None:
+                    eur_selling[d] = sell
                 rate_cache.setdefault(r.period, [None] * 4)
-                rate_cache[r.period][2] = r.buying_transfer
-                rate_cache[r.period][3] = r.selling
+                rate_cache[r.period][2] = None if buy is None else str(buy)
+                rate_cache[r.period][3] = None if sell is None else str(sell)
             bulk = [
                 (d_str, v[0], v[1], v[2], v[3])
                 for d_str, v in rate_cache.items()

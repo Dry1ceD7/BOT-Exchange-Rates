@@ -16,9 +16,11 @@ from unittest.mock import MagicMock
 import openpyxl
 import pytest
 
+import core.rate_audit as rate_audit_mod
 from core.constants import parse_date
 from core.logic import safe_to_decimal
 from core.rate_audit import StandaloneRateAuditor
+from core.workbook_io import WorkbookVerifyError
 
 HEADERS = [
     "Date", "USD Buying TT Rate", "USD Selling Rate",
@@ -185,6 +187,59 @@ def test_run_loads_macro_workbook_with_keep_vba(tmp_path, monkeypatch):
 
     asyncio.run(StandaloneRateAuditor(eng).run(str(xlsm), apply=True))
     assert seen.get("keep_vba") is True
+
+
+def test_apply_passes_verifier_to_atomic_save(tmp_path, monkeypatch):
+    # F201 — the apply path must hand atomic_save a verifier built from the
+    # report's intended 4dp Decimals; the honest save passes it and persists.
+    eng = _fake_engine()
+    fp = _make_xlsx(tmp_path, Decimal("32.0000"))
+
+    seen = {}
+    real_save = rate_audit_mod.atomic_save
+
+    def _spy(wb, filepath, verify=None):
+        seen["verify"] = verify
+        return real_save(wb, filepath, verify=verify)
+
+    monkeypatch.setattr(rate_audit_mod, "atomic_save", _spy)
+    report = asyncio.run(StandaloneRateAuditor(eng).run(fp, apply=True))
+
+    assert report.change_count == 1
+    assert callable(seen.get("verify")), "apply path must pass a verifier"
+    wb = openpyxl.load_workbook(fp)
+    assert safe_to_decimal(
+        wb["ExRate"].cell(row=2, column=2).value
+    ) == Decimal("32.4507")
+    wb.close()
+
+
+def test_apply_verification_failure_leaves_file_untouched(tmp_path, monkeypatch):
+    # F201 corruption simulation — sabotage the in-memory sheet AFTER the
+    # report's intended values are fixed, so the saved TEMP disagrees with
+    # the verifier's expected 4dp Decimal. Hard failure, no persist: the
+    # user's file stays byte-for-byte identical and no temp is left behind.
+    eng = _fake_engine()
+    fp = _make_xlsx(tmp_path, Decimal("32.0000"))
+    before = Path(fp).read_bytes()
+
+    real_apply = rate_audit_mod.apply_corrections
+
+    def _sabotage(ws, report):
+        real_apply(ws, report)
+        ch = report.changes[0]
+        ws.cell(row=ch.row, column=ch.col).value = Decimal("99.9999")
+        return report
+
+    monkeypatch.setattr(rate_audit_mod, "apply_corrections", _sabotage)
+
+    with pytest.raises(
+        WorkbookVerifyError, match="Post-write verification failed"
+    ):
+        asyncio.run(StandaloneRateAuditor(eng).run(fp, apply=True))
+
+    assert Path(fp).read_bytes() == before, "original must be untouched"
+    assert not list(tmp_path.glob("*.tmp~")), "temp file must be unlinked"
 
 
 def test_run_loads_plain_xlsx_without_keep_vba(tmp_path, monkeypatch):

@@ -446,7 +446,14 @@ class TestLifecycle:
 class TestSchemaMigration:
     """Idempotent guarded migration from the old 2-column schema."""
 
-    def test_migrates_old_schema_and_backfills(self, tmp_path):
+    def test_migrates_old_schema_leaves_buying_null(self, tmp_path):
+        """F32: the legacy single rate maps to the SELLING columns only.
+
+        The old schema never recorded which rate type its single value was,
+        so fabricating Buying TT from it wrote unauthentic values. The
+        unknown Buying TT columns stay NULL — a per-column cache miss the
+        engine self-heals with authentic API data.
+        """
         import sqlite3
         tmp = str(tmp_path / "legacy.db")
         # Build an OLD-schema DB by hand.
@@ -463,15 +470,132 @@ class TestSchemaMigration:
         # Opening via CacheDB should migrate without error.
         cache = CacheDB(db_path=tmp)
         row = cache.get_rate(date(2025, 1, 2))
-        assert row["usd_buying"] == Decimal("33.5")
         assert row["usd_selling"] == Decimal("33.5")
-        assert row["eur_buying"] == Decimal("36.5")
+        assert row["eur_selling"] == Decimal("36.5")
+        # F32: Buying TT is unknown — never fabricated from the legacy rate.
+        assert row["usd_buying"] is None
+        assert row["eur_buying"] is None
         cache.close()
 
         # Re-opening (migration runs again) must be idempotent.
         cache2 = CacheDB(db_path=tmp)
-        assert cache2.get_rate(date(2025, 1, 2))["usd_buying"] == Decimal("33.5")
+        row2 = cache2.get_rate(date(2025, 1, 2))
+        assert row2["usd_selling"] == Decimal("33.5")
+        assert row2["usd_buying"] is None
         cache2.close()
+
+
+# =========================================================================
+#  RATES TABLE TEXT AFFINITY + READ-BOUNDARY EXACTNESS (Layer-1 hard gate)
+# =========================================================================
+
+class TestRatesTextAffinityAndExactness:
+    """The legacy ``rates`` table must store TEXT and read exact 4dp Decimals.
+
+    Mirrors the rates_multi REAL→TEXT migration: older cache.db files created
+    the four rate columns as REAL (lossy float coercion); they are rebuilt
+    in place to TEXT. Regardless of what legacy junk is stored, the read
+    boundary (get_rate/get_rates_bulk) returns exact 4dp Decimals via
+    safe_to_decimal.
+    """
+
+    _RATE_COLS = ("usd_buying", "usd_selling", "eur_buying", "eur_selling")
+
+    def _col_decls(self, cache):
+        info = cache._conn().execute("PRAGMA table_info(rates)").fetchall()
+        return {row[1]: (row[2] or "").upper() for row in info}
+
+    def test_fresh_db_creates_text_columns(self, db):
+        decls = self._col_decls(db)
+        for col in self._RATE_COLS:
+            assert decls[col] == "TEXT"
+
+    def test_insert_rate_stores_decimal_string_verbatim(self, db):
+        db.insert_rate(date(2025, 3, 10), usd_buying=Decimal("34.5050"))
+        raw = db._conn().execute(
+            "SELECT usd_buying, typeof(usd_buying) FROM rates"
+        ).fetchone()
+        assert raw == ("34.5050", "text")
+
+    def test_insert_rates_bulk_stores_text(self, db):
+        db.insert_rates_bulk([
+            ("2025-03-10", Decimal("34.5050"), 33.1, None, None),
+        ])
+        raw = db._conn().execute(
+            "SELECT usd_buying, typeof(usd_buying), "
+            "usd_selling, typeof(usd_selling) FROM rates"
+        ).fetchone()
+        assert raw == ("34.5050", "text", "33.1", "text")
+
+    def test_legacy_real_schema_migrates_to_text(self, tmp_path):
+        """A v3.5.x cache.db (4 REAL columns) is rebuilt in place to TEXT,
+        preserving rows; reads come back as exact 4dp Decimals."""
+        import sqlite3
+        tmp = str(tmp_path / "real_rates.db")
+        raw = sqlite3.connect(tmp)
+        raw.execute(
+            "CREATE TABLE rates (date TEXT PRIMARY KEY, usd_buying REAL, "
+            "usd_selling REAL, eur_buying REAL, eur_selling REAL)"
+        )
+        # Float contamination: more than 4dp of REAL junk.
+        raw.execute(
+            "INSERT INTO rates VALUES "
+            "('2025-01-02', 34.123456789, 34.567891, 37.123456, 37.654321)"
+        )
+        raw.commit()
+        raw.close()
+
+        cache = CacheDB(db_path=tmp)
+        try:
+            decls = self._col_decls(cache)
+            for col in self._RATE_COLS:
+                assert decls[col] == "TEXT"
+            row = cache.get_rate(date(2025, 1, 2))
+            assert row["usd_buying"] == Decimal("34.1235")
+            assert row["usd_selling"] == Decimal("34.5679")
+            assert row["eur_buying"] == Decimal("37.1235")
+            assert row["eur_selling"] == Decimal("37.6543")
+        finally:
+            cache.close()
+
+        # Re-opening (migration check runs again) must be idempotent.
+        cache2 = CacheDB(db_path=tmp)
+        try:
+            assert cache2.get_rate(date(2025, 1, 2))["usd_buying"] == (
+                Decimal("34.1235")
+            )
+        finally:
+            cache2.close()
+
+    def test_read_boundary_quantizes_to_exact_4dp(self, db):
+        """Whatever junk is stored, every read is an exact 4dp Decimal."""
+        db._conn().execute(
+            "INSERT INTO rates (date, usd_buying, usd_selling) "
+            "VALUES ('2025-03-10', '34.12345678', '33.1')"
+        )
+        db._conn().commit()
+        row = db.get_rate(date(2025, 3, 10))
+        assert row["usd_buying"] == Decimal("34.1235")
+        assert row["usd_buying"].as_tuple().exponent == -4
+        assert row["usd_selling"] == Decimal("33.1000")
+        assert row["usd_selling"].as_tuple().exponent == -4
+
+        bulk = db.get_rates_bulk(date(2025, 3, 10), date(2025, 3, 10))
+        b_row = bulk[date(2025, 3, 10)]
+        assert b_row["usd_buying"] == Decimal("34.1235")
+        assert b_row["usd_buying"].as_tuple().exponent == -4
+
+    def test_read_boundary_maps_unparseable_junk_to_none(self, db):
+        """Garbage text (corrupt legacy data) reads as None — a per-column
+        miss the engine re-fetches — instead of crashing or leaking junk."""
+        db._conn().execute(
+            "INSERT INTO rates (date, usd_buying, usd_selling) "
+            "VALUES ('2025-03-11', 'garbage', '33.1')"
+        )
+        db._conn().commit()
+        row = db.get_rate(date(2025, 3, 11))
+        assert row["usd_buying"] is None
+        assert row["usd_selling"] == Decimal("33.1000")
 
 
 # =========================================================================

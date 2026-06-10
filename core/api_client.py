@@ -13,9 +13,10 @@ import logging
 import random
 import time
 from datetime import date, timedelta
+from decimal import Decimal
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -33,6 +34,7 @@ from core.constants import (
     MAX_429_RETRIES,
     RETRY_AFTER_MAX_SECONDS,
 )
+from core.logic import safe_to_decimal
 
 logger = logging.getLogger(__name__)
 
@@ -198,13 +200,41 @@ def _safe_before_sleep(retry_state) -> None:
 # -------------------------------------------------------------------------
 
 class BOTRateDetail(BaseModel):
-    """Schema for a single day's exchange rate data point."""
+    """Schema for a single day's exchange rate data point.
+
+    Exactness gate (Mathematical Truth): every rate field is an exact
+    ``Decimal`` quantized to 4dp at the parse boundary. Values are built
+    string-safe via the project's safe_to_decimal discipline — never from a
+    binary float — so each downstream consumer (engine, cache, writer)
+    receives exactly the value BOT published. ``_fetch_json`` parses JSON
+    numbers with ``parse_float=Decimal``, so the literal response token
+    reaches this validator without ever existing as a float.
+    """
     period: str
     currency: str = Field(alias="currency_id")
-    buying_transfer: float | None = None
-    buying_sight: float | None = None
-    selling: float | None = None
-    mid_rate: float | None = None
+    buying_transfer: Decimal | None = None
+    buying_sight: Decimal | None = None
+    selling: Decimal | None = None
+    mid_rate: Decimal | None = None
+
+    @field_validator(
+        "buying_transfer", "buying_sight", "selling", "mid_rate",
+        mode="before",
+    )
+    @classmethod
+    def _quantize_rate_4dp(cls, value: object) -> Decimal | None:
+        """String-safe Decimal construction + 4dp quantize (safe_to_decimal).
+
+        Non-numeric junk raises ValueError so the payload still fails schema
+        validation (surfaced as the generic BOTAPIError) instead of being
+        silently coerced or dropped.
+        """
+        if value is None or value == "":
+            return None
+        dec = safe_to_decimal(value)
+        if dec is None:
+            raise ValueError(f"rate value is not numeric: {value!r}")
+        return dec
 
 class BOTRateData(BaseModel):
     data_detail: list[BOTRateDetail]
@@ -379,7 +409,10 @@ class BOTClient:
             )
 
             if response.status_code == 200:
-                return response.json()
+                # Exactness gate: parse JSON numbers straight into Decimal
+                # from the literal response token so a BOT rate value never
+                # exists as a binary float anywhere in the pipeline.
+                return response.json(parse_float=Decimal)
             if response.status_code == 404:
                 return {}
             if response.status_code == 429:

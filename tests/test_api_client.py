@@ -7,12 +7,15 @@ Unit tests for core/api_client.py — BOTClient with mocked HTTP responses.
 """
 
 import asyncio
+import json as jsonlib
 import logging
 from datetime import date
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from core.api_client import (
     BOTAPIError,
@@ -40,7 +43,8 @@ class TestBOTRateDetail:
         rate = BOTRateDetail(**data)
         assert rate.period == "2025-03-10"
         assert rate.currency == "USD"
-        assert rate.selling == 33.10
+        assert rate.selling == Decimal("33.10")
+        assert rate.buying_transfer == Decimal("32.60")
 
     def test_optional_fields_default_to_none(self):
         data = {
@@ -50,6 +54,49 @@ class TestBOTRateDetail:
         rate = BOTRateDetail(**data)
         assert rate.selling is None
         assert rate.buying_transfer is None
+
+    def test_rate_fields_are_exact_4dp_decimals(self):
+        """Layer-1 exactness gate: every rate field is a Decimal quantized
+        to 4dp at the parse boundary — never a binary float."""
+        rate = BOTRateDetail(
+            period="2025-03-10", currency_id="USD",
+            buying_transfer=32.60, buying_sight="32.55",
+            selling=Decimal("33.1"), mid_rate=32.875,
+        )
+        for field in ("buying_transfer", "buying_sight", "selling", "mid_rate"):
+            value = getattr(rate, field)
+            assert isinstance(value, Decimal)
+            assert value.as_tuple().exponent == -4
+        # str-safe construction preserves the human-readable digits.
+        assert str(rate.buying_transfer) == "32.6000"
+        assert str(rate.buying_sight) == "32.5500"
+        assert str(rate.selling) == "33.1000"
+        assert str(rate.mid_rate) == "32.8750"
+
+    def test_six_dp_value_quantizes_half_even_to_4dp(self):
+        rate = BOTRateDetail(
+            period="2025-03-10", currency_id="USD",
+            buying_transfer=34.123456, selling=Decimal("34.12345"),
+        )
+        assert rate.buying_transfer == Decimal("34.1235")
+        # Exact tie rounds half-even (banker's rounding), matching
+        # safe_to_decimal's Decimal-default rounding discipline.
+        assert rate.selling == Decimal("34.1234")
+
+    def test_empty_string_rate_becomes_none(self):
+        rate = BOTRateDetail(
+            period="2025-03-10", currency_id="USD", buying_transfer="",
+        )
+        assert rate.buying_transfer is None
+
+    def test_non_numeric_rate_raises_validation_error(self):
+        """Junk must still FAIL schema validation (surfaced upstream as the
+        generic BOTAPIError), never be silently coerced or dropped."""
+        with pytest.raises(ValidationError):
+            BOTRateDetail(
+                period="2025-03-10", currency_id="USD",
+                buying_transfer="not-a-number",
+            )
 
 
 class TestBOTHolidayDetail:
@@ -128,7 +175,39 @@ class TestBOTClient:
         ))
         assert len(rates) == 1
         assert rates[0].period == "2025-03-10"
-        assert rates[0].selling == 33.10
+        assert isinstance(rates[0].selling, Decimal)
+        assert rates[0].selling == Decimal("33.10")
+
+    def test_rates_parse_decimal_from_literal_json_token(
+        self, bot_client, mock_http_client,
+    ):
+        """Layer-1 exactness gate: _fetch_json must parse JSON numbers into
+        Decimal straight from the literal response token (parse_float=Decimal),
+        never via an intermediate binary float.
+
+        Discriminator: the literal token below quantizes to 34.1235 when
+        parsed exactly, but to 34.1234 (half-even on the float's shortest
+        repr "34.12345") if it ever passes through a float.
+        """
+        # Raw body string: the discriminator token must reach json.loads
+        # verbatim (building it via dumps() would collapse it to a float).
+        body = (
+            '{"result": {"data": {"data_detail": [{'
+            '"period": "2025-03-10", "currency_id": "USD", '
+            '"buying_transfer": 34.12345000000000001, "selling": 33.10'
+            '}]}}}'
+        )
+        # A response whose .json() honors kwargs like the real httpx Response.
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json = lambda **kw: jsonlib.loads(body, **kw)
+        mock_http_client.get = AsyncMock(return_value=mock_resp)
+
+        rates = asyncio.run(bot_client.get_exchange_rates(
+            date(2025, 3, 10), date(2025, 3, 10), "USD"
+        ))
+        assert rates[0].buying_transfer == Decimal("34.1235")
+        assert str(rates[0].selling) == "33.1000"
 
     def test_get_holidays_parses_response(self, bot_client, mock_http_client):
         mock_resp = MagicMock()

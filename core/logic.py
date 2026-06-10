@@ -20,7 +20,7 @@ the live ledger engine.
 
 import re
 from datetime import date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 
 # -------------------------------------------------------------------------
 # EXCEPTIONS
@@ -246,8 +246,11 @@ def safe_to_decimal(value: object) -> Decimal | None:
     if value is None or value == "":
         return None
     try:
-        # Quantize to 4 decimal places as per standard Thai accounting format
+        # Quantize to 4 decimal places as per standard Thai accounting format.
+        # ROUND_HALF_EVEN (banker's rounding) is the pinned project standard —
+        # explicit so behavior never drifts with the ambient decimal context —
+        # pending any department mandate to change it.
         d = Decimal(str(value))
-        return d.quantize(Decimal('0.0000'))
+        return d.quantize(Decimal('0.0000'), rounding=ROUND_HALF_EVEN)
     except (InvalidOperation, TypeError):
         return None

@@ -66,6 +66,128 @@ class TestCSVImport:
         assert rate == Decimal("35.1150")
         cache.close()
 
+    def test_wide_format_quantizes_excess_precision_to_4dp(self, tmp_path):
+        """F30: a >4dp wide-format value must land in the cache as the exact
+        4dp-quantized Decimal (ROUND_HALF_EVEN), never the raw unquantized
+        Decimal — otherwise stray precision reaches ExRate cells."""
+        from core.database import CacheDB
+
+        csv_content = (
+            "Period,Currency_ID,Buying Transfer,Selling\n"
+            "2025-01-02,USD,42.123456,34.800049\n"
+        )
+        csv_path = self._make_csv(tmp_path, csv_content)
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+
+        assert import_bot_csv(csv_path, cache) == 1
+
+        buy = cache.get_multi_rate(date(2025, 1, 2), "USD", "buying_transfer")
+        assert isinstance(buy, Decimal)
+        assert str(buy) == "42.1235"          # rounded up at the 5th dp
+        assert buy.as_tuple().exponent == -4  # stored at exactly 4dp
+
+        sell = cache.get_multi_rate(date(2025, 1, 2), "USD", "selling")
+        assert str(sell) == "34.8000"         # rounded down at the 5th dp
+        assert sell.as_tuple().exponent == -4
+
+        # The legacy USD/EUR mirror must carry the quantized value too.
+        row = cache.get_rate(date(2025, 1, 2))
+        assert row["usd_buying"] == Decimal("42.1235")
+        assert row["usd_selling"] == Decimal("34.8000")
+        cache.close()
+
+    def test_long_format_quantizes_excess_precision_to_4dp(self, tmp_path):
+        """F30: the long-format path applies the same 4dp quantize as wide."""
+        from core.database import CacheDB
+
+        csv_content = (
+            "Period,Currency_ID,Rate_Type,Value\n"
+            "2025-01-02,GBP,mid_rate,42.123456\n"
+        )
+        csv_path = self._make_csv(tmp_path, csv_content)
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+
+        assert import_bot_csv(csv_path, cache) == 1
+        rate = cache.get_multi_rate(date(2025, 1, 2), "GBP", "mid_rate")
+        assert isinstance(rate, Decimal)
+        assert str(rate) == "42.1235"
+        assert rate.as_tuple().exponent == -4
+        cache.close()
+
+    def test_long_and_wide_paths_quantize_identically(self, tmp_path):
+        """F30: the same over-precise digits yield the identical stored
+        Decimal through either format — the two paths must never diverge."""
+        from core.database import CacheDB
+
+        wide = self._make_csv(
+            tmp_path,
+            "Period,Currency_ID,Buying Transfer,Selling\n"
+            "2025-01-02,USD,42.123456,\n",
+        )
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+        import_bot_csv(wide, cache)
+        from_wide = cache.get_multi_rate(
+            date(2025, 1, 2), "USD", "buying_transfer",
+        )
+
+        long_path = str(tmp_path / "long.csv")
+        with open(long_path, "w", encoding="utf-8") as f:
+            f.write(
+                "Period,Currency_ID,Rate_Type,Value\n"
+                "2025-01-03,USD,buying_transfer,42.123456\n"
+            )
+        import_bot_csv(long_path, cache)
+        from_long = cache.get_multi_rate(
+            date(2025, 1, 3), "USD", "buying_transfer",
+        )
+
+        assert from_wide == from_long == Decimal("42.1235")
+        assert str(from_wide) == str(from_long)
+        cache.close()
+
+    def test_non_finite_wide_values_skipped(self, tmp_path):
+        """F30: NaN/Infinity parse as Decimals but must never reach the
+        cache; the row is skipped while a valid sibling row still imports."""
+        from core.database import CacheDB
+
+        csv_content = (
+            "Period,Currency_ID,Buying Transfer,Selling\n"
+            "2025-01-02,USD,NaN,Infinity\n"    # both non-finite -> skipped
+            "2025-01-03,USD,34.6000,34.9000\n"  # valid
+        )
+        csv_path = self._make_csv(tmp_path, csv_content)
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+
+        assert import_bot_csv(csv_path, cache) == 1
+        assert cache.get_multi_rate(
+            date(2025, 1, 2), "USD", "buying_transfer",
+        ) is None
+        assert cache.get_multi_rate(
+            date(2025, 1, 3), "USD", "buying_transfer",
+        ) == Decimal("34.6000")
+        cache.close()
+
+    def test_non_finite_long_value_skipped(self, tmp_path):
+        """F30: the long-format path rejects non-finite values the same way."""
+        from core.database import CacheDB
+
+        csv_content = (
+            "Period,Currency_ID,Rate_Type,Value\n"
+            "2025-01-02,GBP,mid_rate,NaN\n"
+            "2025-01-03,GBP,mid_rate,44.1234\n"
+        )
+        csv_path = self._make_csv(tmp_path, csv_content)
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+
+        assert import_bot_csv(csv_path, cache) == 1
+        assert cache.get_multi_rate(
+            date(2025, 1, 2), "GBP", "mid_rate",
+        ) is None
+        assert cache.get_multi_rate(
+            date(2025, 1, 3), "GBP", "mid_rate",
+        ) == Decimal("44.1234")
+        cache.close()
+
     def test_long_format_imports(self, tmp_path):
         """The app's own long export format must import losslessly."""
         from core.database import CacheDB

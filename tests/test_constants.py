@@ -8,12 +8,15 @@ plausible-year bounds, day-first policy) and the BOT business-date helper.
 """
 
 from datetime import date, datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 
 from core.constants import (
     LEDGER_SUPPORTED_CURRENCIES,
     PER_100_UNIT_CURRENCIES,
     bot_today,
+    format_rate_value,
     parse_date,
+    parse_decimal_safe,
 )
 
 
@@ -127,3 +130,62 @@ class TestBotToday:
 
     def test_returns_date_type(self):
         assert isinstance(bot_today(), date)
+
+
+class TestFormatRateValueRoundingMode:
+    """ROUND_HALF_EVEN is the pinned project standard for 4dp quantization.
+
+    Boundary values are exact decimal ties at the 5th decimal place, chosen
+    so HALF_EVEN and HALF_UP disagree — locking the mode, not just the math.
+    """
+
+    def test_tie_with_even_digit_rounds_down(self):
+        # HALF_EVEN -> 34.5678 (8 is even); HALF_UP would give 34.5679.
+        assert format_rate_value(Decimal("34.56785")) == "34.5678"
+
+    def test_tie_with_even_digit_rounds_down_small(self):
+        # HALF_EVEN -> 1.2344 (4 is even); HALF_UP would give 1.2345.
+        assert format_rate_value(Decimal("1.23445")) == "1.2344"
+
+    def test_tie_with_odd_digit_rounds_up(self):
+        # HALF_EVEN -> 1.2344 (3 is odd, rounds to even 4) — same as HALF_UP.
+        assert format_rate_value(Decimal("1.23435")) == "1.2344"
+
+    def test_non_tie_rounds_normally(self):
+        assert format_rate_value(Decimal("34.56789")) == "34.5679"
+
+    def test_pads_short_values_to_4dp(self):
+        assert format_rate_value(Decimal("1.2")) == "1.2000"
+
+    def test_mode_pinned_against_ambient_context(self):
+        # Pre-pin, the quantize inherited the ambient decimal context; a
+        # HALF_UP context would have flipped the tie to 34.5679. The
+        # explicit rounding= argument must make the context irrelevant.
+        with localcontext() as ctx:
+            ctx.rounding = ROUND_HALF_UP
+            assert format_rate_value(Decimal("34.56785")) == "34.5678"
+
+    def test_none_returns_empty_string(self):
+        assert format_rate_value(None) == ""
+
+    def test_float_path_unchanged(self):
+        assert format_rate_value(33.1234) == "33.1234"
+
+
+class TestParseDecimalSafeNoRounding:
+    """parse_decimal_safe preserves literal digits — no quantize, no mode."""
+
+    def test_preserves_five_decimal_places(self):
+        result = parse_decimal_safe("34.56785")
+        assert result == Decimal("34.56785")
+        assert str(result) == "34.56785"
+
+    def test_strips_whitespace(self):
+        assert parse_decimal_safe("  34.5678 ") == Decimal("34.5678")
+
+    def test_empty_returns_none(self):
+        assert parse_decimal_safe("") is None
+        assert parse_decimal_safe(None) is None
+
+    def test_non_numeric_returns_none(self):
+        assert parse_decimal_safe("not-a-rate") is None

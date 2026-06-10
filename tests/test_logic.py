@@ -7,7 +7,7 @@ Unit tests for core/logic.py — V2.5 Standard Date Resolution Engine.
 """
 
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 
 import pytest
 
@@ -58,6 +58,38 @@ class TestSafeToDecimal:
     def test_negative_value(self):
         result = safe_to_decimal(-12.5)
         assert result == Decimal("-12.5000")
+
+
+class TestSafeToDecimalRoundingMode:
+    """ROUND_HALF_EVEN is the pinned project standard for 4dp quantization.
+
+    Boundary values are exact decimal ties at the 5th decimal place, chosen
+    so HALF_EVEN and HALF_UP disagree — locking the mode, not just the math.
+    """
+
+    def test_tie_with_even_digit_rounds_down(self):
+        # HALF_EVEN -> 34.5678 (8 is even); HALF_UP would give 34.5679.
+        assert safe_to_decimal("34.56785") == Decimal("34.5678")
+
+    def test_tie_with_even_digit_rounds_down_small(self):
+        # HALF_EVEN -> 1.2344 (4 is even); HALF_UP would give 1.2345.
+        assert safe_to_decimal("1.23445") == Decimal("1.2344")
+
+    def test_tie_with_odd_digit_rounds_up(self):
+        # HALF_EVEN -> 1.2344 (3 is odd, rounds to even 4) — same as HALF_UP.
+        assert safe_to_decimal("1.23435") == Decimal("1.2344")
+
+    def test_tie_at_zero_boundary(self):
+        # HALF_EVEN -> 0.0000 (0 is even); HALF_UP would give 0.0001.
+        assert safe_to_decimal("0.00005") == Decimal("0.0000")
+
+    def test_mode_pinned_against_ambient_context(self):
+        # Pre-pin, the quantize inherited the ambient decimal context; a
+        # HALF_UP context would have flipped the tie to 34.5679. The
+        # explicit rounding= argument must make the context irrelevant.
+        with localcontext() as ctx:
+            ctx.rounding = ROUND_HALF_UP
+            assert safe_to_decimal("34.56785") == Decimal("34.5678")
 
 
 # =========================================================================

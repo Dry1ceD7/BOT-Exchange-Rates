@@ -382,6 +382,48 @@ def _build_exrate_summary(currencies, rate_types, date_range) -> str:
     )
 
 
+def _verify_exrate_dest(dest: str) -> None:
+    """Light structural read-back of the moved destination file (F50/F201).
+
+    The engine path already proved every written cell against the in-memory
+    expected values BEFORE its atomic save (core/workbook_io.atomic_save's
+    verify hook), so this only re-checks the file that actually landed at
+    ``dest`` after shutil.move: it must reopen as a workbook, carry an
+    "ExRate" sheet, and have a populated row 2. One cheap read-only pass.
+
+    Raises:
+        ValueError: On any structural failure (including an unreadable
+            file), so the worker's existing error path surfaces it.
+    """
+    import gc
+
+    from openpyxl import load_workbook
+
+    wb = None
+    try:
+        try:
+            wb = load_workbook(dest, read_only=True, data_only=False)
+            if "ExRate" not in wb.sheetnames:
+                raise ValueError("no ExRate sheet present")
+            ws = wb["ExRate"]
+            row2 = next(
+                ws.iter_rows(min_row=2, max_row=2, values_only=True), None,
+            )
+            if row2 is None or all(v in (None, "") for v in row2):
+                raise ValueError("ExRate sheet has no data in row 2")
+        except Exception as exc:
+            raise ValueError(
+                "Post-write verification failed for "
+                f"{Path(dest).name}: {exc}"
+            ) from exc
+    finally:
+        if wb is not None:
+            with contextlib.suppress(OSError):
+                wb.close()
+        del wb
+        gc.collect()
+
+
 def _create_exrate_file(app, currencies, rate_types, date_range=None):
     """Create a new standalone ExRate file — fully independent, pulls from BOT API.
 
@@ -592,6 +634,11 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
                 # Success: atomically move the fully-written temp over dest.
                 shutil.move(tmp_path, dest)
                 tmp_path = None
+                # Structural read-back of what actually landed at dest — a
+                # botched move/unreadable file must fail loudly, not report
+                # success (the per-cell verification already ran inside the
+                # engine's atomic save against the temp).
+                _verify_exrate_dest(dest)
                 with contextlib.suppress(RuntimeError):
                     app.after(0, _done, True,
                               f"✓ ExRate created: {Path(dest).name} — {summary}")

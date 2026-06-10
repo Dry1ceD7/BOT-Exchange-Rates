@@ -37,7 +37,7 @@ from core.audit_logger import AuditLogger
 from core.constants import MIN_DISK_SPACE_MB
 from core.constants import parse_date as _parse_date
 from core.logic import safe_to_decimal
-from core.workbook_io import atomic_save, ensure_disk_space
+from core.workbook_io import atomic_save, build_cell_verifier, ensure_disk_space
 
 logger = logging.getLogger(__name__)
 
@@ -368,7 +368,17 @@ class StandaloneRateAuditor:
                 _status("Backup created")
                 apply_corrections(ws, report)
                 ensure_disk_space(Path(filepath).parent, MIN_DISK_SPACE_MB)
-                atomic_save(wb, filepath)
+                # Layer-1 hard gate (F201): reopen the saved TEMP and prove
+                # each corrected cell round-trips as exactly the intended 4dp
+                # Decimal BEFORE it replaces the original. A mismatch aborts
+                # the swap — the user's file stays byte-for-byte untouched.
+                expected_cells: dict[int, dict[int, object]] = {}
+                for ch in report.changes:
+                    expected_cells.setdefault(ch.row, {})[ch.col] = ch.new_value
+                atomic_save(
+                    wb, filepath,
+                    verify=build_cell_verifier({ws.title: expected_cells}),
+                )
                 _status(f"✓ Applied {report.change_count} correction(s)")
             elif report.changes:
                 _status(f"{report.change_count} difference(s) found (preview)")

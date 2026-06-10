@@ -13,7 +13,7 @@ Override via environment variables where noted.
 import logging
 import os
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 
 logger = logging.getLogger(__name__)
 
@@ -283,13 +283,22 @@ def format_rate_value(value) -> str:
     if value is None:
         return ""
     if isinstance(value, Decimal):
-        return f"{value:.4f}"
+        # Quantize with ROUND_HALF_EVEN (banker's rounding) — the pinned
+        # project standard, explicit so the result never drifts with the
+        # ambient decimal context — pending any department mandate.
+        return f"{value.quantize(Decimal('0.0001'), rounding=ROUND_HALF_EVEN)}"
+    # Float path: Python's fixed-point float formatting is round-half-even
+    # on the binary value (exact decimal ties are vanishingly rare here).
     return f"{float(value):.4f}"
 
 
 def parse_decimal_safe(raw) -> Decimal | None:
     """
     Parse a rate cell into an exact Decimal, preserving the literal digits.
+
+    Deliberately performs NO quantize — no rounding mode applies here; the
+    source digits pass through untouched. Any later 4dp quantize must pin
+    rounding=ROUND_HALF_EVEN (the project standard).
 
     Returns None (and debug-logs) for empty/unparseable values instead of
     silently swallowing them, so mis-formatted data is observable in logs.

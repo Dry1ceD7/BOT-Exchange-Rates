@@ -6,6 +6,7 @@ Unit tests for core/exrate_sheet.py — Master ExRate sheet builder.
 ---------------------------------------------------------------------------
 """
 
+import logging
 from datetime import date
 from decimal import Decimal
 
@@ -207,6 +208,177 @@ class TestWeekendHolidayRatesBlank:
             usd_b, {}, {}, {},
         )
         assert merged[sat]["usd_buy"] == Decimal("33.9999")
+
+
+# =========================================================================
+#  SHEET-SOURCED VALUES — re-validated 4dp fallback + weekend cleanup
+# =========================================================================
+
+class TestSheetFallbackRequantized:
+    """F47: the trading-day existing-value fallback is re-validated through
+    safe_to_decimal (string-built Decimal, 4dp) — a raw openpyxl float is
+    never echoed back to the cell — and each sheet-sourced date+column is
+    logged."""
+
+    def test_merge_fallback_requantizes_legacy_float(self):
+        mon = date(2025, 3, 10)  # Monday — trading day
+        existing = {mon: {
+            "usd_buy": 34.564999999999998,  # binary-float artifact
+            "usd_sell": None, "eur_buy": None, "eur_sell": None,
+        }}
+        merged = _merge_rate_data(
+            {mon}, existing, set(), {},
+            {}, {}, {}, {},
+        )
+        val = merged[mon]["usd_buy"]
+        assert isinstance(val, Decimal)
+        assert val == Decimal("34.5650")
+        assert val.as_tuple().exponent == -4
+
+    def test_existing_6dp_float_rewritten_quantized_4dp(self, caplog):
+        """End-to-end: a 6dp float left on the sheet by an older build is
+        re-written as the 4dp string-built Decimal, and the sheet-sourced
+        date is logged."""
+        mon = date(2025, 3, 10)  # Monday — trading day
+        wb = openpyxl.Workbook()
+        ws = wb.create_sheet("ExRate")
+        ws.cell(row=2, column=1, value=mon)
+        ws.cell(row=2, column=2, value=32.123456)  # 6dp legacy float
+        with caplog.at_level(logging.DEBUG, logger="core.exrate_sheet"):
+            update_master_exrate_sheet(
+                wb,
+                usd_buying_rates={}, usd_selling_rates={},
+                eur_buying_rates={}, eur_selling_rates={},
+                holidays_list=[], holidays_names={},
+                start_date=mon, end_date=mon,
+            )
+        cell = wb["ExRate"].cell(row=2, column=2)
+        assert isinstance(cell.value, Decimal)
+        assert cell.value == Decimal("32.1235")
+        assert cell.value.as_tuple().exponent == -4
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "sourced from existing sheet" in m
+            and "2025-03-10" in m and "usd_buy" in m
+            for m in messages
+        )
+        wb.close()
+
+
+class TestWeekendCarryForwardCleanup:
+    """F48: v3.4.0/v3.5.0 (2026-06-04..06-09) fabricated weekend/holiday
+    carry-forward rates; the merge must drop sheet-sourced values on
+    non-trading rows (cell stays blank) and log each drop. Genuine
+    BOT-published weekend rates (present in the fresh API/cache data for
+    that exact date) are honored."""
+
+    def test_carry_forward_saturday_blanked_on_rebuild(self, caplog):
+        """A Saturday cell equal to Friday's value (the carry-forward
+        signature) is blanked on rebuild, with an INFO log record."""
+        fri = date(2025, 3, 7)   # Friday — trading day
+        sat = date(2025, 3, 8)   # Saturday
+        wb = openpyxl.Workbook()
+        ws = wb.create_sheet("ExRate")
+        # Simulate a v3.4.0/v3.5.0 workbook: Friday's rate carried into
+        # Saturday (openpyxl reads such cells back as floats).
+        ws.cell(row=2, column=1, value=fri)
+        ws.cell(row=2, column=2, value=34.565)
+        ws.cell(row=3, column=1, value=sat)
+        ws.cell(row=3, column=2, value=34.565)
+        ws.cell(row=3, column=6, value="Weekend")
+        with caplog.at_level(logging.INFO, logger="core.exrate_sheet"):
+            update_master_exrate_sheet(
+                wb,
+                usd_buying_rates={fri: Decimal("34.5650")},
+                usd_selling_rates={},
+                eur_buying_rates={}, eur_selling_rates={},
+                holidays_list=[], holidays_names={},
+                start_date=fri, end_date=sat,
+            )
+        ws = wb["ExRate"]
+        # Row 2 = Friday (kept, exact 4dp), row 3 = Saturday (blanked).
+        assert ws.cell(row=2, column=2).value == Decimal("34.5650")
+        assert ws.cell(row=3, column=2).value is None
+        assert ws.cell(row=3, column=6).value == "Weekend"
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "carry-forward" in m and "2025-03-08" in m and "usd_buy" in m
+            for m in messages
+        )
+        wb.close()
+
+    def test_genuine_api_weekend_rate_survives_stale_sheet_value(
+        self, caplog
+    ):
+        """API priority: a BOT-published weekend rate for that exact date is
+        kept — the stale sheet value is simply superseded, not 'cleaned'."""
+        sat = date(2025, 3, 8)   # Saturday
+        existing = {sat: {
+            "usd_buy": 33.5,
+            "usd_sell": None, "eur_buy": None, "eur_sell": None,
+        }}
+        usd_b = {sat: Decimal("33.9999")}
+        with caplog.at_level(logging.INFO, logger="core.exrate_sheet"):
+            merged = _merge_rate_data(
+                {sat}, existing, set(), {},
+                usd_b, {}, {}, {},
+            )
+        assert merged[sat]["usd_buy"] == Decimal("33.9999")
+        assert not any(
+            "cleanup" in r.getMessage() for r in caplog.records
+        )
+
+    def test_sheet_only_weekend_value_without_signature_also_dropped(
+        self, caplog
+    ):
+        """Decision (documented): a Saturday cell DIFFERING from Friday's
+        value is still sheet-sourced on a non-trading day with no API
+        backing. Per the frozen invariant (weekend/holiday rows are Date +
+        label only) it is ALSO dropped — the carry-forward signature only
+        classifies the log line. API-backed weekend values stay; sheet-only
+        weekend values go."""
+        fri = date(2025, 3, 7)   # Friday — trading day
+        sat = date(2025, 3, 8)   # Saturday
+        existing = {sat: {
+            "usd_buy": 77.7777,  # does NOT match Friday's 33.5000
+            "usd_sell": None, "eur_buy": None, "eur_sell": None,
+        }}
+        usd_b = {fri: Decimal("33.5000")}
+        with caplog.at_level(logging.INFO, logger="core.exrate_sheet"):
+            merged = _merge_rate_data(
+                {fri, sat}, existing, set(), {},
+                usd_b, {}, {}, {},
+            )
+        assert merged[fri]["usd_buy"] == Decimal("33.5000")
+        assert merged[sat]["usd_buy"] is None
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "sheet-only" in m and "2025-03-08" in m and "usd_buy" in m
+            for m in messages
+        )
+        assert not any("carry-forward" in m for m in messages)
+
+    def test_holiday_carry_forward_also_dropped(self, caplog):
+        """Holiday rows get the same cleanup as weekends."""
+        fri = date(2025, 3, 7)   # Friday — trading day
+        mon = date(2025, 3, 10)  # Monday — declared holiday
+        existing = {mon: {
+            "usd_buy": 34.0,     # carried forward from Friday
+            "usd_sell": None, "eur_buy": None, "eur_sell": None,
+        }}
+        usd_b = {fri: Decimal("34.0000")}
+        with caplog.at_level(logging.INFO, logger="core.exrate_sheet"):
+            merged = _merge_rate_data(
+                {fri, date(2025, 3, 8), date(2025, 3, 9), mon},
+                existing, {mon}, {mon: "Test Holiday"},
+                usd_b, {}, {}, {},
+            )
+        assert merged[mon]["usd_buy"] is None
+        assert any(
+            "carry-forward" in r.getMessage()
+            and "2025-03-10" in r.getMessage()
+            for r in caplog.records
+        )
 
 
 # =========================================================================

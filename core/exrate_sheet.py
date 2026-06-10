@@ -8,6 +8,7 @@ Separated from engine.py for SFFB compliance (<200 lines).
 Builds and updates the unified "ExRate" master tab in Excel workbooks.
 """
 
+import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -17,6 +18,9 @@ from openpyxl.utils import get_column_letter
 
 from core.constants import bot_today
 from core.constants import parse_date as _shared_parse_date
+from core.logic import safe_to_decimal
+
+logger = logging.getLogger(__name__)
 
 
 def update_master_exrate_sheet(
@@ -200,6 +204,22 @@ def _merge_rate_data(
     exact-match and intentionally yields "" for a weekend/holiday-dated
     transaction. This matches the v3.2.8 behavior.
 
+    Existing-value fallback (trading days only): a value read back from the
+    sheet is re-validated through safe_to_decimal (string-built Decimal,
+    quantized 4dp) before it is re-written — never echoed as a raw openpyxl
+    float. Non-numeric sheet residue quantizes to None (cell goes blank).
+    Each sheet-sourced date+column is logged at DEBUG.
+
+    Non-trading (weekend/holiday) rows NEVER take the sheet fallback. A
+    fresh API/cache rate for that exact date is honored (genuine
+    BOT-published weekend rate, API priority as always), but a sheet-only
+    value is dropped and logged at INFO — whether it matches the
+    carry-forward signature (value equals the nearest prior trading-day's
+    value in the same column, as fabricated by v3.4.0/v3.5.0 builds of
+    2026-06-04..06-09) or not: per the frozen invariant, weekend/holiday
+    rows are Date + label only, so any sheet-sourced rate there has no BOT
+    backing. The signature only classifies the log line.
+
     ``extra_currency_rates`` ({ccy: {date: Decimal}}) is treated identically
     under per-currency keys ``f"extra:{ccy}"`` — a GBP/JPY weekend row also
     stays blank.
@@ -210,10 +230,15 @@ def _merge_rate_data(
     all_keys = list(rate_keys) + list(extra_keys.values())
 
     merged: dict[date, dict] = {}
+    # Nearest prior trading-day value per column (4dp Decimal) — the value
+    # the v3.4.0/v3.5.0 carry-forward would have copied into a weekend or
+    # holiday row. Used only to classify cleanup log lines.
+    prior_trading: dict[str, Decimal] = {}
     for d in sorted(all_dates):
         existing = existing_data.get(d, {})
         is_weekend = d.weekday() >= 5
         is_holiday = d in holidays_set
+        is_trading = not is_weekend and not is_holiday
 
         # Keep rate values as Decimal end-to-end — NEVER cast to float.
         # float() corrupts 4dp precision (34.5650 -> 34.564999...).
@@ -240,11 +265,49 @@ def _merge_rate_data(
             # API value wins; otherwise fall back to whatever was already on
             # the sheet. NO weekend/holiday carry-forward — those rows keep a
             # blank rate cell (only Date + label survive), matching v3.2.8.
-            entry[key] = (
-                row_rates[key]
-                if row_rates[key] is not None
-                else existing.get(key)
-            )
+            if row_rates[key] is not None:
+                # Genuine BOT value for this exact date — kept even on a
+                # weekend/holiday (API priority, defensive).
+                entry[key] = row_rates[key]
+                continue
+            sheet_val = existing.get(key)
+            if sheet_val is None or sheet_val == "":
+                entry[key] = None
+                continue
+            if is_trading:
+                # Sheet fallback re-validated: string-built Decimal, 4dp.
+                # A raw openpyxl float is never echoed back to the cell.
+                entry[key] = safe_to_decimal(sheet_val)
+                if entry[key] is not None:
+                    logger.debug(
+                        "ExRate merge: %s %s=%s sourced from existing sheet "
+                        "(no BOT value for this date)",
+                        d.isoformat(), key, entry[key],
+                    )
+            else:
+                # Weekend/holiday cleanup: sheet-only value has no BOT
+                # backing — drop it (cell stays blank, Date + label only).
+                entry[key] = None
+                dropped = safe_to_decimal(sheet_val)
+                if dropped is not None and dropped == prior_trading.get(key):
+                    logger.info(
+                        "ExRate merge cleanup: dropped carry-forward rate "
+                        "%s on %s (%s) — equals nearest prior trading-day "
+                        "value (v3.4.0/v3.5.0 fabrication signature)",
+                        dropped, d.isoformat(), key,
+                    )
+                else:
+                    logger.info(
+                        "ExRate merge cleanup: dropped sheet-only rate %s "
+                        "on non-trading day %s (%s) — no BOT rate published",
+                        dropped if dropped is not None else sheet_val,
+                        d.isoformat(), key,
+                    )
+
+        if is_trading:
+            for key in all_keys:
+                if entry[key] is not None:
+                    prior_trading[key] = safe_to_decimal(entry[key])
 
         entry["holidays_weekend"] = holiday_label
         merged[d] = entry
