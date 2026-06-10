@@ -755,12 +755,12 @@ class TestRateTypeSnapshot:
         wb.save(str(path))
         wb.close()
 
-        engine = _ledger_engine({"USD": (33.0, 33.5), "EUR": (36.0, 36.5)},
-                                tmp_cache)
-
         # SettingsManager().load() yields "buying_transfer" at snapshot time,
         # then flips to "selling" to simulate a concurrent mid-run Save. The
-        # writer must use the value captured BEFORE the flip.
+        # writer must use the value captured BEFORE the flip. The patch is
+        # installed BEFORE the engine is constructed because the snapshot is
+        # taken in LedgerEngine.__init__ — patching afterwards would leave the
+        # snapshot to whatever settings file happened to exist on disk.
         state = {"rate_type": "buying_transfer"}
 
         class _Settings:
@@ -772,6 +772,13 @@ class TestRateTypeSnapshot:
                 return {"rate_type": val}
 
         monkeypatch.setattr(engine_mod, "SettingsManager", _Settings)
+
+        engine = _ledger_engine({"USD": (33.0, 33.5), "EUR": (36.0, 36.5)},
+                                tmp_cache)
+        # Construction consumed exactly the first (pre-flip) read: the
+        # snapshot is deterministic, independent of any on-disk settings.
+        assert engine._rate_type == "buying_transfer"
+        assert state["rate_type"] == "selling"
 
         captured = {}
         from core.exrate_updater import WorkbookWriter
