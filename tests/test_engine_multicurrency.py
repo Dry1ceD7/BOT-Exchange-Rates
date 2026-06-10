@@ -563,6 +563,48 @@ class TestLedgerMultiCurrency:
             for m in warnings
         ), warnings
 
+    def test_jpy_is_unsupported_and_emits_warning(self, tmp_path, tmp_cache):
+        """F4: BOT quotes JPY per 100 yen, so JPY is excluded from the ledger
+        path — its rows must take the unsupported route (blank cell + warning,
+        no dynamic 'JPY Rate' column), never a verbatim per-100 rate."""
+        path = self._ledger(tmp_path, [
+            (date(2025, 1, 7), "USD"),
+            (date(2025, 1, 7), "JPY"),
+        ])
+        # Even with JPY data available from the API, the ledger path must NOT
+        # fetch it — the published per-100 figure would overstate 100x.
+        engine = _ledger_engine(
+            {"USD": (33.0, 33.5), "EUR": (36.0, 36.5),
+             "JPY": (23.1234, 23.5)},
+            tmp_cache,
+        )
+        events = self._collect_warnings(engine)
+        asyncio.run(engine.process_ledger(path))
+
+        warnings = [e["msg"] for e in events if e["type"] == "warning"]
+        assert any(
+            "unsupported currency JPY" in m and "1 row" in m
+            for m in warnings
+        ), warnings
+
+        wb = openpyxl.load_workbook(path)
+        try:
+            ws_ex = wb["ExRate"]
+            headers = [
+                ws_ex.cell(row=1, column=c).value
+                for c in range(1, (ws_ex.max_column or 1) + 1)
+            ]
+            # No dynamic JPY column appended to the master sheet.
+            assert "JPY Rate" not in headers
+            # The injected IFS formula carries NO JPY branch — the row falls
+            # through to the TRUE,"" fallback and renders blank in Excel
+            # (never a verbatim per-100 rate).
+            jpy_formula = wb["Jan"].cell(row=3, column=3).value
+            assert isinstance(jpy_formula, str)
+            assert '="JPY"' not in jpy_formula
+        finally:
+            wb.close()
+
     def test_no_rate_available_emits_warning(self, tmp_path, tmp_cache):
         """A USD row dated where no rate exists (API returns nothing) is
         flagged instead of silently blank."""

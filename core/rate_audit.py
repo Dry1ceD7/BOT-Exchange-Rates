@@ -52,6 +52,38 @@ EXRATE_RATE_COLUMNS: tuple[tuple[int, str, str, str], ...] = (
 )
 DATA_START_ROW = 2
 
+# Column A header on the standard sheet (core/exrate_sheet.py HEADERS[0]).
+EXRATE_DATE_HEADER = "Date"
+
+# Refusal message for a sheet whose A-E headers do not match the standard
+# layout. Surfaced verbatim in the report and the run() status/error.
+LAYOUT_ERROR_MSG = (
+    "Non-standard ExRate layout — audit supports only the standard USD/EUR sheet"
+)
+
+
+def validate_exrate_layout(ws) -> str | None:
+    """Return :data:`LAYOUT_ERROR_MSG` when row 1 isn't the standard layout.
+
+    The scanner hard-codes the B-E column meanings (EXRATE_RATE_COLUMNS), but
+    the app's ExRate dialog can also produce CUSTOM-layout sheets named
+    "ExRate" (e.g. "Date | GBP Buying TT | GBP Selling | Holidays/Weekend").
+    Auditing one of those would overwrite foreign-currency cells with USD/EUR
+    values, so columns A-E must carry the canonical core/exrate_sheet.py
+    header labels (whitespace/case tolerant). Extra columns beyond E — a
+    standard sheet with appended extra currencies — are valid and ignored.
+    """
+    expected = [(1, EXRATE_DATE_HEADER)]
+    expected += [(col, label) for col, label, _ccy, _rt in EXRATE_RATE_COLUMNS]
+    for col, label in expected:
+        actual = ws.cell(row=1, column=col).value
+        if (
+            not isinstance(actual, str)
+            or actual.strip().casefold() != label.casefold()
+        ):
+            return LAYOUT_ERROR_MSG
+    return None
+
 
 def rate_key(currency: str, rate_type: str) -> str:
     """Lookup key for the bot_rates map: ``"USD:buying_transfer"`` etc."""
@@ -86,6 +118,9 @@ class RateAuditReport:
     # Trading-day cells that held a value but BOT had no rate to compare
     # against (e.g. a date beyond the available BOT history). Left untouched.
     unverifiable: int = 0
+    # Set (LAYOUT_ERROR_MSG) when row 1 isn't the standard A-E layout — the
+    # scan aborted with zero corrections and nothing may be written.
+    layout_error: str | None = None
     backup_path: str | None = None
     applied: bool = False
 
@@ -119,8 +154,16 @@ def scan_exrate_corrections(
     BOT's published value — including a blank trading-day cell that BOT *does*
     publish (recorded as a "missing rate filled" correction). A blank weekend/
     holiday cell is correct by design and is never filled.
+
+    GUARD — the row-1 headers of columns A-E must match the standard
+    core/exrate_sheet.py layout (see :func:`validate_exrate_layout`). On a
+    custom layout the scan aborts immediately: the report carries
+    ``layout_error`` and ZERO corrections, so nothing can be applied.
     """
     report = RateAuditReport(sheet=ws.title)
+    report.layout_error = validate_exrate_layout(ws)
+    if report.layout_error:
+        return report
     holidays = set(holidays_set or ())
     max_row = ws.max_row or 0
 
@@ -297,14 +340,24 @@ class StandaloneRateAuditor:
         holidays_set = set(logic_engine.holidays)
 
         # Pass 2: load read-write, compare, optionally back up + apply + save.
+        # Macro-enabled workbooks need keep_vba or the save silently strips
+        # their VBA project (same rule as the ledger write pipeline).
         _status("Comparing against BOT...")
-        wb = openpyxl.load_workbook(filepath)
+        keep_vba = Path(filepath).suffix.lower() in (".xlsm", ".xltm")
+        wb = openpyxl.load_workbook(filepath, keep_vba=keep_vba)
         try:
             if "ExRate" not in wb.sheetnames:
                 raise ValueError("No ExRate sheet found in the selected file.")
             ws = wb["ExRate"]
             report = scan_exrate_corrections(ws, bot_rates, holidays_set)
             report.file = filepath
+
+            # Custom-layout refusal (F9): the scan produced ZERO corrections
+            # by contract — abort before any backup/apply/save so the file is
+            # untouched, and surface the reason as a hard error.
+            if report.layout_error:
+                _status(report.layout_error)
+                raise ValueError(report.layout_error)
 
             if report.changes and apply:
                 # Back up the on-disk original BEFORE overwriting (enables

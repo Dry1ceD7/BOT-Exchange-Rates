@@ -232,6 +232,24 @@ def inject_xlookup_formulas(
         usd_col = "B"
         eur_col = "D"
 
+    def _guarded_lookup(date_ref: str, rate_col: str) -> str:
+        """One IFS branch value: exact-match XLOOKUP, guarded twice.
+
+        The "" 4th arg covers NOT-FOUND only. Weekend/holiday rows EXIST
+        in the ExRate sheet with blank rate cells, so an unguarded lookup
+        returns a reference to an empty cell which Excel renders as
+        numeric 0 — accountants would see EX Rate = 0.0000 and dependent
+        THB amounts compute 0. The IF guard renders found-but-empty
+        results as blank "" instead. Exact-match semantics (match_mode 0)
+        are preserved: NO rollback, NO carry-forward.
+        """
+        lookup = (
+            f"_xlfn.XLOOKUP({date_ref},"
+            f"ExRate!$A$2:$A${N},"
+            f"ExRate!${rate_col}$2:${rate_col}${N},\"\",0)"
+        )
+        return f"IFERROR(IF({lookup}=\"\",\"\",{lookup}),\"\")"
+
     for sheet_name, mapping in sheet_maps.items():
         ws = wb[sheet_name]
         cols = mapping["columns"]
@@ -282,13 +300,9 @@ def inject_xlookup_formulas(
             ifs_branches = (
                 f"{cur_ref}=\"THB\",1,"
                 f"{cur_ref}=\"USD\","
-                f"IFERROR(_xlfn.XLOOKUP({date_ref},"
-                f"ExRate!$A$2:$A${N},"
-                f"ExRate!${usd_col}$2:${usd_col}${N},\"\",0),\"\"),"
+                f"{_guarded_lookup(date_ref, usd_col)},"
                 f"{cur_ref}=\"EUR\","
-                f"IFERROR(_xlfn.XLOOKUP({date_ref},"
-                f"ExRate!$A$2:$A${N},"
-                f"ExRate!${eur_col}$2:${eur_col}${N},\"\",0),\"\")"
+                f"{_guarded_lookup(date_ref, eur_col)}"
             )
 
             # Additional currency branches from exrate_col_map
@@ -307,10 +321,7 @@ def inject_xlookup_formulas(
                         continue
                     ifs_branches += (
                         f",{cur_ref}=\"{ccy}\","
-                        f"IFERROR(_xlfn.XLOOKUP({date_ref},"
-                        f"ExRate!$A$2:$A${N},"
-                        f"ExRate!${col_letter}$2:${col_letter}${N},"
-                        f"\"\",0),\"\")"
+                        f"{_guarded_lookup(date_ref, col_letter)}"
                     )
 
             formula = (

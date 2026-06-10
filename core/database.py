@@ -26,6 +26,23 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Per-column upsert for the legacy rates table. ON CONFLICT + COALESCE keeps
+# any column the new row leaves as NULL — a USD-only insert (e.g. one row of
+# a wide BOT CSV import) must never wipe the EUR columns the way the old
+# INSERT OR REPLACE did (REPLACE rewrites the whole row, nulling unspecified
+# columns). A non-NULL new value still overwrites, so today's rate refreshes
+# when new data arrives (Core Rule 5).
+_RATES_UPSERT_SQL = (
+    "INSERT INTO rates "
+    "(date, usd_buying, usd_selling, eur_buying, eur_selling) "
+    "VALUES (?, ?, ?, ?, ?) "
+    "ON CONFLICT(date) DO UPDATE SET "
+    "usd_buying  = COALESCE(excluded.usd_buying,  usd_buying), "
+    "usd_selling = COALESCE(excluded.usd_selling, usd_selling), "
+    "eur_buying  = COALESCE(excluded.eur_buying,  eur_buying), "
+    "eur_selling = COALESCE(excluded.eur_selling, eur_selling)"
+)
+
 
 class CacheDB:
     """
@@ -274,13 +291,15 @@ class CacheDB:
     def insert_rate(self, target_date: date, usd_buying: float = None,
                     usd_selling: float = None, eur_buying: float = None,
                     eur_selling: float = None):
-        """Insert or update a single rate entry."""
+        """Insert or update a single rate entry.
+
+        Per-column upsert: columns passed as None preserve any value already
+        cached for that date instead of nulling it (see _RATES_UPSERT_SQL).
+        """
         date_str = target_date.strftime("%Y-%m-%d")
         conn = self._conn()
         conn.execute(
-            "INSERT OR REPLACE INTO rates "
-            "(date, usd_buying, usd_selling, eur_buying, eur_selling) "
-            "VALUES (?, ?, ?, ?, ?)",
+            _RATES_UPSERT_SQL,
             (date_str, usd_buying, usd_selling, eur_buying, eur_selling)
         )
         conn.commit()
@@ -289,16 +308,13 @@ class CacheDB:
         """
         Bulk insert/update rates.
         Each entry is (date_str, usd_buying, usd_selling, eur_buying, eur_selling).
+        Per-column upsert: None values preserve existing cached columns
+        instead of nulling them (see _RATES_UPSERT_SQL).
         """
         if not entries:
             return
         conn = self._conn()
-        conn.executemany(
-            "INSERT OR REPLACE INTO rates "
-            "(date, usd_buying, usd_selling, eur_buying, eur_selling) "
-            "VALUES (?, ?, ?, ?, ?)",
-            entries
-        )
+        conn.executemany(_RATES_UPSERT_SQL, entries)
         conn.commit()
 
     # ================================================================== #

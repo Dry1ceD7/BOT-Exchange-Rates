@@ -9,7 +9,12 @@ plausible-year bounds, day-first policy) and the BOT business-date helper.
 
 from datetime import date, datetime, timedelta, timezone
 
-from core.constants import bot_today, parse_date
+from core.constants import (
+    LEDGER_SUPPORTED_CURRENCIES,
+    PER_100_UNIT_CURRENCIES,
+    bot_today,
+    parse_date,
+)
 
 
 class TestParseDateBuddhistEra:
@@ -91,6 +96,26 @@ class TestParseDatePassThrough:
 
     def test_garbage_returns_none(self):
         assert parse_date("not-a-date") is None
+
+
+class TestLedgerCurrencyConstants:
+    """Per-100-unit currencies must NOT be ledger-supported (F4).
+
+    BOT quotes JPY per 100 yen; writing that figure into a ledger EX Rate
+    column would overstate an "amount x rate" conversion 100x, so JPY is
+    excluded until the department confirms its convention.
+    """
+
+    def test_jpy_not_ledger_supported(self):
+        assert "JPY" not in LEDGER_SUPPORTED_CURRENCIES
+
+    def test_per_100_unit_currencies_documented(self):
+        assert PER_100_UNIT_CURRENCIES == ("JPY",)
+
+    def test_per_100_set_disjoint_from_supported(self):
+        # Re-including a per-100 currency requires handling the divide-by-100
+        # convention first — the sets must never overlap silently.
+        assert not set(PER_100_UNIT_CURRENCIES) & LEDGER_SUPPORTED_CURRENCIES
 
 
 class TestBotToday:

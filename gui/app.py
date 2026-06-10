@@ -1687,6 +1687,37 @@ class BOTExrateApp(ctk.CTk):
 
         self.batch_handler.start_revert(path)
 
+    def _start_guarded_revert(
+        self, filepath: str, backup_path: str | None = None
+    ) -> bool:
+        """Programmatic revert entry for sibling dialogs (Rate Audit report).
+
+        The audit report dialog appears AFTER the audit worker released its
+        _exrate_running lease, so its Revert button must re-acquire the busy
+        guard itself: refuse while a batch, another revert, or an ExRate
+        worker owns the cache/file (#1, #3), otherwise raise _revert_running
+        and lock Process/Revert exactly like the manual flow above. The
+        RevertWorker finishes through the same _show_revert_success/_error
+        callbacks, which clear the flag and re-enable the UI. Returns True
+        when the revert was dispatched, False when refused so the caller can
+        surface the refusal to the operator."""
+        if self._batch_running or self._revert_running or self._exrate_running:
+            self._flash_busy_status()
+            return False
+        # Raise the busy flag BEFORE spawning the worker so a scheduler fire
+        # racing in on the UI thread sees the revert in progress (#3).
+        self._revert_running = True
+        self.btn_revert.configure(state="disabled")
+        self.btn_process.configure(state="disabled")
+        self.lbl_status.configure(
+            text=f"Restoring:  {Path(filepath).name}...",
+            text_color=_get_colors()["warning"]
+        )
+        self.progressbar.configure(mode="indeterminate")
+        self.progressbar.start()
+
+        self.batch_handler.start_revert(filepath, backup_path=backup_path)
+        return True
 
     def _show_revert_success(self, filepath: str, backup_name: str):
         self._revert_running = False

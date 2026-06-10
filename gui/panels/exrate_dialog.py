@@ -534,6 +534,7 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
         from openpyxl import Workbook
 
         from core.api_client import CLIENT_TIMEOUT, BOTClient
+        from core.backup_manager import BackupError
         from core.engine import LedgerEngine
 
         # Build into a temp file in the destination directory and only move it
@@ -543,6 +544,10 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
         # to a sibling temp keeps the original intact until success; on failure
         # the temp is discarded and `dest` is never touched.
         tmp_path: str | None = None
+        # Captured from the engine inside _run so the success branch can back
+        # up an existing dest with the engine's OWN BackupManager (F10) — no
+        # second manager instance, same data/backups/ directory and naming.
+        backup_mgr = None
         try:
             dest_dir = Path(dest).parent
             fd, tmp_path = tempfile.mkstemp(
@@ -556,9 +561,11 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
             wb.close()
 
             async def _run():
+                nonlocal backup_mgr
                 async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT) as client:
                     api = BOTClient(client)
                     engine = LedgerEngine(api, event_bus=event_bus)
+                    backup_mgr = getattr(engine, "backup", None)
                     return await engine.update_exrate_standalone(
                         tmp_path,
                         progress_cb=_status_cb,
@@ -570,6 +577,18 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
             loop = asyncio.new_event_loop()
             try:
                 loop.run_until_complete(_run())
+                # Backup-first (F10): with confirmoverwrite the user may pick
+                # an EXISTING workbook as dest. The engine only backed up the
+                # blank TEMP (its run target), so without this step the real
+                # file would be replaced with NO backup — making Revert
+                # impossible. Back dest up BEFORE the move; if the backup
+                # fails, BackupError aborts the move below and dest is left
+                # intact (same fail-safe rule as the batch pipeline). The
+                # useless .exrate_tmp_* backup of the blank temp remains —
+                # suppressing it needs a flag on the updater's run() signature
+                # (owned elsewhere), so its cleanup is deferred to a later wave.
+                if backup_mgr is not None and Path(dest).exists():
+                    backup_mgr.create_backup(dest)
                 # Success: atomically move the fully-written temp over dest.
                 shutil.move(tmp_path, dest)
                 tmp_path = None
@@ -584,7 +603,7 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
                     app.after(0, lambda: _done(
                         False, tr("exrate.cancelled"), color=t["warning"]))
             except (httpx.RequestError, httpx.HTTPStatusError,
-                    OSError, ValueError) as e:
+                    OSError, ValueError, BackupError) as e:
                 logger.error("ExRate standalone failed: %s", e)
                 with contextlib.suppress(RuntimeError):
                     app.after(0, _done, False, _fail_message(e))

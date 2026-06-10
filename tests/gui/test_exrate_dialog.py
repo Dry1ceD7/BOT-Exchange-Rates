@@ -896,6 +896,114 @@ class TestExrateWorkerDataSafety:
         assert "BOT server" in msg, f"Expected friendly network msg, got {msg!r}"
 
 
+class _BackupAwareEngine(_SuccessEngine):
+    """Success engine exposing a ``backup`` manager like the real LedgerEngine.
+
+    The worker captures ``engine.backup`` inside ``_run`` and uses it to back
+    up an existing dest before the temp is moved into place (F10).
+    """
+
+    def __init__(self, backup):
+        self.backup = backup
+
+
+class TestExrateWorkerBackupFirst:
+    """F10: overwriting an EXISTING dest must back it up before the move."""
+
+    def test_existing_dest_backed_up_before_move(self, monkeypatch, tmp_path):
+        from core.backup_manager import BackupManager
+
+        from gui.panels import exrate_dialog
+
+        # A pre-existing workbook the user confirmed overwriting.
+        dest = tmp_path / "ExRate.xlsx"
+        dest.write_bytes(b"ORIGINAL-CONTENT")
+        backup_dir = tmp_path / "backups"
+
+        engine = _BackupAwareEngine(BackupManager(str(backup_dir)))
+        _run_worker_sync(monkeypatch, lambda *a, **kw: engine)
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+
+        app = _FakeApp()
+        exrate_dialog._create_exrate_file(
+            app, ["USD"], {"Buying TT": "buying_transfer"},
+        )
+
+        # Dest was replaced by the engine-written temp...
+        assert dest.read_bytes() == b"FILLED-EXRATE"
+        # ...and a real backup of the ORIGINAL dest exists, taken BEFORE the
+        # move (its bytes are the pre-overwrite content, not the new sheet).
+        backups = list(backup_dir.glob("ExRate__bak__*.xlsx"))
+        assert len(backups) == 1, f"Expected 1 dest backup, got {backups}"
+        assert backups[0].read_bytes() == b"ORIGINAL-CONTENT", (
+            "Backup must capture dest as it was before the overwrite"
+        )
+
+    def test_new_dest_creates_no_backup(self, monkeypatch, tmp_path):
+        from core.backup_manager import BackupManager
+
+        from gui.panels import exrate_dialog
+
+        # Creation path: dest does not exist yet — nothing to back up.
+        dest = tmp_path / "ExRate.xlsx"
+        backup_dir = tmp_path / "backups"
+
+        engine = _BackupAwareEngine(BackupManager(str(backup_dir)))
+        _run_worker_sync(monkeypatch, lambda *a, **kw: engine)
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+
+        app = _FakeApp()
+        exrate_dialog._create_exrate_file(
+            app, ["USD"], {"Buying TT": "buying_transfer"},
+        )
+
+        assert dest.read_bytes() == b"FILLED-EXRATE"
+        assert not list(backup_dir.glob("*.xlsx")), (
+            "No backup expected when dest did not exist"
+        )
+
+    def test_backup_failure_aborts_move_and_keeps_dest(
+        self, monkeypatch, tmp_path
+    ):
+        from core.backup_manager import BackupError
+
+        from gui.panels import exrate_dialog
+
+        dest = tmp_path / "ExRate.xlsx"
+        dest.write_bytes(b"ORIGINAL-CONTENT")
+
+        class _FailingBackup:
+            def create_backup(self, filepath):
+                raise BackupError("disk full")
+
+        engine = _BackupAwareEngine(_FailingBackup())
+        _run_worker_sync(monkeypatch, lambda *a, **kw: engine)
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+
+        app = _FakeApp()
+        exrate_dialog._create_exrate_file(
+            app, ["USD"], {"Buying TT": "buying_transfer"},
+        )
+
+        # Fail-safe rule: backup failed, so the overwrite must NOT happen.
+        assert dest.read_bytes() == b"ORIGINAL-CONTENT", (
+            "Dest was overwritten despite a failed backup"
+        )
+        # Temp is discarded and the failure is surfaced to the user.
+        assert not list(tmp_path.glob(".exrate_tmp_*")), "Temp not cleaned up"
+        msg = app.lbl_status.cget("text")
+        assert "Failed" in msg, f"Expected failure status, got {msg!r}"
+
+
 class TestExrateWorkerHumanizedSaveError:
     """Finding 5: a locked/open file yields 'close it in Excel', not raw errno."""
 

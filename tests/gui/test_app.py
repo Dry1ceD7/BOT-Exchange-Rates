@@ -229,6 +229,92 @@ class TestScheduledBatchHonorsRevert:
 
 
 # ---------------------------------------------------------------------------
+# F11 — guarded revert entry for the Rate Audit report dialog
+# ---------------------------------------------------------------------------
+
+class TestGuardedRevertEntry:
+    """The Rate Audit report dialog shows AFTER the audit worker released its
+    _exrate_running lease, so its Revert button must re-acquire the busy guard
+    via _start_guarded_revert — never call batch_handler.start_revert directly,
+    or a RevertWorker could run concurrently with a scheduler-fired batch."""
+
+    def _app(self, *, batch_running=False, revert_running=False,
+             exrate_running=False):
+        from gui.app import BOTExrateApp
+
+        app = SimpleNamespace(
+            _batch_running=batch_running,
+            _scheduled_run_active=False,
+            _revert_running=revert_running,
+            _exrate_running=exrate_running,
+            last_processed_path=None,
+            backup_mgr=MagicMock(),
+            btn_process=_btn(),
+            btn_revert=_btn(),
+            btn_backups=_btn(),
+            btn_export_exrate=_btn(),
+            btn_reveal=_btn(),
+            progressbar=MagicMock(),
+            lbl_status=MagicMock(),
+            batch_handler=MagicMock(),
+        )
+        app._flash_busy_status = lambda: BOTExrateApp._flash_busy_status(app)
+        return app
+
+    @pytest.mark.parametrize(
+        "flag", ["_batch_running", "_revert_running", "_exrate_running"],
+    )
+    def test_refuses_while_busy(self, flag):
+        from gui.app import BOTExrateApp
+
+        app = self._app()
+        setattr(app, flag, True)
+
+        ok = BOTExrateApp._start_guarded_revert(
+            app, "ledger.xlsx", "/data/backups/ledger__bak__x.xlsx",
+        )
+
+        # Refused: no worker dispatched, flag state untouched (except the one
+        # the test raised), and the operator told via the busy status flash.
+        assert ok is False
+        app.batch_handler.start_revert.assert_not_called()
+        if flag != "_revert_running":
+            assert app._revert_running is False
+        app.lbl_status.configure.assert_called_once()
+
+    def test_dispatches_when_idle(self):
+        from gui.app import BOTExrateApp
+
+        app = self._app()
+
+        ok = BOTExrateApp._start_guarded_revert(
+            app, "ledger.xlsx", "/data/backups/ledger__bak__x.xlsx",
+        )
+
+        # Dispatched: busy flag raised BEFORE the worker spawns, both action
+        # buttons locked, and the exact pre-audit backup requested.
+        assert ok is True
+        assert app._revert_running is True
+        app.btn_process.configure.assert_called_once_with(state="disabled")
+        app.btn_revert.configure.assert_called_once_with(state="disabled")
+        app.batch_handler.start_revert.assert_called_once_with(
+            "ledger.xlsx", backup_path="/data/backups/ledger__bak__x.xlsx",
+        )
+
+    def test_completion_path_clears_flag(self):
+        from gui.app import BOTExrateApp
+
+        # The guarded entry reuses the manual flow's terminal callbacks, so
+        # _show_revert_success/_error must release the flag it raised.
+        app = self._app()
+        app._refresh_revert_state = MagicMock()
+        BOTExrateApp._start_guarded_revert(app, "ledger.xlsx", "b.xlsx")
+        assert app._revert_running is True
+        BOTExrateApp._show_revert_success(app, "ledger.xlsx", "b.xlsx")
+        assert app._revert_running is False
+
+
+# ---------------------------------------------------------------------------
 # Completion path: scheduled run notifies; manual run does not
 # ---------------------------------------------------------------------------
 

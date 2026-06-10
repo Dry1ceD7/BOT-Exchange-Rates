@@ -540,7 +540,21 @@ class LedgerEngine:
                 all_needed.add(check)
             check += timedelta(days=1)
 
-        missing_dates = all_needed - set(cached_rates.keys())
+        # Per-COLUMN cache miss: a cached row missing any of the four rate
+        # columns (e.g. nulled by a partial write from an older version) must
+        # count as missing so the API refetch self-heals it. Per-date
+        # membership alone would never refetch such a date and its trading-day
+        # cells stayed blank. The upsert in insert_rates_bulk fills only the
+        # NULL columns, so the surviving currency's values are kept.
+        _required_cols = (
+            "usd_buying", "usd_selling", "eur_buying", "eur_selling",
+        )
+        missing_dates = {
+            d for d in all_needed
+            if d not in cached_rates or any(
+                cached_rates[d][col] is None for col in _required_cols
+            )
+        }
         usd_data, eur_data = [], []
         if missing_dates:
             # ── Narrowed fetch range: only fetch the missing window ───

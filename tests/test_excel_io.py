@@ -24,32 +24,36 @@ TARGET_COLS = {"source_date": "Date", "currency": "Cur", "out_rate": "EX Rate"}
 
 
 # Layout in fixtures: A=Date, B=Cur, C=EX Rate, D=Amount.
+def _expected_lookup(date_ref, col, n_marker="{N}"):
+    """One guarded IFS branch value: the IF guard renders a found-but-empty
+    ExRate cell (weekend/holiday row) as "" instead of numeric 0 (F6)."""
+    lookup = (
+        f'_xlfn.XLOOKUP({date_ref},'
+        f'ExRate!$A$2:$A${n_marker},'
+        f'ExRate!${col}$2:${col}${n_marker},"",0)'
+    )
+    return f'IFERROR(IF({lookup}="","",{lookup}),"")'
+
+
 def _expected_formula(row, usd_col="B", eur_col="D", extra=None):
     """Reproduce the exact IFS formula inject_xlookup_formulas emits.
 
     extra: optional list of (ccy, col_letter) appended after the EUR branch.
     """
-    n_marker = "{N}"  # filled by caller via .format
     date_ref = f"A{row}"
     cur_ref = f"B{row}"
     branches = (
         f'{cur_ref}="THB",1,'
         f'{cur_ref}="USD",'
-        f'IFERROR(_xlfn.XLOOKUP({date_ref},'
-        f'ExRate!$A$2:$A${n_marker},'
-        f'ExRate!${usd_col}$2:${usd_col}${n_marker},"",0),""),'
+        f'{_expected_lookup(date_ref, usd_col)},'
         f'{cur_ref}="EUR",'
-        f'IFERROR(_xlfn.XLOOKUP({date_ref},'
-        f'ExRate!$A$2:$A${n_marker},'
-        f'ExRate!${eur_col}$2:${eur_col}${n_marker},"",0),"")'
+        f'{_expected_lookup(date_ref, eur_col)}'
     )
     if extra:
         for ccy, col in extra:
             branches += (
                 f',{cur_ref}="{ccy}",'
-                f'IFERROR(_xlfn.XLOOKUP({date_ref},'
-                f'ExRate!$A$2:$A${n_marker},'
-                f'ExRate!${col}$2:${col}${n_marker},"",0),"")'
+                f'{_expected_lookup(date_ref, col)}'
             )
     return (
         f'=IF(OR({cur_ref}="",{date_ref}=""),"",'
@@ -105,6 +109,45 @@ class TestInjectFormulaStrings:
         _inject(wb, N=30, rate_type="selling")
         assert wb["Jan"].cell(row=2, column=3).value == \
             _expected_formula(2, usd_col="C", eur_col="E").format(N=30)
+        wb.close()
+
+
+# =========================================================================
+#  Weekend/holiday blank guard (F6)
+# =========================================================================
+
+class TestWeekendBlankGuard:
+    """F6: weekend/holiday rows EXIST in the ExRate sheet with blank rate
+    cells, so an unguarded XLOOKUP returns a reference to an empty cell
+    which Excel renders as numeric 0. Every lookup branch must wrap the
+    lookup in an IF guard so a found-but-empty result renders blank ""."""
+
+    def test_every_lookup_branch_carries_blank_guard(self, ledger_xlsx):
+        # Saturday 2025-01-04 — the row exists in ExRate with blank rates.
+        path = ledger_xlsx({"Jan": [(date(2025, 1, 4), "USD")]})
+        wb = openpyxl.load_workbook(path)
+        _inject(wb, N=30, exrate_col_map={"GBP": "F"})
+        formula = wb["Jan"].cell(row=2, column=3).value
+        # Three lookup branches (USD, EUR, GBP), each guarded: the IF
+        # compares the lookup result to "" and yields "" when blank, so a
+        # weekend-dated row renders blank instead of 0. openpyxl cannot
+        # evaluate formulas, so these are string-shape assertions.
+        assert formula.count('IFERROR(IF(_xlfn.XLOOKUP(') == 3
+        assert formula.count('"",0)="","",_xlfn.XLOOKUP(') == 3
+        # No unguarded lookup remains: every XLOOKUP is either the guard
+        # condition or the guarded result (exactly 2 per branch).
+        assert formula.count('_xlfn.XLOOKUP(') == 6
+        wb.close()
+
+    def test_guard_preserves_exact_match_semantics(self, ledger_xlsx):
+        path = ledger_xlsx({"Jan": [(date(2025, 1, 4), "USD")]})
+        wb = openpyxl.load_workbook(path)
+        _inject(wb, N=30)
+        formula = wb["Jan"].cell(row=2, column=3).value
+        # Every lookup keeps if_not_found="" and match_mode=0 — exact
+        # match only, NO rollback, NO carry-forward (approved contract).
+        assert formula.count('"",0)') == formula.count('_xlfn.XLOOKUP(')
+        assert formula.count('_xlfn.XLOOKUP(') == 4  # USD + EUR, guarded
         wb.close()
 
 

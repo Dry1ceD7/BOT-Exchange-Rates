@@ -59,7 +59,7 @@ class TestRates:
         assert result is None
 
     def test_insert_rate_upsert(self, db):
-        """INSERT OR REPLACE should update existing entries."""
+        """The upsert must update existing entries with non-NULL values."""
         d = date(2025, 3, 10)
         db.insert_rate(d, usd_buying=33.0, usd_selling=33.1)
         db.insert_rate(d, usd_buying=34.0, usd_selling=34.1,
@@ -97,6 +97,68 @@ class TestRates:
 
     def test_bulk_insert_empty_list(self, db):
         db.insert_rates_bulk([])  # Should not raise
+
+
+# =========================================================================
+#  PARTIAL UPSERT NEVER NULLS SIBLING COLUMNS (F1 regression)
+# =========================================================================
+
+class TestPartialUpsertPreservesSiblings:
+    """F1 regression: per-currency inserts must not wipe the other currency.
+
+    A wide BOT CSV interleaves one USD row and one EUR row per date, and
+    csv_import mirrors each via a per-currency insert_rate call. The old
+    INSERT OR REPLACE rewrote the whole row, so the SECOND call nulled the
+    first currency's columns — leaving only the LAST currency per date.
+    """
+
+    def test_usd_then_eur_insert_keeps_all_four_columns(self, db):
+        d = date(2025, 3, 10)
+        db.insert_rate(d, usd_buying=34.0512, usd_selling=34.3209)
+        db.insert_rate(d, eur_buying=37.1023, eur_selling=37.5541)
+
+        result = db.get_rate(d)
+        assert result["usd_buying"] == Decimal("34.0512")
+        assert result["usd_selling"] == Decimal("34.3209")
+        assert result["eur_buying"] == Decimal("37.1023")
+        assert result["eur_selling"] == Decimal("37.5541")
+
+    def test_eur_then_usd_insert_keeps_all_four_columns(self, db):
+        """Order-independent: the last write must not win the whole row."""
+        d = date(2025, 3, 11)
+        db.insert_rate(d, eur_buying=37.1023, eur_selling=37.5541)
+        db.insert_rate(d, usd_buying=34.0512, usd_selling=34.3209)
+
+        result = db.get_rate(d)
+        assert result["usd_buying"] == Decimal("34.0512")
+        assert result["usd_selling"] == Decimal("34.3209")
+        assert result["eur_buying"] == Decimal("37.1023")
+        assert result["eur_selling"] == Decimal("37.5541")
+
+    def test_non_null_update_still_overwrites(self, db):
+        """COALESCE must not freeze stale values: a non-NULL new value wins
+        (today's rate refreshes when new data arrives — Core Rule 5)."""
+        d = date(2025, 3, 10)
+        db.insert_rate(d, usd_buying=34.0512, usd_selling=34.3209)
+        db.insert_rate(d, usd_buying=34.1020)
+
+        result = db.get_rate(d)
+        assert result["usd_buying"] == Decimal("34.1020")
+        assert result["usd_selling"] == Decimal("34.3209")
+
+    def test_bulk_partial_entry_preserves_existing_columns(self, db):
+        """insert_rates_bulk (the engine's API write-back path) honors the
+        same per-column upsert: a row with NULL EUR slots must not erase the
+        cached EUR values."""
+        d = date(2025, 3, 10)
+        db.insert_rate(d, eur_buying=37.1023, eur_selling=37.5541)
+        db.insert_rates_bulk([("2025-03-10", 34.0512, 34.3209, None, None)])
+
+        result = db.get_rate(d)
+        assert result["usd_buying"] == Decimal("34.0512")
+        assert result["usd_selling"] == Decimal("34.3209")
+        assert result["eur_buying"] == Decimal("37.1023")
+        assert result["eur_selling"] == Decimal("37.5541")
 
 
 # =========================================================================

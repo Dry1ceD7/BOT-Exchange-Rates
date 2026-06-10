@@ -46,6 +46,30 @@ from core.workbook_io import ensure_disk_space
 logger = logging.getLogger(__name__)
 
 
+def _is_macro_workbook(filepath) -> bool:
+    """True for macro-enabled containers (.xlsm / .xltm).
+
+    Every load_workbook in this module must pass ``keep_vba=`` this value:
+    without it openpyxl silently drops xl/vbaProject.bin on save, and
+    atomic_save then replaces the original — destroying the user's macros.
+    """
+    return str(filepath).lower().endswith((".xlsm", ".xltm"))
+
+
+def _close_vba_archive(wb) -> None:
+    """Deterministically close the keep_vba ZipFile (wb.close() skips it).
+
+    openpyxl stores the preserved VBA container as an append-mode in-memory
+    ZipFile on ``wb.vba_archive``; left to GC teardown its ``__del__`` can
+    fire after the backing buffer is cleared and emit "Exception ignored"
+    noise. Closing it alongside wb keeps the handle-release discipline exact.
+    """
+    vba = getattr(wb, "vba_archive", None)
+    if vba is not None:
+        with contextlib.suppress(OSError, ValueError):
+            vba.close()
+
+
 class WorkbookWriter:
     """openpyxl write pipeline for process_ledger (extracted verbatim).
 
@@ -71,7 +95,11 @@ class WorkbookWriter:
         unsupported_currencies: list[str] | None = None,
         audit: AuditCollector | None = None,
     ) -> str:
-        wb = openpyxl.load_workbook(filepath)
+        # keep_vba preserves xl/vbaProject.bin for .xlsm/.xltm inputs (the
+        # in-place overwrite would otherwise strip the user's macros).
+        wb = openpyxl.load_workbook(
+            filepath, keep_vba=_is_macro_workbook(filepath)
+        )
 
         # rate_type is snapshotted by process_ledger at the start of this
         # file's run and threaded through here, so a Settings "Save" mid-batch
@@ -167,6 +195,7 @@ class WorkbookWriter:
                 )
         finally:
             # Release the file handle + reclaim memory on EVERY exit.
+            _close_vba_archive(wb)
             try:
                 wb.close()
             except OSError:
@@ -454,9 +483,14 @@ class StandaloneExRateUpdater:
             )
 
         _status("Opening ExRate file...")
-        wb = openpyxl.load_workbook(filepath)
+        # keep_vba preserves xl/vbaProject.bin for .xlsm/.xltm inputs (the
+        # in-place overwrite would otherwise strip the user's macros).
+        wb = openpyxl.load_workbook(
+            filepath, keep_vba=_is_macro_workbook(filepath)
+        )
 
         if "ExRate" not in wb.sheetnames:
+            _close_vba_archive(wb)
             wb.close()
             del wb
             gc.collect()
@@ -523,6 +557,7 @@ class StandaloneExRateUpdater:
                 _status(f"✓ ExRate updated: {Path(filepath).name}")
                 return filepath
             finally:
+                _close_vba_archive(wb)
                 try:
                     wb.close()
                 except OSError:
@@ -618,6 +653,7 @@ class StandaloneExRateUpdater:
             _status(f"✓ ExRate created: {Path(filepath).name}")
             return filepath
         finally:
+            _close_vba_archive(wb)
             try:
                 wb.close()
             except OSError:

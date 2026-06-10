@@ -38,6 +38,8 @@ def show_rate_audit_dialog(app) -> None:
     """
     filepath = filedialog.askopenfilename(
         title="Verify a workbook's ExRate rates against BOT",
+        # .xlsm stays selectable: the workbook pipeline loads macro-enabled
+        # files with keep_vba so their VBA project survives the round-trip.
         filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")],
     )
     if not filepath:
@@ -205,10 +207,27 @@ def _show_report_dialog(app, report, csv_path: str | None) -> None:
         def _revert() -> None:
             # Restore the EXACT pre-correction backup we captured, not merely
             # the latest — a batch could have snapshotted the file since.
-            with contextlib.suppress(Exception):
-                app.batch_handler.start_revert(
-                    report.file, backup_path=report.backup_path,
+            # Route through the guarded app entry: our _exrate_running lease
+            # was released before this dialog opened, so the entry re-checks
+            # the batch/revert/ExRate busy flags and raises _revert_running,
+            # ensuring the RevertWorker can never run concurrently with a
+            # scheduler-fired batch on the same workbook.
+            try:
+                started = app._start_guarded_revert(
+                    report.file, report.backup_path,
                 )
+            except Exception:  # noqa: BLE001 — keep the dialog usable
+                logger.exception("Rate audit revert launch failed")
+                started = False
+            if not started:
+                # Refused (another operation owns the file) or failed to
+                # launch — say so here; the grab hides the main status bar.
+                with contextlib.suppress(Exception):
+                    lbl_revert_status.configure(
+                        text="Busy — another operation is running. "
+                             "Try again when it finishes.",
+                    )
+                return
             with contextlib.suppress(Exception):
                 dlg.destroy()
 
@@ -219,6 +238,11 @@ def _show_report_dialog(app, report, csv_path: str | None) -> None:
             font=ctk.CTkFont(size=12, weight="bold"),
             command=_revert,
         ).pack(side="left")
+        lbl_revert_status = ctk.CTkLabel(
+            btn_row, text="", font=ctk.CTkFont(size=11),
+            text_color=t["warning"], wraplength=320, justify="left",
+        )
+        lbl_revert_status.pack(side="left", padx=10)
 
     if csv_path:
         ctk.CTkLabel(

@@ -143,10 +143,17 @@ class TestClassifyCurrencies:
         assert unsupported == []
 
     def test_supported_extra_currencies_sorted(self):
-        extra, unsupported = classify_currencies({"JPY", "GBP", "USD"})
+        extra, unsupported = classify_currencies({"SGD", "GBP", "USD"})
         # Sorted for deterministic ExRate column ordering.
-        assert extra == ["GBP", "JPY"]
+        assert extra == ["GBP", "SGD"]
         assert unsupported == []
+
+    def test_jpy_routed_to_unsupported_path(self):
+        # JPY is quoted by BOT per 100 yen, so it is deliberately excluded
+        # from LEDGER_SUPPORTED_CURRENCIES and must take the unsupported path.
+        extra, unsupported = classify_currencies({"JPY", "GBP"})
+        assert extra == ["GBP"]
+        assert unsupported == ["JPY"]
 
     def test_unsupported_currency_flagged(self):
         extra, unsupported = classify_currencies({"GBP", "XYZ", "ABC"})

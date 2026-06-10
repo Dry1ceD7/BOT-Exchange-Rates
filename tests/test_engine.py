@@ -10,6 +10,7 @@ Uses mocked API client and temporary files.
 import asyncio
 import threading
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -810,6 +811,114 @@ class TestProcessLedgerEndToEnd:
 
 
 # =========================================================================
+#  MACRO WORKBOOK (.xlsm) — keep_vba PRESERVATION (F7)
+# =========================================================================
+
+class TestMacroWorkbookKeepVba:
+    """Regression for F7: .xlsm inputs must keep their VBA project.
+
+    Without ``keep_vba=True`` openpyxl silently drops xl/vbaProject.bin on
+    save, and atomic_save then replaces the original — destroying the user's
+    macros. Both load sites in core/exrate_updater.py (WorkbookWriter.write
+    and StandaloneExRateUpdater.run) must thread the flag.
+    """
+
+    def _build_engine(self, tmp_cache):
+        """Engine wired to a mocked API + injected tmp backup/cache."""
+
+        def _rate(period, currency, buying_transfer, selling):
+            return SimpleNamespace(
+                period=period, currency=currency,
+                buying_transfer=buying_transfer, buying_sight=None,
+                selling=selling, mid_rate=None,
+            )
+
+        async def _rates(start, end, currency):
+            base_b = 33.0 if currency == "USD" else 36.0
+            base_s = 33.5 if currency == "USD" else 36.5
+            out = []
+            d = start
+            from datetime import timedelta as _td
+            while d <= end:
+                out.append(_rate(
+                    d.strftime("%Y-%m-%d"), currency, base_b, base_s,
+                ))
+                d += _td(days=1)
+            return out
+
+        async def _holidays(year):
+            return []
+
+        api = MagicMock()
+        api.get_exchange_rates = _rates
+        api.get_holidays = _holidays
+        return LedgerEngine(api, backup=MagicMock(), cache=tmp_cache)
+
+    def test_process_ledger_preserves_vba_project(
+        self, ledger_xlsx, tmp_cache,
+    ):
+        import zipfile
+
+        path = ledger_xlsx(
+            {"Jan": [(date(2025, 1, 7), "USD")]},
+            filename="macro_ledger.xlsm",
+        )
+        # Graft a fake VBA project into the container. openpyxl never parses
+        # vbaProject.bin — it round-trips the raw bytes — so a sentinel blob
+        # is enough to prove preservation through the full write pipeline.
+        with zipfile.ZipFile(path, "a") as zf:
+            zf.writestr("xl/vbaProject.bin", b"FAKE-VBA-PROJECT")
+
+        engine = self._build_engine(tmp_cache)
+        result = asyncio.run(engine.process_ledger(path))
+        assert result == path
+
+        with zipfile.ZipFile(path) as zf:
+            assert "xl/vbaProject.bin" in zf.namelist()
+            assert zf.read("xl/vbaProject.bin") == b"FAKE-VBA-PROJECT"
+
+    @pytest.mark.parametrize("fname, expected", [
+        ("rates.xlsm", True),
+        ("rates.XLSM", True),   # extension check is case-insensitive
+        ("rates.xltm", True),   # macro-enabled template
+        ("rates.xlsx", False),  # plain workbook must NOT pay the keep_vba cost
+    ])
+    def test_standalone_load_threads_keep_vba(
+        self, tmp_path, monkeypatch, fname, expected,
+    ):
+        from core.exrate_updater import StandaloneExRateUpdater
+
+        target = tmp_path / fname
+        wb = openpyxl.Workbook()
+        wb.save(str(target))
+        wb.close()
+
+        seen = {}
+        real_load = openpyxl.load_workbook
+
+        def _spy(filepath, **kwargs):
+            seen["keep_vba"] = kwargs.get("keep_vba")
+            return real_load(filepath, **kwargs)
+
+        monkeypatch.setattr(openpyxl, "load_workbook", _spy)
+
+        engine = SimpleNamespace(
+            _check_memory_guardrail=lambda p: None,
+            backup=MagicMock(),
+            _emit=lambda *a, **k: None,
+        )
+        # The freshly created workbook has no ExRate sheet, so run() raises
+        # immediately AFTER load_workbook — only the load kwargs matter here.
+        with pytest.raises(ValueError, match="No ExRate sheet"):
+            asyncio.run(
+                StandaloneExRateUpdater(engine).run(
+                    str(target), None, None, None, None,
+                )
+            )
+        assert seen["keep_vba"] is expected
+
+
+# =========================================================================
 #  CACHE-FIRST INVARIANT (Core Rule 5)
 # =========================================================================
 
@@ -998,6 +1107,80 @@ class TestPreloadUsesBotToday:
             call.args[1] for call in engine.api.get_exchange_rates.await_args_list
         }
         assert end_args == {fixed_today}
+
+
+# =========================================================================
+#  PER-COLUMN CACHE MISS — SELF-HEALING (F1 regression)
+# =========================================================================
+
+class TestCacheSelfHealsNulledColumns:
+    """F1: a cached row with NULL rate columns must count as a cache MISS.
+
+    A partial write from an older version (the pre-fix CSV-import wipe) could
+    leave a date cached with only one currency's columns. Per-DATE membership
+    treated that row as a HIT, so the NULL columns were never re-fetched and
+    trading-day cells went blank forever. The per-column check re-fetches the
+    date; the COALESCE upsert then fills only the NULL columns, preserving
+    the surviving currency's values.
+    """
+
+    _TODAY = date(2025, 3, 10)  # Monday — keeps the weekday window one day
+
+    def test_null_eur_columns_refetch_and_self_heal(
+        self, engine, mock_api, tmp_cache, monkeypatch,
+    ):
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: self._TODAY)
+        target = self._TODAY
+
+        # Simulate the wiped row: USD survived, EUR columns are NULL.
+        tmp_cache.insert_rate(target, usd_buying=34.0512, usd_selling=34.3209)
+
+        async def _rates(start, end, currency):
+            buy, sell = {
+                "USD": (34.0512, 34.3209),
+                "EUR": (37.1023, 37.5541),
+            }[currency]
+            return [SimpleNamespace(
+                period=target.strftime("%Y-%m-%d"), currency=currency,
+                buying_transfer=buy, buying_sight=None,
+                selling=sell, mid_rate=None,
+            )]
+
+        mock_api.get_exchange_rates = AsyncMock(side_effect=_rates)
+
+        (
+            _logic, usd_selling, eur_selling, usd_buying, eur_buying, _u, _e,
+        ) = asyncio.run(engine._preload_api_data({target}, "2025-03-10"))
+
+        # The NULL columns forced a re-fetch (once per currency)...
+        assert mock_api.get_exchange_rates.await_count == 2
+        # ...and the EUR rates are now available to the writer.
+        assert eur_buying[target] == Decimal("37.1023")
+        assert eur_selling[target] == Decimal("37.5541")
+        assert usd_buying[target] == Decimal("34.0512")
+        assert usd_selling[target] == Decimal("34.3209")
+
+        # The cache row self-healed: all four columns survived the upsert.
+        healed = tmp_cache.get_rate(target)
+        assert healed["usd_buying"] == Decimal("34.0512")
+        assert healed["usd_selling"] == Decimal("34.3209")
+        assert healed["eur_buying"] == Decimal("37.1023")
+        assert healed["eur_selling"] == Decimal("37.5541")
+
+    def test_fully_cached_row_still_serves_without_api(
+        self, engine, mock_api, tmp_cache, monkeypatch,
+    ):
+        """Guard: per-column checking must not over-fetch a complete row
+        (Core Rule 5 — full cache hit stays at zero rate API calls)."""
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: self._TODAY)
+        target = self._TODAY
+        tmp_cache.insert_rate(
+            target, usd_buying=34.0512, usd_selling=34.3209,
+            eur_buying=37.1023, eur_selling=37.5541,
+        )
+
+        asyncio.run(engine._preload_api_data({target}, "2025-03-10"))
+        mock_api.get_exchange_rates.assert_not_called()
 
 
 # =========================================================================

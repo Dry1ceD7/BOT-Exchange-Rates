@@ -47,10 +47,22 @@ LEDGER_HOME_CURRENCY: str = "THB"
 # the home currency. A ledger row whose currency is none of these (and which the
 # API returns no data for) is reported as unsupported rather than left silently
 # blank — see core/ledger_processing.classify_currencies.
+#
+# JPY is deliberately EXCLUDED: BOT quotes it per 100 yen (~23.x THB/100JPY),
+# so writing the published figure into a ledger EX Rate column would overstate
+# any "amount x rate" conversion 100x. JPY rows take the unsupported path
+# (blank cell + per-file warning) until the department confirms its convention.
 LEDGER_SUPPORTED_CURRENCIES: frozenset = frozenset(
-    {"USD", "EUR", "GBP", "JPY", "CNY", "SGD", "HKD", "AUD", "CHF", "CAD"}
+    {"USD", "EUR", "GBP", "CNY", "SGD", "HKD", "AUD", "CHF", "CAD"}
 )
 """Currency codes the ledger multi-currency path can fetch + write."""
+
+PER_100_UNIT_CURRENCIES: tuple = ("JPY",)
+"""Currencies BOT publishes per 100 units of foreign currency, not per 1.
+
+Documented so a future re-inclusion into LEDGER_SUPPORTED_CURRENCIES knows the
+published rate must be divided by 100 (or the ledger convention confirmed)
+before it is safe to multiply against per-unit amounts."""
 
 BACKUP_MAX_AGE_DAYS: int = int(os.environ.get("BOT_BACKUP_AGE_DAYS", "7"))
 """Auto-cleanup backups older than this many days."""

@@ -182,7 +182,9 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
             # Mirror into the legacy USD/EUR table for backward compatibility.
             # That table's columns are REAL; sqlite3 cannot bind Decimal, so
             # coerce to float here. The lossless source of truth stays in
-            # rates_multi (stored as exact Decimal text above).
+            # rates_multi (stored as exact Decimal text above). insert_rate
+            # upserts per-column, so these USD-only / EUR-only calls can never
+            # null the sibling currency's columns for the same date.
             buy_tt = to_float(rates.get("buying_transfer"))
             sell = to_float(rates.get("selling"))
             if currency == "USD":
