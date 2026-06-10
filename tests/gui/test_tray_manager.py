@@ -128,6 +128,98 @@ class TestTrayNotify:
         tray.notify("done")  # no exception, no attribute error
 
 
+class TestTrayCloseFallback:
+    """F153: _on_close must not strand a hidden window when the tray icon
+    never started (icon load failure / pystray thread not running)."""
+
+    def test_on_close_quits_normally_when_no_icon(self):
+        tray = _make_tray()
+        assert tray._icon is None
+        tray._on_close()
+        # Normal quit path: close handler invoked, window never hidden.
+        tray._app._on_app_close.assert_called_once()
+        tray._app.withdraw.assert_not_called()
+        assert tray._is_hidden is False
+
+    def test_on_close_falls_back_to_destroy_without_close_handler(self):
+        from gui.panels.tray_manager import TrayManager
+
+        class _App:
+            def __init__(self):
+                self.destroyed = False
+                self.withdrawn = False
+
+            def destroy(self):
+                self.destroyed = True
+
+            def withdraw(self):
+                self.withdrawn = True
+
+        app = _App()
+        tray = TrayManager(app)
+        tray._on_close()
+        assert app.destroyed is True
+        assert app.withdrawn is False
+
+    def test_on_close_hides_to_tray_when_icon_running(self):
+        tray = _make_tray()
+        tray._icon = MagicMock()
+        tray._on_close()
+        tray._app.withdraw.assert_called_once()
+        assert tray._is_hidden is True
+        tray._app._on_app_close.assert_not_called()
+
+
+class TestTrayIconLoadFallthrough:
+    """F153: a corrupt icon asset falls through to the generated square."""
+
+    def test_corrupt_assets_fall_through_to_generated_square(
+        self, tmp_path, monkeypatch,
+    ):
+        import sys
+
+        import gui.panels.tray_manager as tm
+
+        fake_image_mod = MagicMock()
+        fake_image_mod.open.side_effect = OSError("corrupt icon file")
+        fake_image_mod.new.return_value = "GENERATED_SQUARE"
+
+        monkeypatch.setattr(tm, "HAS_PYSTRAY", True)
+        monkeypatch.setattr(tm, "Image", fake_image_mod, raising=False)
+        # Point the frozen base dir at tmp_path so both candidate assets exist.
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "app.exe"))
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        (assets / "icon.ico").write_bytes(b"junk")
+        (assets / "icon.png").write_bytes(b"junk")
+
+        result = tm._load_tray_icon()
+
+        # Both corrupt files were attempted, then the square was generated.
+        assert fake_image_mod.open.call_count == 2
+        assert result == "GENERATED_SQUARE"
+
+    def test_first_good_asset_wins(self, tmp_path, monkeypatch):
+        import sys
+
+        import gui.panels.tray_manager as tm
+
+        fake_image_mod = MagicMock()
+        fake_image_mod.open.side_effect = [OSError("bad .ico"), "PNG_ICON"]
+
+        monkeypatch.setattr(tm, "HAS_PYSTRAY", True)
+        monkeypatch.setattr(tm, "Image", fake_image_mod, raising=False)
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "app.exe"))
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        (assets / "icon.ico").write_bytes(b"junk")
+        (assets / "icon.png").write_bytes(b"junk")
+
+        assert tm._load_tray_icon() == "PNG_ICON"
+
+
 class TestTrayMarshalsThroughSafeMarshal:
     """F152: _on_show/_on_exit fire on the pystray thread and must route their
     Tk work through app._safe_marshal (closing-flag check + RuntimeError AND

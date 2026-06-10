@@ -164,6 +164,22 @@ class BackupManager:
                 f"Backup '{backup_name}' does not belong to "
                 f"'{Path(filepath).name}'."
             )
+
+        # Containment check: the chosen backup must resolve to a path INSIDE
+        # the managed backups directory. A caller-supplied path that merely
+        # carries a matching name (or traverses out via '..'/symlink) must
+        # never be copied over the live file.
+        try:
+            resolved_backup = Path(backup_path).resolve()
+            backups_root = Path(self.backup_dir).resolve()
+        except OSError as e:
+            raise BackupError(f"Backup path could not be resolved: {e}") from e
+        if not resolved_backup.is_relative_to(backups_root):
+            raise BackupError(
+                f"Backup '{backup_name}' is outside the backups directory — "
+                "refusing to restore."
+            )
+
         if not Path(backup_path).exists():
             raise BackupError(f"Backup no longer exists: {backup_path}")
 

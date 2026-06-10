@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class UpdateManager(SafePanel):
-    """Manages the auto-update lifecycle: check → banner → download → restart.
+    """Manages the auto-update lifecycle: check -> banner -> download -> restart.
 
     Holds a reference to the parent app for UI callbacks. All methods are
     designed to be called from the main Tk thread (workers use `_safe_after`).
@@ -107,7 +107,7 @@ class UpdateManager(SafePanel):
         ).pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(
-            inner, text="✕",
+            inner, text="X",
             width=28, height=28,
             fg_color="transparent", hover_color=t["banner_warn_hover"],
             text_color=t["banner_warn_text"],
@@ -165,7 +165,7 @@ class UpdateManager(SafePanel):
             ).pack(side="left", padx=(0, 6))
 
             ctk.CTkButton(
-                inner, text="✕",
+                inner, text="X",
                 width=24, height=24,
                 fg_color="transparent", hover_color=t["banner_confirm_hover"],
                 text_color=t["banner_text_light"],

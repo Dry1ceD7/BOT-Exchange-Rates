@@ -1,6 +1,7 @@
 """Core engine and business logic for BOT Exchange Rate Processor."""
 
 __all__ = [
+    "anomaly_guard",
     "api_client",
     "audit_logger",
     "auto_updater",
@@ -11,12 +12,19 @@ __all__ = [
     "csv_import",
     "database",
     "engine",
+    "excel_io",
     "exrate_sheet",
+    "exrate_updater",
+    "i18n",
     "ipc",
+    "ledger_processing",
     "logic",
     "paths",
     "prescan",
+    "rate_audit",
     "scheduler",
     "secure_tokens",
     "version",
+    "workbook_io",
+    "workers",
 ]

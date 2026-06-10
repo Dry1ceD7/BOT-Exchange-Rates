@@ -160,7 +160,7 @@ def show_exrate_dialog(app) -> None:
 
     auto_label = ctk.CTkLabel(
         date_range_frame,
-        text=f"  Auto: {today.year}-01-01 → {today.strftime('%Y-%m-%d')}",
+        text=f"  Auto: {today.year}-01-01 -> {today.strftime('%Y-%m-%d')}",
         font=ctk.CTkFont(size=12),
         text_color=t["text_secondary"],
     )
@@ -189,7 +189,7 @@ def show_exrate_dialog(app) -> None:
         Uses calendar.monthrange so February shows 28/29 and 30-day months
         show 30 — no more offering 31 everywhere and failing only at Create
         time. The currently selected day is clamped down if it now exceeds the
-        month length (e.g. 31 → 30 when switching to April, or → 28/29 for Feb).
+        month length (e.g. 31 -> 30 when switching to April, or -> 28/29 for Feb).
         """
         try:
             yr = int(year_box.get())
@@ -363,7 +363,7 @@ def _build_exrate_summary(currencies, rate_types, date_range) -> str:
         currencies: List of currency codes.
         rate_types: Dict of {label: api_key} (only the labels are surfaced).
         date_range: Optional (start_date, end_date) tuple; None means auto
-            (current year, Jan 1 → today).
+            (current year, Jan 1 -> today).
 
     Returns:
         A human-readable summary string (no leading/trailing markers).
@@ -378,7 +378,7 @@ def _build_exrate_summary(currencies, rate_types, date_range) -> str:
     rate_list = ", ".join(rate_types.keys())
     return (
         f"{days} day{'s' if days != 1 else ''} "
-        f"({s_date:%Y-%m-%d} → {e_date:%Y-%m-%d}) · {ccy_list} · {rate_list}"
+        f"({s_date:%Y-%m-%d} -> {e_date:%Y-%m-%d}) · {ccy_list} · {rate_list}"
     )
 
 
@@ -643,7 +643,7 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
                 _verify_exrate_dest(dest)
                 app._safe_marshal(
                     _done, True,
-                    f"✓ ExRate created: {Path(dest).name} — {summary}",
+                    f"OK: ExRate created: {Path(dest).name} — {summary}",
                 )
             except _ExRateCancelled:
                 # User pressed Cancel — the temp is discarded in the outer

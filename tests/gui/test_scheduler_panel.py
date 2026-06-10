@@ -389,7 +389,7 @@ class TestSchedulerPanelStatusLabel:
         panel._update_status()
         text = panel._lbl_status.cget("text")
         assert text != "", "Status must not be empty when no paths"
-        assert "No folders" in text or "no" in text.lower() or "warning" in text.lower() or "⚠" in text
+        assert "No folders" in text or "no" in text.lower() or "warning" in text.lower() or "WARNING:" in text
         panel.destroy()
 
     def test_status_shows_success_when_paths_present(self, tk_root, tmp_path):
@@ -995,7 +995,7 @@ class TestSchedulerPanelMissingFolders:
         content = panel._path_list.get("1.0", "end")
         panel._path_list.configure(state="disabled")
         # The unavailable marker glyph distinguishes it from a healthy folder.
-        assert "⚠" in content
+        assert "WARNING:" in content
         assert "gone" in content
         panel.destroy()
 

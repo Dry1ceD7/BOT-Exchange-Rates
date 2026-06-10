@@ -9,6 +9,7 @@ Unit tests for core/api_client.py — BOTClient with mocked HTTP responses.
 import asyncio
 import json as jsonlib
 import logging
+import sys
 from datetime import date
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
@@ -667,6 +668,56 @@ class TestTokenRedactionFilter:
         # Two env keys probed exactly once across all five records (cached),
         # not 2x per record.
         assert calls["n"] == 2
+
+    def _make_exc_record(self, msg="boom"):
+        """Build a record carrying a live exc_info whose message embeds a token."""
+        try:
+            raise ValueError(
+                "connect failed: https://gateway/?client_id=tbsecret456"
+            )
+        except ValueError:
+            exc_info = sys.exc_info()
+        return logging.LogRecord(
+            name="test", level=logging.ERROR, pathname=__file__,
+            lineno=1, msg=msg, args=(), exc_info=exc_info,
+        )
+
+    def test_redacts_token_in_exception_traceback(self, monkeypatch):
+        """SECURITY (F24): a token embedded in the traceback is scrubbed."""
+        monkeypatch.setenv("BOT_TOKEN_EXG", "tbsecret456")
+        monkeypatch.delenv("BOT_TOKEN_HOL", raising=False)
+        f = TokenRedactionFilter()
+        rec = self._make_exc_record()
+        assert f.filter(rec) is True
+        formatted = logging.Formatter().format(rec)
+        assert "tbsecret456" not in formatted
+        assert "***" in formatted
+
+    def test_traceback_formatting_preserved_after_redaction(self, monkeypatch):
+        """The redacted record still formats as a full traceback block."""
+        monkeypatch.setenv("BOT_TOKEN_EXG", "tbsecret456")
+        monkeypatch.delenv("BOT_TOKEN_HOL", raising=False)
+        f = TokenRedactionFilter()
+        rec = self._make_exc_record()
+        assert f.filter(rec) is True
+        formatted = logging.Formatter().format(rec)
+        assert "Traceback (most recent call last)" in formatted
+        assert "ValueError" in formatted
+        # exc_info cleared so no handler can re-format the raw exception;
+        # the pre-redacted exc_text drives the output instead.
+        assert rec.exc_info is None
+        assert rec.exc_text is not None
+        assert not rec.exc_text.endswith("\n")
+
+    def test_exc_info_untouched_when_no_tokens(self, monkeypatch):
+        """Without known tokens the record's exc_info passes through as-is."""
+        monkeypatch.delenv("BOT_TOKEN_EXG", raising=False)
+        monkeypatch.delenv("BOT_TOKEN_HOL", raising=False)
+        monkeypatch.setattr("core.secure_tokens.get_token", lambda key: None)
+        f = TokenRedactionFilter()
+        rec = self._make_exc_record()
+        assert f.filter(rec) is True
+        assert rec.exc_info is not None
 
 
 # =========================================================================

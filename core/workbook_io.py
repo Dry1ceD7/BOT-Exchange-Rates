@@ -26,7 +26,7 @@ from pathlib import Path
 import openpyxl
 from openpyxl.utils import get_column_letter
 
-from core.constants import SKIP_SHEET_NAMES
+from core.constants import MAX_FILE_SIZE_MB, SKIP_SHEET_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,20 @@ def is_standalone_exrate_workbook(
     must never mislabel a ledger or crash the caller.
     """
     if not filepath.lower().endswith(".xlsx"):
+        return False
+    # Featherweight pre-check: stat the size BEFORE opening. The engine's
+    # memory guardrail rejects oversized files later anyway, so probing one
+    # here would only burn memory parsing a workbook that can never be
+    # processed. Both probe callers (the engine's standalone detection and
+    # main.py's headless labeller) share this guard.
+    try:
+        if Path(filepath).stat().st_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+            logger.debug(
+                "Standalone detection probe skipped (file exceeds %dMB): %s",
+                MAX_FILE_SIZE_MB, filepath,
+            )
+            return False
+    except OSError:
         return False
     wb = None
     try:

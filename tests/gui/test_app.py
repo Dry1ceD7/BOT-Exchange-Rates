@@ -929,3 +929,54 @@ class TestAccelerators:
         app._accel_exrate()
         app._on_revert_click.assert_called_once()
         app._on_export_exrate.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _safe_marshal — the worker→Tk bridge must be teardown-proof (F83)
+# ---------------------------------------------------------------------------
+
+class TestSafeMarshalCloseGuard:
+    """Once _on_app_close flips _closing, a worker-thread marshal must be
+    DROPPED (never scheduled) — and a marshal racing the actual destroy must
+    swallow both RuntimeError and tkinter.TclError (TclError is NOT a
+    RuntimeError subclass) so the daemon thread exits cleanly."""
+
+    def _marshal_app(self, *, closing):
+        from gui.app import BOTExrateApp
+
+        app = SimpleNamespace(_closing=closing, after=MagicMock())
+        app._safe_marshal = (
+            lambda func, *a: BOTExrateApp._safe_marshal(app, func, *a)
+        )
+        return app
+
+    def test_callback_dropped_when_closing(self):
+        app = self._marshal_app(closing=True)
+        callback = MagicMock()
+        app._safe_marshal(callback, "arg")  # must not raise
+        app.after.assert_not_called()
+        callback.assert_not_called()
+
+    def test_marshals_through_after_when_open(self):
+        app = self._marshal_app(closing=False)
+        callback = MagicMock()
+        app._safe_marshal(callback, "arg1", "arg2")
+        app.after.assert_called_once_with(0, callback, "arg1", "arg2")
+        # Scheduled, not invoked inline — Tk owns the actual dispatch.
+        callback.assert_not_called()
+
+    def test_swallows_tclerror_from_destroyed_root(self):
+        import tkinter
+
+        app = self._marshal_app(closing=False)
+        app.after = MagicMock(
+            side_effect=tkinter.TclError("application has been destroyed")
+        )
+        app._safe_marshal(MagicMock())  # must not raise
+
+    def test_swallows_runtimeerror_from_torn_down_loop(self):
+        app = self._marshal_app(closing=False)
+        app.after = MagicMock(
+            side_effect=RuntimeError("main thread is not in main loop")
+        )
+        app._safe_marshal(MagicMock())  # must not raise

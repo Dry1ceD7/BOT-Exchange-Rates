@@ -285,7 +285,7 @@ class BOTExrateApp(ctk.CTk):
                 try:
                     icon_image = PhotoImage(file=str(png_path))
                 except tkinter.TclError:
-                    # Fallback: use PIL to convert PNG → Tk-compatible format
+                    # Fallback: use PIL to convert PNG -> Tk-compatible format
                     try:
                         from PIL import Image, ImageTk
                         pil_img = Image.open(png_path).resize((64, 64))
@@ -641,7 +641,7 @@ class BOTExrateApp(ctk.CTk):
         # Verify an existing workbook's ExRate rates against BOT and correct
         # any differing trading-day cells (file backed up first; revertable).
         self.btn_verify_rates = ctk.CTkButton(
-            secondary_row, text="Verify Rates",
+            secondary_row, text=tr("main.btn_verify_rates"),
             height=42, width=150,
             fg_color=t["btn_secondary"], hover_color=t["btn_secondary_hover"],
             font=ctk.CTkFont(size=13, weight="bold"),
@@ -835,7 +835,7 @@ class BOTExrateApp(ctk.CTk):
         # walk) — doing that on the Tk thread freezes the UI for a big share.
         # Offload the listing to a worker and marshal the result back via
         # after() so the window stays responsive; a pure FILE drop is cheap and
-        # stays synchronous so the existing drop→preflight→queue order holds (#8).
+        # stays synchronous so the existing drop->preflight->queue order holds (#8).
         if any(Path(p).is_dir() for p in paths):
             self.lbl_status.configure(
                 text=tr("main.scanning_folder"),
@@ -1153,13 +1153,13 @@ class BOTExrateApp(ctk.CTk):
                         # its fetch window to the BOT business date, so the
                         # hint must quote the same end the run will use.
                         self.lbl_auto_hint.configure(
-                            text=f"Detected: {oldest_date.strftime('%d %b %Y')} → {bot_today().strftime('%d %b %Y')}",
+                            text=f"Detected: {oldest_date.strftime('%d %b %Y')} -> {bot_today().strftime('%d %b %Y')}",
                             text_color=_get_colors()["success"]
                         )
                         self.lbl_status.configure(
                             text=(
                                 f"Connecting to BOT API...  range: "
-                                f"{oldest_date.strftime('%d %b %Y')} → today  (0 of {total})"
+                                f"{oldest_date.strftime('%d %b %Y')} -> today  (0 of {total})"
                             ),
                             text_color=_get_colors()["process_text"]
                         )
@@ -1207,11 +1207,11 @@ class BOTExrateApp(ctk.CTk):
         by a real run and updated per completed file. If unprocessed files
         remain — i.e. the previous run did NOT finish cleanly and was NOT
         cancelled — ask the operator whether to finish only those files:
-          * Yes  → load the unfinished files into the queue (after the usual
+          * Yes  -> load the unfinished files into the queue (after the usual
                    preflight) so a normal Process Batch re-runs only the
                    remainder. The manifest is left in place; the next run
                    rewrites it from the new selection.
-          * No   → delete the manifest so the prompt does not reappear.
+          * No   -> delete the manifest so the prompt does not reappear.
         Never runs while a batch is already in flight, and any error degrades to
         a no-op (a resume offer must never block startup)."""
         if self._batch_running:
@@ -1653,7 +1653,7 @@ class BOTExrateApp(ctk.CTk):
         # Default the picker to the folder/file of the most recently processed
         # ledger so the operator lands on the file they likely want to undo (#5).
         dialog_kwargs = {
-            "title": "Select the file to revert",
+            "title": tr("main.revert_picker_title"),
             # .xlsm is accepted everywhere else in the app — don't hide the very
             # macro-enabled ledger the operator needs to restore (#8).
             "filetypes": [
@@ -1678,20 +1678,19 @@ class BOTExrateApp(ctk.CTk):
             backups = []
         if not backups:
             messagebox.showwarning(
-                "No Backup Found",
-                f"No backup exists for '{Path(path).name}'.\n\n"
-                f"A file must have been processed at least once to have a "
-                f"backup to restore from.",
+                tr("main.no_backup_title"),
+                tr("main.no_backup_body", name=Path(path).name),
             )
             return
         latest_backup = backups[0]
         ts = self.backup_mgr._parse_backup_timestamp(latest_backup)
-        when = ts.strftime("%d %b %Y %H:%M") if ts is not None else "the latest backup"
+        when = (
+            ts.strftime("%d %b %Y %H:%M") if ts is not None
+            else tr("main.revert_when_fallback")
+        )
         if not messagebox.askyesno(
-            "Confirm Revert",
-            f"Restore '{Path(path).name}' from backup dated {when}?\n\n"
-            f"This OVERWRITES the current file with the backup. The current "
-            f"version is snapshotted first (.pre-revert) so this is recoverable.",
+            tr("main.confirm_revert_title"),
+            tr("main.confirm_revert_body", name=Path(path).name, when=when),
         ):
             return
 
@@ -1701,7 +1700,7 @@ class BOTExrateApp(ctk.CTk):
         self.btn_revert.configure(state="disabled")
         self.btn_process.configure(state="disabled")
         self.lbl_status.configure(
-            text=f"Restoring:  {Path(path).name}...",
+            text=tr("main.status_restoring", fname=Path(path).name),
             text_color=_get_colors()["warning"]
         )
         self.progressbar.configure(mode="indeterminate")
@@ -1732,7 +1731,7 @@ class BOTExrateApp(ctk.CTk):
         self.btn_revert.configure(state="disabled")
         self.btn_process.configure(state="disabled")
         self.lbl_status.configure(
-            text=f"Restoring:  {Path(filepath).name}...",
+            text=tr("main.status_restoring", fname=Path(filepath).name),
             text_color=_get_colors()["warning"]
         )
         self.progressbar.configure(mode="indeterminate")
@@ -1747,7 +1746,7 @@ class BOTExrateApp(ctk.CTk):
         self.progressbar.configure(mode="determinate")
         self.progressbar.set(1)
         self.lbl_status.configure(
-            text=f"Reverted successfully from backup:  {backup_name}",
+            text=tr("main.status_reverted", backup=backup_name),
             text_color=_get_colors()["success"]
         )
         self.btn_process.configure(state="normal")
@@ -2037,18 +2036,22 @@ class BOTExrateApp(ctk.CTk):
         t = get_theme()
         self.footer_frame = ctk.CTkFrame(
             self, fg_color=t["footer_bg"], corner_radius=0,
-            border_width=0, height=26,
+            border_width=0, height=34,
         )
         self.footer_frame.pack(fill="x", side="bottom")
         self.footer_frame.pack_propagate(False)
 
+        # Two stacked lines: ownership line, then the company name with the
+        # version beside it. Kept as a single label so theme_applicator's
+        # lbl_footer recolor keeps covering the whole footer text.
         self.lbl_footer = ctk.CTkLabel(
             self.footer_frame,
             text=(
-                f"Property of Advanced ID Asia Engineering., Ltd (AAE)"
-                f"  \u2502  V{APP_VERSION}"
+                "Property of\n"
+                f"Advanced ID Asia Engineering., Ltd  \u2502  V{APP_VERSION}"
             ),
             font=ctk.CTkFont(size=10),
+            justify="center",
             text_color=t["text_muted"],
         )
         self.lbl_footer.pack(expand=True)

@@ -416,7 +416,7 @@ class StandaloneRateAuditor:
                     wb, filepath,
                     verify=build_cell_verifier({ws.title: expected_cells}),
                 )
-                _status(f"✓ Applied {report.change_count} correction(s)")
+                _status(f"OK: Applied {report.change_count} correction(s)")
             elif report.changes:
                 _status(f"{report.change_count} difference(s) found (preview)")
             else:

@@ -54,6 +54,20 @@ def _is_allowed_download_url(url: str) -> bool:
         return False
     return (parsed.hostname or "").lower() in _ALLOWED_DOWNLOAD_HOSTS
 
+
+def _is_safe_asset_filename(name: str) -> bool:
+    """True only for a bare filename that is safe to join under a directory.
+
+    Blocks path traversal: a tampered GitHub API response (or a crafted
+    download URL) could otherwise smuggle separators or ``..`` into the
+    asset name and make the download path escape the private temp
+    directory. Rejects empty names, ``.``/``..``, any path separator
+    (both POSIX and Windows), and Windows drive/stream colons.
+    """
+    if not name or name in {".", ".."}:
+        return False
+    return not any(ch in name for ch in ("/", "\\", ":"))
+
 GITHUB_RELEASES_URL = (
     "https://api.github.com/repos/Dry1ceD7/BOT-Exchange-Rates/releases/latest"
 )
@@ -363,6 +377,19 @@ def download_update(
         logger.error("download_update blocked non-allowlisted URL: %s", url)
         return result
 
+    if filename is None:
+        filename = url.rsplit("/", 1)[-1] if "/" in url else "update.exe"
+
+    # SECURITY (path traversal): the filename — caller-supplied or derived
+    # from the URL — must be a bare name. Separators or '..' would let the
+    # joined download path escape the private temp directory.
+    if not _is_safe_asset_filename(filename):
+        result["error"] = (
+            f"Refusing update: unsafe asset filename: {filename!r}"
+        )
+        logger.error("download_update blocked unsafe filename: %r", filename)
+        return result
+
     # SECURITY (TOCTOU): download into a PRIVATE per-run directory created
     # 0700 instead of the shared temp root, so another local user cannot
     # pre-create / race / read the downloaded installer before it runs.
@@ -370,9 +397,6 @@ def download_update(
         dest_dir = tempfile.mkdtemp(prefix="bot_exrate_dl_")
         with contextlib.suppress(OSError):
             Path(dest_dir).chmod(0o700)
-
-    if filename is None:
-        filename = url.rsplit("/", 1)[-1] if "/" in url else "update.exe"
 
     # Download with a .tmp suffix to avoid partial overwrites.
     # Keep tmp_path/final_path as str: final_path is returned to callers.
@@ -560,8 +584,11 @@ def apply_update(
             # Keep bat_path as str: passed to subprocess and the .bat writer.
             bat_path = str(Path(work_dir) / "bot_exrate_updater.bat")
 
-            # H-02: Validate paths — reject shell metacharacters
-            _UNSAFE_CHARS = set('&|<>^%!')
+            # H-02: Validate paths — reject shell metacharacters. The double
+            # quote is included: every path below is interpolated inside
+            # "..." in the .bat, so an embedded quote would break out of the
+            # quoting and let the rest of the path execute as a command.
+            _UNSAFE_CHARS = set('&|<>^%!"')
             for _path in (new_exe_path, install_dir, current_exe):
                 if _UNSAFE_CHARS.intersection(_path):
                     result["error"] = (

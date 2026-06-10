@@ -103,32 +103,38 @@ def _sentry_token_scrubber(event, hint):
     """Sentry before_send hook: replace known token values with '***'.
 
     Tokens can otherwise surface in event messages, exception values, or
-    request data. We recursively walk the event and substitute any known
-    token string. Returns the (mutated) event so it is still sent.
+    request data. The event is walked recursively and any known token string
+    is substituted; the scrubbed event is returned so it is still sent.
 
-    Token values are resolved fresh for each event batch (keychain + .env)
-    and cached on the function for the duration of this call.
+    FAIL CLOSED: if scrubbing raises for any reason, the event is DROPPED
+    (return None) rather than sent unscrubbed — an unscrubbed event could
+    carry a live API token to a third-party service. The drop is logged so
+    missing Sentry events are explainable.
     """
-    tokens = _scrubber_token_values()
-    if not tokens:
-        return event
-
-    def _scrub(obj):
-        if isinstance(obj, str):
-            out = obj
-            for tok in tokens:
-                out = out.replace(tok, "***")
-            return out
-        if isinstance(obj, dict):
-            return {k: _scrub(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return [_scrub(v) for v in obj]
-        return obj
-
     try:
+        tokens = _scrubber_token_values()
+        if not tokens:
+            return event
+
+        def _scrub(obj):
+            if isinstance(obj, str):
+                out = obj
+                for tok in tokens:
+                    out = out.replace(tok, "***")
+                return out
+            if isinstance(obj, dict):
+                return {k: _scrub(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_scrub(v) for v in obj]
+            return obj
+
         return _scrub(event)
-    except Exception:
-        return event
+    except Exception as exc:  # noqa: BLE001 — any failure must drop the event
+        logging.getLogger(__name__).warning(
+            "Sentry token scrubber failed — dropping event instead of "
+            "sending it unscrubbed: %s", exc,
+        )
+        return None
 
 
 _SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
@@ -166,9 +172,16 @@ logging.basicConfig(
 
 # SECURITY: redact BOT API token values from all log records before they
 # reach the file/console handlers (defends app.log + Sentry breadcrumbs).
-with contextlib.suppress(Exception):
+# A failure here must not block startup, but it must be VISIBLE — logs are
+# unredacted from this point on, so a silent suppress would hide that fact.
+try:
     from core.api_client import install_token_redaction_filter
     install_token_redaction_filter()
+except Exception as _redaction_exc:  # noqa: BLE001 — startup must not block
+    logging.getLogger(__name__).warning(
+        "Token redaction filter could not be installed — log output will "
+        "not be scrubbed of API tokens: %s", _redaction_exc,
+    )
 
 
 # ── Cold-Start: Ensure required directories exist ────────────────────────
@@ -319,6 +332,11 @@ def main():
         _purge_credentials()
         sys.exit(0)
 
+    # GUI launches silently ignore the headless-only flags; tell the user on
+    # stderr so e.g. "--dry-run" without "--headless" is not mistaken for a
+    # safe preview run of the GUI.
+    _warn_ignored_headless_flags(args)
+
     # Headless batch runs must NOT be blocked by a running GUI. They are
     # stateless and coordinate file safety via per-file backups + the batch
     # lock — not the IPC restore channel. Running the single-instance guard
@@ -363,6 +381,35 @@ def main():
         app.mainloop()
     finally:
         ipc_server.stop()
+
+
+def _warn_ignored_headless_flags(args: argparse.Namespace) -> None:
+    """Warn on stderr when headless-only flags are passed in GUI mode.
+
+    Flags like ``--dry-run`` or ``--json`` only take effect with
+    ``--headless`` or ``--schedule``; without one of those the GUI launches
+    and silently ignores them, which can mislead an operator into believing
+    a preview/automation option is active.
+    """
+    if args.headless or args.schedule is not None:
+        return
+    ignored = [
+        flag for flag, present in (
+            ("--input", args.input is not None),
+            ("--start-date", args.start_date is not None),
+            ("--dry-run", args.dry_run),
+            ("--quiet", args.quiet),
+            ("--verbose", args.verbose),
+            ("--json", args.json),
+            ("--resume", args.resume),
+        ) if present
+    ]
+    if ignored:
+        print(
+            f"WARNING: {', '.join(ignored)} only take effect with --headless "
+            "or --schedule and will be ignored in GUI mode.",
+            file=sys.stderr,
+        )
 
 
 def _set_console_log_level(level: int) -> None:

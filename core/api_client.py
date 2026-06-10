@@ -12,6 +12,7 @@ import asyncio
 import logging
 import random
 import time
+import traceback
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -49,7 +50,7 @@ class TokenRedactionFilter(logging.Filter):
     tenacity's before_sleep_log and traceback formatting can otherwise
     leak tokens (e.g. in request URLs/headers) into app.log or Sentry.
     This filter sources token values from three places so redaction holds
-    even after the env→keychain migration scrubs os.environ:
+    even after the env->keychain migration scrubs os.environ:
       1. values explicitly registered by a live BOTClient instance,
       2. os.environ (legacy / pre-migration),
       3. the OS keychain via secure_tokens.get_token (post-migration).
@@ -137,7 +138,38 @@ class TokenRedactionFilter(logging.Filter):
         if redacted != msg:
             record.msg = redacted
             record.args = ()
+        self._redact_exc_info(record, tokens)
         return True
+
+    def _redact_exc_info(self, record: logging.LogRecord, tokens: list) -> None:
+        """Redact token values from an attached exception traceback.
+
+        ``logging.Formatter.format`` only computes ``record.exc_text`` when it
+        is unset (then appends it after the message), so pre-formatting the
+        traceback here, redacting it, caching it on ``record.exc_text`` and
+        clearing ``record.exc_info`` preserves the formatted output exactly
+        while guaranteeing no handler ever re-formats the raw exception —
+        tracebacks routinely embed tokens (e.g. an httpx error carrying the
+        full request URL or auth header in a frame's repr).
+        """
+        if not record.exc_info:
+            return
+        try:
+            exc_text = "".join(traceback.format_exception(*record.exc_info))
+        except Exception:
+            # Could not format the traceback — drop it entirely rather than
+            # let a handler format (and potentially leak) the raw exc_info.
+            record.exc_info = None
+            record.exc_text = None
+            return
+        # Match logging.Formatter.formatException: no trailing newline.
+        if exc_text.endswith("\n"):
+            exc_text = exc_text[:-1]
+        for tok in tokens:
+            if tok:
+                exc_text = exc_text.replace(tok, self._REPLACEMENT)
+        record.exc_text = exc_text
+        record.exc_info = None
 
 
 # Module-level handle to the installed filter so a live BOTClient can
@@ -335,13 +367,13 @@ def ping_token(token: str | None, *, timeout: float = 8.0) -> tuple[bool, str]:
         # Network/DNS/TLS failure — do NOT surface the exception text, which
         # httpx builds from the request URL (token-free here, but the URL is
         # noise for the user and keeps the message channel clean).
-        return False, "✗ Could not reach the BOT API. Check your connection."
+        return False, "FAILED: Could not reach the BOT API. Check your connection."
 
     if resp.status_code == 200:
-        return True, "✓ Key accepted — connection verified."
+        return True, "OK: Key accepted — connection verified."
     if resp.status_code in (401, 403):
-        return False, "✗ Key rejected. Check the key and try again."
-    return False, f"✗ BOT API returned HTTP {resp.status_code}."
+        return False, "FAILED: Key rejected. Check the key and try again."
+    return False, f"FAILED: BOT API returned HTTP {resp.status_code}."
 
 
 # -------------------------------------------------------------------------
@@ -443,7 +475,7 @@ class BOTClient:
                 await asyncio.sleep(wait_time)
                 continue
 
-            # Authentication failure → a rejected/expired/revoked API key.
+            # Authentication failure -> a rejected/expired/revoked API key.
             # Raise a clear, actionable BOTAPIError that tells the user what to
             # do, instead of letting raise_for_status() surface a raw httpx
             # message (status URL + MDN link) that a non-technical accountant
@@ -452,10 +484,10 @@ class BOTClient:
             if response.status_code in (401, 403):
                 raise BOTAPIError(
                     f"Your BOT API key was rejected ({response.status_code}). "
-                    "Open Settings → Manage API Keys and re-enter your keys."
+                    "Open Settings -> Manage API Keys and re-enter your keys."
                 )
 
-            # Transient 5xx → raise a retryable error so tenacity backs off
+            # Transient 5xx -> raise a retryable error so tenacity backs off
             # and retries (raise_for_status would raise a non-retryable
             # HTTPStatusError). Other 4xx still fail fast below.
             if 500 <= response.status_code < 600:
@@ -463,7 +495,7 @@ class BOTClient:
                     f"BOT API server error {response.status_code}."
                 )
 
-            # Any other error (4xx) → raise for caller, fail fast
+            # Any other error (4xx) -> raise for caller, fail fast
             response.raise_for_status()
 
         raise BOTAPIError(
@@ -507,7 +539,7 @@ class BOTClient:
             e_str = current_end.strftime("%Y-%m-%d")
             chunk_idx += 1
             logger.info(
-                "API [%s] chunk %d/%d: %s → %s",
+                "API [%s] chunk %d/%d: %s -> %s",
                 currency, chunk_idx, total_chunks, s_str, e_str,
             )
             url = (

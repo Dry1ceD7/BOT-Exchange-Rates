@@ -95,6 +95,62 @@ def test_sentry_scrubber_redacts_keychain_sourced_token(monkeypatch):
     assert "***" in scrubbed["message"]
 
 
+def test_sentry_scrubber_drops_event_when_scrubbing_fails(monkeypatch):
+    """SECURITY (F157): a scrubber failure DROPS the event (returns None)
+    instead of sending it unscrubbed to a third-party service."""
+    main = _import_main_with_fake_tk(monkeypatch)
+
+    def _boom():
+        raise RuntimeError("keychain exploded")
+
+    monkeypatch.setattr(main, "_scrubber_token_values", _boom)
+    event = {"message": "may contain a live token"}
+    assert main._sentry_token_scrubber(event, {}) is None
+
+
+def _make_args(main, **overrides):
+    """Build a parsed-args namespace with main.py's CLI defaults."""
+    import argparse
+    defaults = {
+        "headless": False, "input": None, "start_date": None,
+        "dry_run": False, "quiet": False, "verbose": False, "json": False,
+        "resume": False, "schedule": None, "purge_credentials": False,
+    }
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+def test_headless_only_flags_warn_in_gui_mode(monkeypatch, capsys):
+    """F158: headless-only flags without --headless/--schedule warn on stderr."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    args = _make_args(main, dry_run=True, json=True)
+    main._warn_ignored_headless_flags(args)
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "--dry-run" in err
+    assert "--json" in err
+    assert "ignored" in err
+
+
+def test_headless_only_flags_silent_with_headless(monkeypatch, capsys):
+    """No warning when --headless (or --schedule) makes the flags effective."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    main._warn_ignored_headless_flags(
+        _make_args(main, headless=True, dry_run=True)
+    )
+    main._warn_ignored_headless_flags(
+        _make_args(main, schedule="23:00", input="x")
+    )
+    assert capsys.readouterr().err == ""
+
+
+def test_no_warning_for_plain_gui_launch(monkeypatch, capsys):
+    """A bare GUI launch (no flags) prints nothing."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    main._warn_ignored_headless_flags(_make_args(main))
+    assert capsys.readouterr().err == ""
+
+
 def test_purge_credentials_deletes_both_tokens(monkeypatch, capsys):
     """--purge-credentials deletes both keychain tokens and reports a result."""
     main = _import_main_with_fake_tk(monkeypatch)

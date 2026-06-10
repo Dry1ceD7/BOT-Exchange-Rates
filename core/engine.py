@@ -5,9 +5,9 @@ core/engine.py
 BOT Exchange Rate Processor — Cache-First Orchestrator
 ---------------------------------------------------------------------------
 Slim orchestrator. Heavy logic extracted to:
-  - core/excel_io.py → Excel I/O operations (formulas, indexing, writing)
-  - core/exrate_sheet.py → Master ExRate sheet builder
-  - core/prescan.py → Smart date pre-scanner
+  - core/excel_io.py -> Excel I/O operations (formulas, indexing, writing)
+  - core/exrate_sheet.py -> Master ExRate sheet builder
+  - core/prescan.py -> Smart date pre-scanner
 """
 
 import asyncio
@@ -419,7 +419,7 @@ class LedgerEngine:
         truncating any content, so it is safe to run before the real save. A
         file held open by Excel (Windows sharing violation / WinError 32) or
         without write permission (EACCES) raises and we report it as not
-        writable. Any unexpected error is treated as "probe inconclusive" →
+        writable. Any unexpected error is treated as "probe inconclusive" ->
         writable, so the real save path remains the authoritative guard.
         """
         try:
@@ -462,7 +462,7 @@ class LedgerEngine:
         *, extend_to_today: bool = True,
     ) -> tuple:
         """
-        Cache-First Architecture: SQLite → API fallback → cache store.
+        Cache-First Architecture: SQLite -> API fallback -> cache store.
         Returns (logic_engine, usd_selling, eur_selling,
                  usd_buying, eur_buying, usd_data, eur_data).
 
@@ -559,7 +559,7 @@ class LedgerEngine:
                 f"{fetch_end.strftime('%Y-%m-%d')}). Calling API",
             )
             logger.info(
-                "Cache miss: %d dates missing (%s → %s). Fetching from API...",
+                "Cache miss: %d dates missing (%s -> %s). Fetching from API...",
                 len(missing_dates),
                 fetch_start.strftime("%Y-%m-%d"),
                 fetch_end.strftime("%Y-%m-%d"),
@@ -915,7 +915,7 @@ class LedgerEngine:
         self._last_anomaly_count = anomaly_count
         if anomaly_count:
             self._emit(
-                f"⚠ {anomaly_count} anomalous rate(s) detected — check audit log",
+                f"WARNING: {anomaly_count} anomalous rate(s) detected — check audit log",
                 etype="warning",
             )
 

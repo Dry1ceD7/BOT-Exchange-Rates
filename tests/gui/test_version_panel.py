@@ -171,7 +171,7 @@ class TestVersionPanelPingDone:
         panel._busy_ping = True
         panel._btn_ping.configure(state="disabled")
 
-        panel._ping_done("✓ API connected & authenticated", "#00aa00")
+        panel._ping_done("OK: API connected & authenticated", "#00aa00")
 
         assert panel._btn_ping.cget("state") == "normal"
         panel.destroy()
@@ -180,9 +180,9 @@ class TestVersionPanelPingDone:
         panel = _make_panel(tk_root)
         panel._busy_ping = True
 
-        panel._ping_done("✓ API connected & authenticated", "#00aa00")
+        panel._ping_done("OK: API connected & authenticated", "#00aa00")
 
-        assert panel._lbl_ping.cget("text") == "✓ API connected & authenticated"
+        assert panel._lbl_ping.cget("text") == "OK: API connected & authenticated"
         panel.destroy()
 
     def test_ping_done_clears_busy_flag(self, tk_root):
@@ -198,9 +198,9 @@ class TestVersionPanelPingDone:
         panel = _make_panel(tk_root)
         panel._busy_ping = True
 
-        panel._ping_done("✗ Connection refused", "#ff0000")
+        panel._ping_done("FAILED: Connection refused", "#ff0000")
 
-        assert "✗" in panel._lbl_ping.cget("text")
+        assert "FAILED:" in panel._lbl_ping.cget("text")
         panel.destroy()
 
 
@@ -240,7 +240,7 @@ class TestVersionPanelCheckUpdate:
         panel._busy_update = True
         panel._btn_update.configure(state="disabled")
 
-        panel._update_done("✓ Up to date (V3.2.8)", "#00aa00", None)
+        panel._update_done("OK: Up to date (V3.2.8)", "#00aa00", None)
 
         assert panel._btn_update.cget("state") == "normal"
         panel.destroy()
@@ -249,7 +249,7 @@ class TestVersionPanelCheckUpdate:
         panel = _make_panel(tk_root)
         panel._busy_update = True
 
-        panel._update_done("✓ Up to date (V3.2.8)", "#00aa00", None)
+        panel._update_done("OK: Up to date (V3.2.8)", "#00aa00", None)
 
         assert "Up to date" in panel._lbl_update.cget("text")
         panel.destroy()
@@ -269,7 +269,7 @@ class TestVersionPanelCheckUpdate:
         panel = _make_panel(tk_root)
         panel._busy_update = True
 
-        panel._update_done("✓ Up to date (V3.2.8)", "#00aa00", None)
+        panel._update_done("OK: Up to date (V3.2.8)", "#00aa00", None)
 
         assert panel._busy_update is False
         panel.destroy()

@@ -6,8 +6,8 @@ BOT Exchange Rate Processor — Workbook write pipeline + standalone updater
 ---------------------------------------------------------------------------
 Two extracted units that previously lived inline in core/engine.py:
 
-  - WorkbookWriter          → the process_ledger openpyxl write pipeline.
-  - StandaloneExRateUpdater → the update_exrate_standalone method body.
+  - WorkbookWriter          -> the process_ledger openpyxl write pipeline.
+  - StandaloneExRateUpdater -> the update_exrate_standalone method body.
 
 LIVE-BINDING CONTRACT (mandatory): both classes store ONLY the live engine
 object (``self._engine = engine``) and dereference every engine attribute
@@ -392,8 +392,8 @@ class WorkbookWriter:
     ) -> None:
         """Append one ``AuditRecord`` per EX Rate cell that resolved to a rate.
 
-        Mirrors the IFS formula's resolution (THB→1, USD/EUR→fixed columns,
-        extra currencies→exrate_col_map) so ``new_value`` matches what Excel
+        Mirrors the IFS formula's resolution (THB->1, USD/EUR->fixed columns,
+        extra currencies->exrate_col_map) so ``new_value`` matches what Excel
         will display. ``original_value`` is the pre-injection cell snapshot.
         Rows that cannot resolve (no rate / unsupported currency) are skipped —
         those are surfaced separately by ``_warn_unfilled_rows`` and would only
@@ -403,6 +403,22 @@ class WorkbookWriter:
         a record whose currency + row date match gets ``anomaly_flag=True``
         so the audit CSV's Anomaly_Flag column reads "ANOMALY"; all other
         records stay False. Metadata only — the value is written regardless.
+
+        Audit-field caveats (CSV schema frozen until a coordinated rename
+        across core/audit_logger.py HEADERS + downstream consumers):
+
+        - ``holiday_rollback`` is a misnomer on this path: no rollback exists
+          in the exact-match XLOOKUP pipeline (weekend/holiday rows stay
+          blank by design). The flag actually records "the row's date IS a
+          BOT holiday" — i.e. a holiday-dated row — nothing more.
+        - ``rate_source`` is the fixed label ``"Cache/API"``: by the time
+          records are collected here, the rates were already merged into the
+          ExRate sheet, and per-(currency, date) provenance (cache hit vs
+          API fetch vs existing-sheet fallback — the latter logged by
+          ``core.exrate_sheet._merge_rate_data``) is not threaded through to
+          this site. Propagating real provenance would require changing the
+          ``_merge_rate_data`` return shape and the writer call chain;
+          deferred — the label honestly states the two primary sources.
         """
         anomalous = anomalous or set()
         # USD/EUR fixed columns vary by rate type (B/D buying, C/E selling) —
@@ -482,7 +498,7 @@ class WorkbookWriter:
 
     @staticmethod
     def _fmt_value(value) -> str:
-        """Render a cell value for the audit CSV (blank cells → empty string)."""
+        """Render a cell value for the audit CSV (blank cells -> empty string)."""
         if value is None:
             return ""
         return str(value)
@@ -625,8 +641,8 @@ class StandaloneExRateUpdater:
                 )
 
                 _status("Writing exchange rate data...")
-                # Manual range → honor the user's exact (dr_start, dr_end).
-                # No range → prior-year-December computed_start, end defaults
+                # Manual range -> honor the user's exact (dr_start, dr_end).
+                # No range -> prior-year-December computed_start, end defaults
                 # to today() inside update_master_exrate_sheet.
                 sheet_start = dr_start if dr_start is not None else computed_start
                 update_master_exrate_sheet(
@@ -645,7 +661,7 @@ class StandaloneExRateUpdater:
                 _atomic_save(
                     wb, filepath, verify=build_cell_verifier(expected)
                 )
-                _status(f"✓ ExRate updated: {Path(filepath).name}")
+                _status(f"OK: ExRate updated: {Path(filepath).name}")
                 return filepath
             finally:
                 _close_vba_archive(wb)
@@ -749,7 +765,7 @@ class StandaloneExRateUpdater:
                 )
             }
             _atomic_save(wb, filepath, verify=build_cell_verifier(expected))
-            _status(f"✓ ExRate created: {Path(filepath).name}")
+            _status(f"OK: ExRate created: {Path(filepath).name}")
             return filepath
         finally:
             _close_vba_archive(wb)

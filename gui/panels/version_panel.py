@@ -239,18 +239,18 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
                 resp = httpx.get(_BOT_API_PING, headers=headers, timeout=8.0)
                 if resp.status_code == 200:
                     self._safe_after(0, self._ping_done,
-                               "✓ API connected & authenticated",
+                               "OK: API connected & authenticated",
                                t["modal_success"])
                 elif resp.status_code == 401:
-                    msg = ("⚠ API reachable but token is invalid" if token
-                           else "⚠ API reachable — no token configured")
+                    msg = ("WARNING: API reachable but token is invalid" if token
+                           else "WARNING: API reachable — no token configured")
                     self._safe_after(0, self._ping_done, msg, t["warning"])
                 else:
                     self._safe_after(0, self._ping_done,
                                f"API returned HTTP {resp.status_code}",
                                t["error_text"])
             except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
-                self._safe_after(0, self._ping_done, f"✗ {e}", t["error_text"])
+                self._safe_after(0, self._ping_done, f"FAILED: {e}", t["error_text"])
 
         threading.Thread(target=_worker, daemon=True, name="APIPing").start()
 
@@ -288,7 +288,7 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
                                t["error_text"], None, "")
                 else:
                     self._safe_after(0, self._update_done,
-                               f"✓ Up to date (V{__version__})",
+                               f"OK: Up to date (V{__version__})",
                                t["modal_success"], None, "")
             except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
                 self._safe_after(0, self._update_done,
@@ -511,7 +511,7 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
 
                 installer_path = result.get("path", "")
                 self._safe_after(0, self._dl_done,
-                           "✅ Downloaded — restart to install",
+                           "Done: Downloaded — restart to install",
                            t["modal_success"], True, installer_path,
                            expected_sha256)
             except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
@@ -525,7 +525,7 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
         self._busy_download = False
         self._lbl_update.configure(text=text, text_color=color)
         if success:
-            self._btn_update.configure(state="disabled", text="Updated ✓")
+            self._btn_update.configure(state="disabled", text="Updated")
             self._btn_dl_version.configure(state="disabled")
             self._pending_installer = installer_path
             self._pending_sha256 = expected_sha256
@@ -552,7 +552,7 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
         dialog.geometry(f"340x180+{sx}+{sy}")
 
         ctk.CTkLabel(
-            dialog, text="✅ Update Installed",
+            dialog, text="Update Installed",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=t["modal_text"],
         ).pack(pady=(24, 8))

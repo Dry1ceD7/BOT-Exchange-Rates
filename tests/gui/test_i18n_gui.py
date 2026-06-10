@@ -226,3 +226,227 @@ class TestTokenDialogTranslated:
             )
         finally:
             dialog.destroy()
+
+
+# ---------------------------------------------------------------------------
+# CSV panel
+# ---------------------------------------------------------------------------
+class TestCsvPanelTranslated:
+    def _make(self, tk_root, language):
+        from gui.panels.csv_panel import CSVPanel
+
+        set_language(language)
+        return CSVPanel(tk_root)
+
+    def test_import_button_is_thai(self, tk_root):
+        panel = self._make(tk_root, "th")
+        try:
+            assert panel._btn_import.cget("text") == _th("csv.btn_import")
+            assert panel._btn_export.cget("text") == _th("csv.btn_export")
+        finally:
+            panel.destroy()
+
+    def test_import_button_is_english_when_en(self, tk_root):
+        panel = self._make(tk_root, "en")
+        try:
+            assert panel._btn_import.cget("text") == _en("csv.btn_import")
+        finally:
+            panel.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Rate ticker
+# ---------------------------------------------------------------------------
+class TestRateTickerTranslated:
+    def _make(self, tk_root, language):
+        from gui.panels.rate_ticker import RateTicker
+
+        set_language(language)
+        # cache_db=None: the connecting label is painted at build time and
+        # start() is never called, so no worker thread spawns here.
+        return RateTicker(tk_root, cache_db=None)
+
+    def test_connecting_label_is_thai(self, tk_root):
+        ticker = self._make(tk_root, "th")
+        try:
+            assert ticker.lbl_live.cget("text") == _th("ticker.connecting")
+        finally:
+            ticker.destroy()
+
+    def test_connecting_label_is_english_when_en(self, tk_root):
+        ticker = self._make(tk_root, "en")
+        try:
+            assert ticker.lbl_live.cget("text") == _en("ticker.connecting")
+        finally:
+            ticker.destroy()
+
+
+# ---------------------------------------------------------------------------
+# ExRate dialog
+# ---------------------------------------------------------------------------
+def _open_exrate_dialog(tk_root, language):
+    """Build show_exrate_dialog's Toplevel withdrawn/non-modal (no display
+    grab), mirroring tests/gui/test_exrate_dialog.py's harness."""
+    import customtkinter as ctk
+
+    from gui.panels.exrate_dialog import show_exrate_dialog
+
+    set_language(language)
+    captured = []
+    _orig_init = ctk.CTkToplevel.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        _orig_init(self, *args, **kwargs)
+        self.withdraw()
+        captured.append(self)
+
+    with (
+        patch.object(ctk.CTkToplevel, "__init__", _patched_init),
+        patch.object(ctk.CTkToplevel, "grab_set", lambda self: None),
+        patch.object(ctk.CTkToplevel, "transient", lambda self, *a: None),
+        patch.object(ctk.CTkToplevel, "update_idletasks", lambda self: None),
+    ):
+        show_exrate_dialog(tk_root)
+    assert captured, "CTkToplevel was not instantiated by show_exrate_dialog"
+    return captured[0]
+
+
+def _walk_widgets(root):
+    import contextlib
+
+    stack = list(root.winfo_children())
+    while stack:
+        w = stack.pop()
+        yield w
+        with contextlib.suppress(Exception):
+            stack.extend(w.winfo_children())
+
+
+def _button_texts(root):
+    import customtkinter as ctk
+
+    return [
+        str(w.cget("text")) for w in _walk_widgets(root)
+        if isinstance(w, ctk.CTkButton)
+    ]
+
+
+def _label_texts(root):
+    import customtkinter as ctk
+
+    return [
+        str(w.cget("text")) for w in _walk_widgets(root)
+        if isinstance(w, ctk.CTkLabel)
+    ]
+
+
+class TestExrateDialogTranslated:
+    def test_title_and_create_button_are_thai(self, tk_root):
+        dialog = _open_exrate_dialog(tk_root, "th")
+        try:
+            assert dialog.title() == _th("exrate.window_title")
+            assert _th("exrate.btn_create") in _button_texts(dialog)
+        finally:
+            dialog.destroy()
+
+    def test_create_button_is_english_when_en(self, tk_root):
+        dialog = _open_exrate_dialog(tk_root, "en")
+        try:
+            assert _en("exrate.btn_create") in _button_texts(dialog)
+        finally:
+            dialog.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Rate Audit report dialog
+# ---------------------------------------------------------------------------
+def _audit_report(with_changes: bool):
+    from datetime import date
+    from decimal import Decimal
+
+    from core.rate_audit import RateAuditReport, RateChange
+
+    r = RateAuditReport(
+        file="/tmp/ledger.xlsx", scanned_rows=5, compared_cells=20,
+        applied=True, unverifiable=0,
+    )
+    r.backup_path = "/tmp/ledger.bak.xlsx"
+    if with_changes:
+        r.changes.append(RateChange(
+            row=2, col=2, cell="B2", rate_date=date(2026, 5, 27),
+            column_label="USD Buying TT Rate", currency="USD",
+            rate_type="buying_transfer", old_value=Decimal("32.0000"),
+            new_value=Decimal("32.4507"),
+            reason="value 32.0000 != BOT buying_transfer 32.4507",
+        ))
+    return r
+
+
+def _open_audit_report(tk_root, language, with_changes=True):
+    import contextlib
+
+    import customtkinter as ctk
+
+    from gui.panels import rate_audit_dialog
+
+    set_language(language)
+    before = set(tk_root.winfo_children())
+    rate_audit_dialog._show_report_dialog(
+        tk_root, _audit_report(with_changes), "/tmp/Audit_Log_x.csv"
+    )
+    new = [
+        w for w in tk_root.winfo_children()
+        if w not in before and isinstance(w, ctk.CTkToplevel)
+    ]
+    assert new, "report dialog Toplevel was not created"
+    dlg = new[0]
+    with contextlib.suppress(Exception):
+        dlg.withdraw()
+    return dlg
+
+
+class TestRateAuditDialogTranslated:
+    def test_title_heading_and_buttons_are_thai(self, tk_root):
+        dlg = _open_audit_report(tk_root, "th")
+        try:
+            assert dlg.title() == _th("rateaudit.report_title")
+            assert _th("rateaudit.btn_revert") in _button_texts(dlg)
+            assert _th("rateaudit.btn_close") in _button_texts(dlg)
+            expected_head = _th("rateaudit.head_corrected").format(
+                count=1, fname="ledger.xlsx"
+            )
+            assert expected_head in _label_texts(dlg)
+        finally:
+            dlg.destroy()
+
+    def test_no_changes_body_is_thai(self, tk_root):
+        dlg = _open_audit_report(tk_root, "th", with_changes=False)
+        try:
+            assert _th("rateaudit.no_corrections") in _label_texts(dlg)
+        finally:
+            dlg.destroy()
+
+    def test_buttons_are_english_when_en(self, tk_root):
+        dlg = _open_audit_report(tk_root, "en")
+        try:
+            assert _en("rateaudit.btn_revert") in _button_texts(dlg)
+            assert _en("rateaudit.btn_close") in _button_texts(dlg)
+        finally:
+            dlg.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Catalog completeness for the new rateaudit.* namespace
+# ---------------------------------------------------------------------------
+class TestRateAuditCatalogComplete:
+    def test_every_rateaudit_key_has_en_and_th(self):
+        keys = [k for k in CATALOG if k.startswith("rateaudit.")]
+        assert keys, "rateaudit.* namespace missing from the catalog"
+        for key in keys:
+            assert CATALOG[key].get("en", "").strip(), key
+            assert CATALOG[key].get("th", "").strip(), key
+
+    def test_verify_rates_button_key_has_en_and_th(self):
+        entry = CATALOG["main.btn_verify_rates"]
+        assert entry["en"] == "Verify Rates"
+        assert entry["th"].strip()

@@ -540,10 +540,10 @@ class SchedulerPanel(ctk.CTkFrame):
             # remove it deliberately rather than discovering it was dropped.
             if p in self._missing_paths:
                 self._path_list.insert(
-                    "end", f"⚠ {display} {tr('sched.unavailable')}\n"
+                    "end", f"WARNING: {display} {tr('sched.unavailable')}\n"
                 )
             else:
-                self._path_list.insert("end", f"📁 {display}\n")
+                self._path_list.insert("end", f"{display}\n")
         self._path_list.configure(state="disabled")
 
     def _update_status(self):

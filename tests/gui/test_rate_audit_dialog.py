@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
-"""GUI tests for the Rate Audit report dialog (construction only).
+"""GUI tests for the Rate Audit dialog: report construction, worker
+marshalling, the _exrate_running lease lifecycle, and the guarded Revert.
 
-The audit logic + worker are covered by tests/test_rate_audit*.py; here we just
-confirm the report Toplevel builds cleanly both with and without changes and
-that the module imports. Requires a display; tk_root skips on headless CI.
+The audit scan/correction logic itself is covered by tests/test_rate_audit*.py.
+This module covers the UI side: the report Toplevel builds with and without
+changes, the worker's callbacks route through app._safe_marshal, success and
+raising worker paths release the _exrate_running lease, a picker cancel
+releases it too, app._open_rate_audit refuses while busy, _poll_rate_audit_done
+re-enables the buttons, and the report's Revert routes through the guarded
+app entry. Tk-based tests require a display; tk_root skips on headless CI.
 """
 import contextlib
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import customtkinter as ctk
+import pytest
 
+from core.i18n import tr
 from core.rate_audit import RateAuditReport, RateChange
 from gui.panels import rate_audit_dialog
 
@@ -217,7 +225,7 @@ class TestRevertGuard:
         report = _report(with_changes=True)
         try:
             rate_audit_dialog._show_report_dialog(tk_root, report, None)
-            btn = _find_button(tk_root, "Revert these changes")
+            btn = _find_button(tk_root, tr("rateaudit.btn_revert"))
             assert btn is not None, "Revert button missing from report dialog"
             btn.cget("command")()
             tk_root._start_guarded_revert.assert_called_once_with(
@@ -234,7 +242,7 @@ class TestRevertGuard:
         report = _report(with_changes=True)
         try:
             rate_audit_dialog._show_report_dialog(tk_root, report, None)
-            btn = _find_button(tk_root, "Revert these changes")
+            btn = _find_button(tk_root, tr("rateaudit.btn_revert"))
             assert btn is not None
             btn.cget("command")()
             tops = [w for w in _toplevels(tk_root) if w.winfo_exists()]
@@ -249,7 +257,160 @@ class TestRevertGuard:
                         labels.append(str(w.cget("text")))
                 with contextlib.suppress(Exception):
                     stack.extend(w.winfo_children())
-            assert any("Busy" in s for s in labels)
+            assert tr("rateaudit.revert_busy") in labels
         finally:
             _destroy_toplevels(tk_root)
             del tk_root._start_guarded_revert
+
+
+# ---------------------------------------------------------------------------
+# F169: worker lifecycle — the _exrate_running lease must ALWAYS be released
+# ---------------------------------------------------------------------------
+class TestWorkerLifecycle:
+    """_launch_worker must clear _exrate_running on both the success and the
+    raising path, and a file-picker cancel must release the lease the caller
+    (app._open_rate_audit) acquired before the picker opened."""
+
+    def test_success_path_clears_exrate_running(self, monkeypatch):
+        app = _MarshalApp()
+        _stub_worker_deps(monkeypatch, _FakeAuditor)
+        monkeypatch.setattr(
+            rate_audit_dialog, "_show_report_dialog", lambda *a: None,
+        )
+        assert app._exrate_running is True
+        rate_audit_dialog._launch_worker(app, "/tmp/ledger.xlsx")
+        assert app._exrate_running is False
+
+    def test_raising_path_clears_exrate_running(self, monkeypatch):
+        class _BoomAuditor:
+            def __init__(self, engine):
+                pass
+
+            async def run(self, *a, **kw):
+                raise ValueError("scan failed")
+
+        app = _MarshalApp()
+        _stub_worker_deps(monkeypatch, _BoomAuditor)
+        assert app._exrate_running is True
+        rate_audit_dialog._launch_worker(app, "/tmp/ledger.xlsx")
+        assert app._exrate_running is False
+
+    def test_picker_cancel_releases_guard_and_spawns_nothing(
+        self, monkeypatch
+    ):
+        app = SimpleNamespace(_exrate_running=True)
+        launched = []
+        monkeypatch.setattr(
+            rate_audit_dialog.filedialog, "askopenfilename",
+            lambda **kw: "",
+        )
+        monkeypatch.setattr(
+            rate_audit_dialog, "_launch_worker",
+            lambda *a: launched.append(a),
+        )
+        rate_audit_dialog.show_rate_audit_dialog(app)
+        assert app._exrate_running is False
+        assert not launched, "worker spawned despite a cancelled picker"
+
+    def test_picked_file_is_handed_to_the_worker(self, monkeypatch):
+        app = SimpleNamespace(_exrate_running=True)
+        launched = []
+        monkeypatch.setattr(
+            rate_audit_dialog.filedialog, "askopenfilename",
+            lambda **kw: "/tmp/picked.xlsx",
+        )
+        monkeypatch.setattr(
+            rate_audit_dialog, "_launch_worker",
+            lambda *a: launched.append(a),
+        )
+        rate_audit_dialog.show_rate_audit_dialog(app)
+        assert launched == [(app, "/tmp/picked.xlsx")]
+        # The worker (stubbed here) owns releasing the lease from now on.
+        assert app._exrate_running is True
+
+
+# ---------------------------------------------------------------------------
+# F169: app-side busy guard + poll loop (unbound methods on a stand-in self)
+# ---------------------------------------------------------------------------
+def _guard_app(**flags):
+    app = SimpleNamespace(
+        _batch_running=False,
+        _revert_running=False,
+        _exrate_running=False,
+        _flash_busy_status=MagicMock(),
+        btn_process=MagicMock(),
+        btn_revert=MagicMock(),
+        file_queue=[],
+        after=MagicMock(),
+        _refresh_revert_state=MagicMock(),
+        _poll_rate_audit_done=MagicMock(),
+    )
+    for name, value in flags.items():
+        setattr(app, name, value)
+    return app
+
+
+class TestOpenRateAuditBusyGuard:
+    @pytest.mark.parametrize(
+        "flag", ["_batch_running", "_revert_running", "_exrate_running"]
+    )
+    def test_refuses_while_busy(self, flag, monkeypatch):
+        from gui.app import BOTExrateApp
+
+        app = _guard_app(**{flag: True})
+        opened = []
+        monkeypatch.setattr(
+            rate_audit_dialog, "show_rate_audit_dialog",
+            lambda a: opened.append(a),
+        )
+        BOTExrateApp._open_rate_audit(app)
+        app._flash_busy_status.assert_called_once()
+        assert not opened, "dialog opened despite the busy guard"
+        app.btn_process.configure.assert_not_called()
+        # The lease is only taken when the audit actually starts.
+        if flag != "_exrate_running":
+            assert app._exrate_running is False
+
+    def test_acquires_lease_and_locks_buttons_when_idle(self, monkeypatch):
+        from gui.app import BOTExrateApp
+
+        app = _guard_app()
+        opened = []
+        monkeypatch.setattr(
+            rate_audit_dialog, "show_rate_audit_dialog",
+            lambda a: opened.append(a),
+        )
+        BOTExrateApp._open_rate_audit(app)
+        assert opened == [app]
+        assert app._exrate_running is True
+        app.btn_process.configure.assert_called_once_with(state="disabled")
+        app.btn_revert.configure.assert_called_once_with(state="disabled")
+        app._poll_rate_audit_done.assert_called_once()
+
+
+class TestPollRateAuditDone:
+    def test_keeps_polling_while_running(self):
+        from gui.app import BOTExrateApp
+
+        app = _guard_app(_exrate_running=True)
+        BOTExrateApp._poll_rate_audit_done(app)
+        app.after.assert_called_once()
+        assert app.after.call_args[0][0] == 150
+        app.btn_process.configure.assert_not_called()
+
+    def test_reenables_process_button_when_done_with_queue(self):
+        from gui.app import BOTExrateApp
+
+        app = _guard_app(file_queue=["/tmp/a.xlsx"])
+        BOTExrateApp._poll_rate_audit_done(app)
+        app.after.assert_not_called()
+        app.btn_process.configure.assert_called_once_with(state="normal")
+        app._refresh_revert_state.assert_called_once()
+
+    def test_keeps_process_disabled_when_queue_empty(self):
+        from gui.app import BOTExrateApp
+
+        app = _guard_app(file_queue=[])
+        BOTExrateApp._poll_rate_audit_done(app)
+        app.btn_process.configure.assert_called_once_with(state="disabled")
+        app._refresh_revert_state.assert_called_once()

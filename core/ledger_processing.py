@@ -8,8 +8,8 @@ Near-pure helpers extracted from core/engine.py to keep the orchestrator
 slim. These functions take all of their dependencies as explicit parameters
 (no engine ``self`` state), so they are independently testable.
 
-  - run_anomaly_check    → anomaly orchestration over loaded rate dicts
-  - prescan_target_dates → read-only workbook scan for target dates
+  - run_anomaly_check    -> anomaly orchestration over loaded rate dicts
+  - prescan_target_dates -> read-only workbook scan for target dates
 """
 
 import contextlib
@@ -82,10 +82,10 @@ def run_anomaly_check(
         anomalous_out.update((a.currency, a.check_date) for a in anomalies)
     for a in anomalies:
         emit_fn(
-            f"⚠ ANOMALY: {a.currency} {a.rate_type} on "
+            f"WARNING: ANOMALY: {a.currency} {a.rate_type} on "
             f"{a.check_date.strftime('%d %b %Y')}: "
             f"{a.pct_change:.2f}% change "
-            f"({a.prev_value} → {a.new_value})",
+            f"({a.prev_value} -> {a.new_value})",
             "warning",
         )
     if anomalies:
@@ -112,7 +112,7 @@ def prescan_target_dates(
         filepath: Path to the .xlsx/.xlsm workbook.
         target_cols: Column-name mapping; ``target_cols["source_date"]`` is
             the header label of the date column.
-        parse_date_fn: Cell-value → date parser (defaults to shared parser).
+        parse_date_fn: Cell-value -> date parser (defaults to shared parser).
         emit_fn: Optional status callback ``emit(msg)``.
 
     Returns:
@@ -142,7 +142,7 @@ def prescan_target_dates_and_currencies(
         filepath: Path to the .xlsx/.xlsm workbook.
         target_cols: Column-name mapping; ``target_cols["source_date"]`` and
             ``target_cols["currency"]`` are the header labels scanned.
-        parse_date_fn: Cell-value → date parser (defaults to shared parser).
+        parse_date_fn: Cell-value -> date parser (defaults to shared parser).
         emit_fn: Optional status callback ``emit(msg)``.
 
     Returns:
