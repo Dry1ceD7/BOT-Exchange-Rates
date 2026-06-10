@@ -38,8 +38,14 @@ def run_anomaly_check(
     usd_selling: dict[date, Decimal],
     eur_buying: dict[date, Decimal],
     eur_selling: dict[date, Decimal],
+    extra_currency_rates: dict[str, dict[date, Decimal]] | None = None,
+    extra_rate_type: str = "buying_transfer",
+    anomalous_out: set[tuple[str, date]] | None = None,
 ) -> int:
     """Run anomaly detection across all loaded rates (v3.1.0).
+
+    Alert-only by contract: this function reports via ``emit_fn`` and the
+    return count — it has no channel to veto, rewrite, or skip a rate.
 
     Args:
         anomaly_guard: An object exposing ``check_rates_bulk(rates_bundle)``
@@ -49,6 +55,15 @@ def run_anomaly_check(
         usd_selling: USD selling rates keyed by date.
         eur_buying: EUR buying-transfer rates keyed by date.
         eur_selling: EUR selling rates keyed by date.
+        extra_currency_rates: Optional extra (non-USD/EUR) ledger currencies
+            as ``{ccy: {date: Decimal}}`` (F42). Each series joins the bundle
+            under ``"{CCY}_{extra_rate_type}"`` so GBP/CNY/etc. jumps are
+            flagged exactly like the four fixed USD/EUR series.
+        extra_rate_type: Rate-type label for the extra series (the engine's
+            snapshotted rate type — the extra fetch carries only that type).
+        anomalous_out: Optional set that receives one ``(currency, date)``
+            tuple per anomaly, so callers can thread the flagged cells into
+            the audit trail (F25) without changing the return contract.
 
     Returns:
         The number of anomalies found.
@@ -59,7 +74,11 @@ def run_anomaly_check(
         "EUR_buying_transfer": eur_buying,
         "EUR_selling": eur_selling,
     }
+    for ccy, series in (extra_currency_rates or {}).items():
+        rates_bundle[f"{ccy}_{extra_rate_type}"] = series
     anomalies = anomaly_guard.check_rates_bulk(rates_bundle)
+    if anomalous_out is not None:
+        anomalous_out.update((a.currency, a.check_date) for a in anomalies)
     for a in anomalies:
         emit_fn(
             f"⚠ ANOMALY: {a.currency} {a.rate_type} on "

@@ -158,9 +158,11 @@ class TrayManager:
 
     def _on_show(self, icon=None, item=None) -> None:
         """Restore the window from the tray."""
-        # Schedule on the Tk main thread
-        with contextlib.suppress(RuntimeError):  # app already destroyed
-            self._app.after(0, self._restore_window)
+        # Schedule on the Tk main thread. _safe_marshal no-ops once the app
+        # is closing and swallows both RuntimeError AND TclError (TclError is
+        # NOT a RuntimeError subclass), so a teardown race can never raise
+        # unhandled inside the pystray thread.
+        self._app._safe_marshal(self._restore_window)
 
     def _restore_window(self) -> None:
         """Bring the window back and focus it.
@@ -203,9 +205,10 @@ class TrayManager:
             self._icon.stop()
         # Schedule the app-level close handler on the Tk main thread so workers
         # are torn down cleanly before destroy (falls back to destroy).
+        # _safe_marshal guards the pystray thread against app-teardown races
+        # (RuntimeError + TclError, no-op once _closing).
         close_handler = getattr(self._app, "_on_app_close", self._app.destroy)
-        with contextlib.suppress(RuntimeError):  # app already destroyed
-            self._app.after(0, close_handler)
+        self._app._safe_marshal(close_handler)
 
     def restore_if_hidden(self) -> None:
         """

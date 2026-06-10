@@ -639,6 +639,118 @@ class TestLedgerMultiCurrency:
         ), warnings
 
 
+# =========================================================================
+#  EXTRA-CURRENCY ANOMALIES (F42) + AUDIT Anomaly_Flag WIRING (F25)
+# =========================================================================
+
+class TestExtraCurrencyAnomalyAlertOnly:
+    """F42: a GBP rate jump is flagged like the USD/EUR series — yet the
+    value still writes unchanged (alert-only), and the flagged (ccy, date)
+    pair reaches the audit collector as anomaly_flag=True (F25)."""
+
+    # Mon → Tue: 1-day gap (within ANOMALY_MAX_DAY_GAP), ~19% jump (>5%).
+    PREV_DAY = date(2025, 1, 6)
+    JUMP_DAY = date(2025, 1, 7)
+
+    def _ledger(self, tmp_path, name="led_anomaly.xlsx"):
+        path = tmp_path / name
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Jan"
+        ws.append(["Date", "Cur", "EX Rate", "Amount"])
+        ws.append([self.PREV_DAY, "GBP", None, 500])   # pre-jump (clean)
+        ws.append([self.JUMP_DAY, "GBP", None, 1000])  # the anomalous day
+        wb.save(str(path))
+        wb.close()
+        return str(path)
+
+    def _jumping_engine(self, tmp_cache):
+        """Engine whose GBP series jumps 42.0000 → 50.0000 across one day."""
+        gbp_series = {
+            self.PREV_DAY: "42.0000",
+            self.JUMP_DAY: "50.0000",
+        }
+
+        async def _rates(start, end, currency):
+            if currency != "GBP":
+                return []
+            return [
+                SimpleNamespace(
+                    period=d.strftime("%Y-%m-%d"), currency="GBP",
+                    buying_transfer=val, buying_sight=None,
+                    selling=None, mid_rate=None,
+                )
+                for d, val in gbp_series.items()
+                if start <= d <= end
+            ]
+
+        api = _make_api()
+        api.get_exchange_rates = AsyncMock(side_effect=_rates)
+        from unittest.mock import MagicMock
+        return LedgerEngine(api, backup=MagicMock(), cache=tmp_cache)
+
+    def test_gbp_jump_warns_and_value_still_writes(
+        self, tmp_path, tmp_cache,
+    ):
+        path = self._ledger(tmp_path)
+        engine = self._jumping_engine(tmp_cache)
+        events: list[dict] = []
+        engine._bus = SimpleNamespace(push=events.append)
+
+        result = asyncio.run(engine.process_ledger(path))
+        assert result == path
+
+        # The extra-currency series was checked and the jump flagged.
+        warnings = [e["msg"] for e in events if e["type"] == "warning"]
+        assert any(
+            "ANOMALY" in m and "GBP" in m for m in warnings
+        ), warnings
+        assert engine.last_anomaly_count >= 1
+
+        # ALERT-ONLY: the anomalous 50.0000 still landed in the master
+        # sheet, unchanged — the guard never blocks or substitutes a write.
+        wb = openpyxl.load_workbook(path)
+        try:
+            ws_ex = wb["ExRate"]
+            headers = [
+                ws_ex.cell(row=1, column=c).value
+                for c in range(1, (ws_ex.max_column or 1) + 1)
+            ]
+            assert "GBP Rate" in headers
+            gbp_col = headers.index("GBP Rate") + 1
+            gbp_vals = {
+                _cell_decimal(ws_ex.cell(row=r, column=gbp_col).value)
+                for r in range(2, (ws_ex.max_row or 1) + 1)
+                if ws_ex.cell(row=r, column=gbp_col).value is not None
+            }
+            assert Decimal("50.0000") in gbp_vals
+        finally:
+            wb.close()
+
+    def test_anomalous_row_audit_record_is_flagged(
+        self, tmp_path, tmp_cache,
+    ):
+        """F25: the collector record for the flagged (GBP, jump-day) cell
+        carries anomaly_flag=True; the clean previous day stays False."""
+        from core.audit_logger import AuditCollector
+
+        path = self._ledger(tmp_path)
+        engine = self._jumping_engine(tmp_cache)
+        collector = AuditCollector()
+
+        asyncio.run(engine.process_ledger(path, audit=collector))
+
+        records = {
+            r.cell_date: r for r in collector.drain() if r.currency == "GBP"
+        }
+        jump_key = self.JUMP_DAY.strftime("%Y-%m-%d")
+        prev_key = self.PREV_DAY.strftime("%Y-%m-%d")
+        assert records[jump_key].anomaly_flag is True
+        assert records[prev_key].anomaly_flag is False
+        # The flag is metadata only — the anomalous value still resolved.
+        assert records[jump_key].new_value == "50.0000"
+
+
 class TestExtraCurrencyCacheFirst:
     """_fetch_extra_currency_rates must be cache-first like the USD/EUR path.
 

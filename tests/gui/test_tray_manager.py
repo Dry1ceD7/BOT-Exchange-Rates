@@ -128,6 +128,53 @@ class TestTrayNotify:
         tray.notify("done")  # no exception, no attribute error
 
 
+class TestTrayMarshalsThroughSafeMarshal:
+    """F152: _on_show/_on_exit fire on the pystray thread and must route their
+    Tk work through app._safe_marshal (closing-flag check + RuntimeError AND
+    TclError suppression — TclError is NOT a RuntimeError subclass), never a
+    raw app.after guarded only by suppress(RuntimeError)."""
+
+    def test_on_show_routes_through_safe_marshal(self):
+        tray = _make_tray()
+        tray._on_show()
+        tray._app._safe_marshal.assert_called_once_with(tray._restore_window)
+        tray._app.after.assert_not_called()
+
+    def test_on_exit_routes_close_handler_through_safe_marshal(self):
+        tray = _make_tray()
+        tray._on_exit()
+        tray._app._safe_marshal.assert_called_once_with(
+            tray._app._on_app_close,
+        )
+        tray._app.after.assert_not_called()
+
+    def test_on_exit_falls_back_to_destroy_without_close_handler(self):
+        from gui.panels.tray_manager import TrayManager
+
+        class _App:
+            """App without _on_app_close — _on_exit must marshal destroy."""
+
+            def __init__(self):
+                self.marshalled = []
+
+            def destroy(self):
+                pass
+
+            def _safe_marshal(self, func, *args):
+                self.marshalled.append((func, args))
+
+        app = _App()
+        tray = TrayManager(app)
+        tray._on_exit()
+        assert app.marshalled == [(app.destroy, ())]
+
+    def test_on_show_survives_marshal_noop_when_app_closing(self):
+        """A closing app's _safe_marshal no-ops; _on_show must not raise."""
+        tray = _make_tray()
+        tray._app._safe_marshal.return_value = None
+        tray._on_show()  # no exception — the pystray thread stays alive
+
+
 class TestTrayRestoreModalGrab:
     """_restore_window surfaces an active modal grab instead of fighting it.
 

@@ -1231,6 +1231,98 @@ class TestRunAnomalyCheck:
         assert all(etype == "warning" for _msg, etype in emitted)
         assert "ANOMALY" in emitted[0][0]
 
+    def test_extra_currency_joins_bundle_under_rate_type_key(self):
+        """F42: extra (non-USD/EUR) series enter as '{CCY}_{rate_type}'."""
+        gbp_series = {date(2025, 3, 11): Decimal("50.0000")}
+        seen_bundles = []
+
+        class _Guard:
+            def check_rates_bulk(self, bundle):
+                seen_bundles.append(bundle)
+                return []
+
+        count = run_anomaly_check(
+            _Guard(),
+            lambda msg, etype: None,
+            {}, {}, {}, {},
+            extra_currency_rates={"GBP": gbp_series},
+            extra_rate_type="selling",
+        )
+        assert count == 0
+        bundle = seen_bundles[0]
+        # The four fixed series stay, the GBP series joins under its key.
+        assert set(bundle) == {
+            "USD_buying_transfer", "USD_selling",
+            "EUR_buying_transfer", "EUR_selling",
+            "GBP_selling",
+        }
+        assert bundle["GBP_selling"] is gbp_series
+
+    def test_extra_currency_anomaly_warns_and_fills_anomalous_out(self):
+        """F42/F25: a GBP anomaly warns AND lands in the (ccy, date) set.
+
+        Alert-only contract: run_anomaly_check has no channel to veto or
+        rewrite a rate — it only emits and reports the flagged pairs.
+        """
+        anomaly = SimpleNamespace(
+            currency="GBP", rate_type="buying_transfer",
+            check_date=date(2025, 3, 11),
+            pct_change=19.0, prev_value="42.0000", new_value="50.0000",
+        )
+
+        class _Guard:
+            def check_rates_bulk(self, bundle):
+                assert "GBP_buying_transfer" in bundle
+                return [anomaly]
+
+        emitted = []
+        flagged: set[tuple[str, date]] = set()
+        count = run_anomaly_check(
+            _Guard(),
+            lambda msg, etype: emitted.append((msg, etype)),
+            {}, {}, {}, {},
+            extra_currency_rates={
+                "GBP": {
+                    date(2025, 3, 10): Decimal("42.0000"),
+                    date(2025, 3, 11): Decimal("50.0000"),
+                },
+            },
+            anomalous_out=flagged,
+        )
+        assert count == 1
+        assert flagged == {("GBP", date(2025, 3, 11))}
+        assert len(emitted) == 1
+        assert emitted[0][1] == "warning"
+        assert "GBP" in emitted[0][0]
+        assert "ANOMALY" in emitted[0][0]
+
+
+class TestCacheSingletonDelegation:
+    """F36: core.engine._get_cache delegates to core.database.get_cache."""
+
+    def test_engine_get_cache_is_database_singleton(
+        self, tmp_path, monkeypatch,
+    ):
+        import core.database as database
+        from core.database import CacheDB as _RealCacheDB
+
+        tmp_db = str(tmp_path / "delegate_cache.db")
+        monkeypatch.setattr(
+            database, "CacheDB", lambda: _RealCacheDB(db_path=tmp_db)
+        )
+        monkeypatch.setattr(database, "_cache_singleton", None)
+        try:
+            first = engine_mod._get_cache()
+            # One CacheDB per process: the engine accessor, the canonical
+            # accessor, and a repeat call all hand back the SAME instance.
+            assert first is database.get_cache()
+            assert engine_mod._get_cache() is first
+        finally:
+            existing = database._cache_singleton
+            if existing is not None:
+                existing.close()
+                database._cache_singleton = None
+
 
 class TestPrescanTargetDates:
     """Tests for the extracted prescan_target_dates function."""
@@ -1588,7 +1680,9 @@ class TestSettingsSnapshotContract:
             )
 
         monkeypatch.setattr(eng, "_preload_api_data", _fake_preload)
-        monkeypatch.setattr(eng, "_run_anomaly_check", lambda *a, **k: 0)
+        monkeypatch.setattr(
+            eng, "_run_anomaly_check", lambda *a, **k: (0, set())
+        )
         monkeypatch.setattr(
             engine_mod, "build_holiday_lookup",
             lambda *a, **k: (set(), {}),

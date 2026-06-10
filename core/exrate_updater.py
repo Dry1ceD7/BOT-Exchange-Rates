@@ -147,6 +147,7 @@ class WorkbookWriter:
         rate_type: str | None = None,
         extra_currency_rates: dict | None = None,
         unsupported_currencies: list[str] | None = None,
+        anomalous_rates: "set[tuple[str, object]] | None" = None,
         audit: AuditCollector | None = None,
     ) -> str:
         # keep_vba preserves xl/vbaProject.bin for .xlsm/.xltm inputs (the
@@ -166,6 +167,10 @@ class WorkbookWriter:
             )
         extra_currency_rates = extra_currency_rates or {}
         unsupported_currencies = unsupported_currencies or []
+        # (currency, date) pairs flagged by the engine's anomaly check (F25).
+        # Audit-trail metadata ONLY — never consulted to block or alter a
+        # write (anomaly detection is alert-only by contract).
+        anomalous_rates = anomalous_rates or set()
 
         # try/finally guarantees the OS file handle is released and gc runs on
         # BOTH the success and error exits (the standalone paths do the same).
@@ -231,6 +236,7 @@ class WorkbookWriter:
                 self._collect_audit_records(
                     wb, sheet_maps, exrate_index, exrate_col_map, rate_type,
                     originals, Path(filepath).name, master_holidays_set, audit,
+                    anomalous=anomalous_rates,
                 )
 
             # ── Save ─────────────────────────────────────────────────────
@@ -378,6 +384,7 @@ class WorkbookWriter:
         fname: str,
         holidays_set,
         audit: "AuditCollector",
+        anomalous: "set[tuple[str, object]] | None" = None,
     ) -> None:
         """Append one ``AuditRecord`` per EX Rate cell that resolved to a rate.
 
@@ -387,7 +394,13 @@ class WorkbookWriter:
         Rows that cannot resolve (no rate / unsupported currency) are skipped —
         those are surfaced separately by ``_warn_unfilled_rows`` and would only
         clutter the per-cell change trail with empty "after" values.
+
+        ``anomalous`` is the engine's flagged ``(currency, date)`` set (F25):
+        a record whose currency + row date match gets ``anomaly_flag=True``
+        so the audit CSV's Anomaly_Flag column reads "ANOMALY"; all other
+        records stay False. Metadata only — the value is written regardless.
         """
+        anomalous = anomalous or set()
         if rate_type == "selling":
             fixed = {"USD": "usd_selling", "EUR": "eur_selling"}
         else:
@@ -431,6 +444,10 @@ class WorkbookWriter:
                     rate_source="Cache/API",
                     holiday_rollback=(
                         row_date is not None and row_date in holiday_dates
+                    ),
+                    anomaly_flag=(
+                        row_date is not None
+                        and (ccy, row_date) in anomalous
                     ),
                 ))
 

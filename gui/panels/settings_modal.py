@@ -12,6 +12,7 @@ SFFB: Strict < 200 lines.  (Previously 731 → now ~130)
 
 import contextlib
 import logging
+import math
 import platform
 import subprocess
 import tkinter
@@ -19,7 +20,7 @@ from pathlib import Path
 
 import customtkinter as ctk
 
-from core.config_manager import SettingsManager
+from core.config_manager import MAX_ANOMALY_THRESHOLD_PCT, SettingsManager
 from core.i18n import (
     DEFAULT_LANGUAGE,
     LANGUAGE_LABELS,
@@ -499,6 +500,15 @@ class SettingsModal(ctk.CTkToplevel):
         try:
             threshold = float(raw)
         except (TypeError, ValueError):
+            self._anomaly_error.configure(
+                text=tr("settings.anomaly_invalid")
+            )
+            self._anomaly_entry.focus_set()
+            return None
+        # float() happily parses 'nan'/'inf': nan compares False against
+        # everything (slipping past the bound checks) and inf would silently
+        # disable the guardrail, so both are rejected explicitly.
+        if not math.isfinite(threshold) or threshold > MAX_ANOMALY_THRESHOLD_PCT:
             self._anomaly_error.configure(
                 text=tr("settings.anomaly_invalid")
             )

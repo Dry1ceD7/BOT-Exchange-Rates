@@ -20,11 +20,21 @@ Frozen-mode writability (v3.2.8):
   The dev-mode path is never changed.
 """
 
+import logging
 import os
 import sys
+import threading
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 _APP_DIR_NAME = "BOT_Exrate"
+
+# Memoized project root (F58). Computed once per process so a transient
+# writability flip (e.g. network-share hiccup mid-session in frozen mode)
+# can never split cache/backups/logs across two different roots.
+_root_lock = threading.Lock()
+_cached_root: str | None = None
 
 
 def _is_writable(directory: str) -> bool:
@@ -59,6 +69,31 @@ def _user_data_root() -> str:
     return str(Path.home() / ".local" / "share" / _APP_DIR_NAME)
 
 
+def _compute_project_root() -> str:
+    """Resolve the project root (uncached). See get_project_root()."""
+    if getattr(sys, "frozen", False):
+        # PyInstaller sets sys.executable to the .exe path.
+        # noqa: PTH120 — os.path.dirname preserves the exact exe-dir string
+        # returned as the frozen project root (no symlink resolution).
+        exe_dir = os.path.dirname(sys.executable)  # noqa: PTH120
+        # Conservative: keep exe-dir data/ as default for existing installs.
+        if _is_writable(str(Path(exe_dir) / "data")):
+            logger.info("Frozen-mode project root: exe dir %s", exe_dir)
+            return exe_dir
+        # Read-only / UAC-virtualized install — fall back to per-user dir.
+        user_root = _user_data_root()
+        logger.info(
+            "Frozen-mode project root: exe dir %s not writable, "
+            "using per-user fallback %s", exe_dir, user_root,
+        )
+        return user_root
+    # Source mode — main.py lives at project root (never changed).
+    # noqa: PTH100,PTH120 — os.path.abspath does NOT resolve symlinks while
+    # Path.resolve() does; this two-level-up string is the canonical project
+    # root the whole app builds on, so keep the exact legacy computation.
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # noqa: PTH100, PTH120
+
+
 def get_project_root() -> str:
     """
     Return the project root directory used as the base for data/.
@@ -67,22 +102,29 @@ def get_project_root() -> str:
     - Frozen (.exe / .app): the directory containing the executable IF it is
       writable; otherwise a per-user app-data dir (writable fallback) so the
       app never orphans its cache/backups/logs in a read-only Program Files.
+
+    Memoized (F58): the root is resolved exactly once per process and the
+    same string is returned thereafter — the writability probe must never
+    re-run mid-session, or a transient share hiccup could flip the root and
+    split cache/backups/logs across two locations. Thread-safe via a simple
+    double-checked compute-once lock. Tests reset the memo through
+    _reset_root_cache_for_tests().
     """
-    if getattr(sys, "frozen", False):
-        # PyInstaller sets sys.executable to the .exe path.
-        # noqa: PTH120 — os.path.dirname preserves the exact exe-dir string
-        # returned as the frozen project root (no symlink resolution).
-        exe_dir = os.path.dirname(sys.executable)  # noqa: PTH120
-        # Conservative: keep exe-dir data/ as default for existing installs.
-        if _is_writable(str(Path(exe_dir) / "data")):
-            return exe_dir
-        # Read-only / UAC-virtualized install — fall back to per-user dir.
-        return _user_data_root()
-    # Source mode — main.py lives at project root (never changed).
-    # noqa: PTH100,PTH120 — os.path.abspath does NOT resolve symlinks while
-    # Path.resolve() does; this two-level-up string is the canonical project
-    # root the whole app builds on, so keep the exact legacy computation.
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # noqa: PTH100, PTH120
+    global _cached_root
+    root = _cached_root
+    if root is not None:
+        return root
+    with _root_lock:
+        if _cached_root is None:
+            _cached_root = _compute_project_root()
+        return _cached_root
+
+
+def _reset_root_cache_for_tests() -> None:
+    """Test seam: clear the memoized root so the next call recomputes it."""
+    global _cached_root
+    with _root_lock:
+        _cached_root = None
 
 
 def harden_data_dirs(project_root: str) -> None:

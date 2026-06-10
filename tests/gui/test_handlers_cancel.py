@@ -26,9 +26,16 @@ class FakeApp:
 
     def __init__(self):
         self.after_calls = []
+        self.marshal_calls = []
 
     def after(self, ms, func, *args):
         self.after_calls.append((ms, func, args))
+
+    def _safe_marshal(self, func, *args):
+        # Spy mirroring BOTExrateApp._safe_marshal: record the routing, then
+        # dispatch via after(0, ...) exactly like the real helper.
+        self.marshal_calls.append((func, args))
+        self.after(0, func, *args)
 
     def _show_error(self, *a):
         pass

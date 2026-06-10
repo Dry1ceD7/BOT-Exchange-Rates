@@ -84,6 +84,128 @@ class TestReportDialog:
         rate_audit_dialog._set_status(SimpleNamespace(), "hello")
 
 
+class _MarshalApp:
+    """Headless app stub recording _safe_marshal routing (no Tk needed)."""
+
+    def __init__(self):
+        self.marshal_calls = []
+        self._exrate_running = True
+
+    def _safe_marshal(self, func, *args):
+        # Spy mirroring BOTExrateApp._safe_marshal: record, then run inline.
+        self.marshal_calls.append((func, args))
+        func(*args)
+
+
+class _InlineThread:
+    """threading.Thread stand-in that runs the target synchronously."""
+
+    def __init__(self, target=None, **kw):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+class _FakeAuditor:
+    """StandaloneRateAuditor stub: one status tick, then a clean report."""
+
+    def __init__(self, engine):
+        pass
+
+    async def run(self, filepath, apply=True, status_cb=None):
+        if status_cb:
+            status_cb("scanning ExRate sheet")
+        return _report(with_changes=False)
+
+
+def _stub_worker_deps(monkeypatch, auditor_factory):
+    """Stub the network/engine stack so _launch_worker runs inline."""
+    import sys
+    import types
+
+    fake_api = types.ModuleType("core.api_client")
+    fake_api.CLIENT_TIMEOUT = 1.0
+    fake_api.BOTClient = lambda *a, **kw: object()
+    fake_engine = types.ModuleType("core.engine")
+    fake_engine.LedgerEngine = lambda *a, **kw: object()
+    monkeypatch.setitem(sys.modules, "core.api_client", fake_api)
+    monkeypatch.setitem(sys.modules, "core.engine", fake_engine)
+
+    import httpx
+
+    class _FakeAsyncClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    import core.rate_audit as rate_audit_mod
+
+    monkeypatch.setattr(
+        rate_audit_mod, "StandaloneRateAuditor", auditor_factory,
+    )
+    monkeypatch.setattr(
+        rate_audit_dialog, "write_audit_csv", lambda r: "/tmp/audit.csv",
+    )
+    monkeypatch.setattr(rate_audit_dialog.threading, "Thread", _InlineThread)
+
+
+class TestWorkerMarshalsThroughSafeMarshal:
+    """F75: the worker's status/done callbacks must route through
+    app._safe_marshal (closing-flag check + RuntimeError AND TclError
+    suppression), never a raw app.after guarded only by
+    contextlib.suppress(RuntimeError)."""
+
+    def test_success_path_routes_status_and_done_ok(self, monkeypatch):
+        app = _MarshalApp()
+        shown = []
+        _stub_worker_deps(monkeypatch, _FakeAuditor)
+        monkeypatch.setattr(
+            rate_audit_dialog, "_show_report_dialog",
+            lambda *a: shown.append(a),
+        )
+
+        rate_audit_dialog._launch_worker(app, "/tmp/ledger.xlsx")
+
+        names = [getattr(f, "__name__", "") for f, _ in app.marshal_calls]
+        assert "_set_status" in names, names  # the worker status tick
+        assert "_done_ok" in names, names     # the completion callback
+        assert app._exrate_running is False
+        assert shown, "report dialog not reached via the marshalled _done_ok"
+
+    def test_error_path_routes_done_err(self, monkeypatch):
+        class _BoomAuditor:
+            def __init__(self, engine):
+                pass
+
+            async def run(self, *a, **kw):
+                raise ValueError("scan failed")
+
+        app = _MarshalApp()
+        _stub_worker_deps(monkeypatch, _BoomAuditor)
+
+        rate_audit_dialog._launch_worker(app, "/tmp/ledger.xlsx")
+
+        names = [getattr(f, "__name__", "") for f, _ in app.marshal_calls]
+        assert "_done_err" in names, names
+        assert app._exrate_running is False
+
+    def test_no_raw_app_after_left_in_module(self):
+        """The sweep must leave no raw app.after(...) marshal in the module."""
+        import inspect
+
+        source = inspect.getsource(rate_audit_dialog)
+        assert "app.after(" not in source
+        assert "app._safe_marshal(" in source
+
+
 class TestRevertGuard:
     """F11: the report dialog's Revert must route through the app's guarded
     entry (_start_guarded_revert), never call batch_handler.start_revert

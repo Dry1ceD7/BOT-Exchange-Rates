@@ -8,13 +8,16 @@ Focus: prescan_target_dates duplicate-header determinism (first-wins).
 """
 
 from datetime import date
+from decimal import Decimal
 
 import openpyxl
 
+from core.anomaly_guard import AnomalyGuard
 from core.ledger_processing import (
     classify_currencies,
     prescan_target_dates,
     prescan_target_dates_and_currencies,
+    run_anomaly_check,
 )
 
 TARGET_COLS = {"source_date": "Date", "currency": "Cur", "out_rate": "EX Rate"}
@@ -159,3 +162,79 @@ class TestClassifyCurrencies:
         extra, unsupported = classify_currencies({"GBP", "XYZ", "ABC"})
         assert extra == ["GBP"]
         assert unsupported == ["ABC", "XYZ"]
+
+
+class TestRunAnomalyCheckExtraCurrencies:
+    """F42: extra (non-USD/EUR) series go through the REAL AnomalyGuard;
+    F25: flagged (currency, date) pairs are reported via anomalous_out.
+    Alert-only throughout — the function can only emit and report."""
+
+    # Mon → Tue: 1-day gap, ~19% jump (>5% threshold).
+    PREV_DAY = date(2025, 1, 6)
+    JUMP_DAY = date(2025, 1, 7)
+
+    def test_real_guard_flags_extra_currency_jump(self):
+        emitted = []
+        flagged: set[tuple[str, date]] = set()
+
+        count = run_anomaly_check(
+            AnomalyGuard(threshold_pct=5.0),
+            lambda msg, etype: emitted.append((msg, etype)),
+            {}, {}, {}, {},
+            extra_currency_rates={
+                "GBP": {
+                    self.PREV_DAY: Decimal("42.0000"),
+                    self.JUMP_DAY: Decimal("50.0000"),
+                },
+            },
+            extra_rate_type="buying_transfer",
+            anomalous_out=flagged,
+        )
+
+        assert count == 1
+        assert flagged == {("GBP", self.JUMP_DAY)}
+        assert len(emitted) == 1
+        msg, etype = emitted[0]
+        assert etype == "warning"
+        assert "ANOMALY" in msg
+        assert "GBP" in msg
+
+    def test_extra_currency_within_threshold_not_flagged(self):
+        emitted = []
+        flagged: set[tuple[str, date]] = set()
+
+        count = run_anomaly_check(
+            AnomalyGuard(threshold_pct=5.0),
+            lambda msg, etype: emitted.append((msg, etype)),
+            {}, {}, {}, {},
+            extra_currency_rates={
+                "GBP": {
+                    self.PREV_DAY: Decimal("42.0000"),
+                    self.JUMP_DAY: Decimal("42.5000"),
+                },
+            },
+            anomalous_out=flagged,
+        )
+
+        assert count == 0
+        assert flagged == set()
+        assert emitted == []
+
+    def test_defaults_keep_legacy_four_series_contract(self):
+        """No extra args → the bundle stays exactly the four fixed series
+        (backward compatibility for existing callers)."""
+        seen = {}
+
+        class _Guard:
+            def check_rates_bulk(self, bundle):
+                seen["bundle"] = bundle
+                return []
+
+        count = run_anomaly_check(
+            _Guard(), lambda msg, etype: None, {}, {}, {}, {},
+        )
+        assert count == 0
+        assert set(seen["bundle"]) == {
+            "USD_buying_transfer", "USD_selling",
+            "EUR_buying_transfer", "EUR_selling",
+        }

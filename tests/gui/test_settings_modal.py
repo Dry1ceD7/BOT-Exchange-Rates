@@ -507,6 +507,50 @@ class TestAnomalyThreshold:
         saved = mock_mgr.save.call_args[0][0]
         assert saved["anomaly_threshold_pct"] == 6.25
 
+    @pytest.mark.parametrize("bad", ["nan", "NaN", "inf", "-inf", "infinity"])
+    def test_non_finite_input_blocks_save_and_close(self, tk_root, bad):
+        """F150 regression: float() parses 'nan'/'inf' happily.
+
+        nan compares False against every bound (slipping past the <= 0
+        check) and inf silently disables the anomaly guardrail entirely —
+        both must trip the existing inline-error UX instead of saving.
+        """
+        modal, mock_mgr = _make_modal(tk_root)
+        modal._anomaly_threshold_var.set(bad)
+        modal._save_and_close()
+        mock_mgr.save.assert_not_called()
+        assert modal.winfo_exists()
+        assert modal._anomaly_error.cget("text")  # error surfaced inline
+        modal.destroy()
+
+    @pytest.mark.parametrize("huge", ["1e9", "1000.01", "99999"])
+    def test_oversized_input_blocks_save_and_close(self, tk_root, huge):
+        """Thresholds above the sane upper bound (1000%) are rejected."""
+        modal, mock_mgr = _make_modal(tk_root)
+        modal._anomaly_threshold_var.set(huge)
+        modal._save_and_close()
+        mock_mgr.save.assert_not_called()
+        assert modal.winfo_exists()
+        assert modal._anomaly_error.cget("text")
+        modal.destroy()
+
+    def test_non_finite_input_keeps_focus_in_entry(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        with patch.object(modal._anomaly_entry, "focus_set") as mock_focus:
+            modal._anomaly_threshold_var.set("inf")
+            modal._save_and_close()
+            mock_focus.assert_called_once()
+        modal.destroy()
+
+    def test_upper_bound_value_is_accepted(self, tk_root):
+        """Exactly 1000 is still valid — the bound is inclusive."""
+        modal, mock_mgr = _make_modal(tk_root)
+        modal._anomaly_threshold_var.set("1000")
+        modal._save_and_close()
+        saved = mock_mgr.save.call_args[0][0]
+        assert saved["anomaly_threshold_pct"] == 1000.0
+        assert not modal.winfo_exists()
+
 
 # ---------------------------------------------------------------------------
 # Open Logs / Audit Folder

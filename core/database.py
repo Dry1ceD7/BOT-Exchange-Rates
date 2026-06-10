@@ -45,6 +45,12 @@ _RATES_UPSERT_SQL = (
     "eur_selling = COALESCE(excluded.eur_selling, eur_selling)"
 )
 
+# One-shot migration marker stored in ``PRAGMA user_version`` (0 on every DB
+# created before this bookkeeping existed). Version 1 = the fabricated
+# Buying TT cleanup (F32 residual) has run. Bump and chain new one-shot
+# cleanups behind higher numbers if more are ever needed.
+_FABRICATED_BUYING_CLEANUP_VERSION = 1
+
 
 def _rate_text(value: float | str | Decimal | None) -> str | None:
     """Normalize a rate to its TEXT storage form (str), preserving None.
@@ -213,6 +219,7 @@ class CacheDB:
 
         self._migrate_rates_value_text(conn)
         self._migrate_rates_multi_value_text(conn)
+        self._cleanup_fabricated_buying(conn)
 
     def _migrate_rates_value_text(self, conn: sqlite3.Connection) -> None:
         """
@@ -247,6 +254,57 @@ class CacheDB:
             ALTER TABLE rates_new RENAME TO rates;
         """)
         conn.commit()
+
+    def _cleanup_fabricated_buying(self, conn: sqlite3.Connection) -> None:
+        """One-time cleanup of fabricated Buying TT values (F32 residual).
+
+        DBs migrated by builds OLDER than the F32 fix copied the legacy
+        schema's single rate into BOTH the selling AND the buying columns,
+        fabricating Buying TT values the BOT never published. Detect those
+        rows by exact equality (buying == selling, verbatim TEXT compare)
+        and NULL the buying column: a NULL counts as a per-column cache
+        miss, so the Wave-0 refetch self-heals it with the authentic API
+        value on the next run.
+
+        Rationale for exact-equality detection: BOT always publishes a
+        buy/sell spread, so a genuine Buying TT exactly equal to Selling at
+        4dp is practically nonexistent. Even a false positive costs only one
+        per-column API refetch — never data loss.
+
+        One-shot / idempotent: ``PRAGMA user_version`` (0 on every
+        pre-cleanup DB; this project uses it for nothing else) is bumped to
+        ``_FABRICATED_BUYING_CLEANUP_VERSION`` afterwards, so an authentic
+        post-cleanup row where buying happens to equal selling is never
+        touched on later opens. Fresh/empty DBs are stamped immediately
+        (nothing to clean).
+        """
+        current = conn.execute("PRAGMA user_version").fetchone()[0]
+        if current >= _FABRICATED_BUYING_CLEANUP_VERSION:
+            return
+
+        cleaned = 0
+        for buy_col, sell_col in (
+            ("usd_buying", "usd_selling"),
+            ("eur_buying", "eur_selling"),
+        ):
+            cursor = conn.execute(
+                f"UPDATE rates SET {buy_col} = NULL "  # noqa: S608 — constant column names
+                f"WHERE {buy_col} IS NOT NULL AND {buy_col} = {sell_col}"
+            )
+            cleaned += cursor.rowcount
+        # PRAGMA does not support parameter binding; the value is a module
+        # constant int, never user input.
+        conn.execute(
+            f"PRAGMA user_version = {_FABRICATED_BUYING_CLEANUP_VERSION}"
+        )
+        conn.commit()
+        if cleaned:
+            logger.info(
+                "Cleared %d fabricated Buying TT value(s) left by an older "
+                "build's schema migration; authentic rates will be "
+                "re-fetched from the API on demand.",
+                cleaned,
+            )
 
     def _migrate_rates_multi_value_text(self, conn: sqlite3.Connection) -> None:
         """
@@ -622,11 +680,11 @@ def get_cache() -> CacheDB:
     (``data/cache.db``) on first call and returns that same instance on
     every subsequent call. Thread-safe via a double-checked lock.
 
-    This is the public, package-boundary-stable accessor. GUI panels and
-    other callers should import it from ``core.database`` rather than
-    reaching into ``core.engine``'s private ``_get_cache``. ``core.engine``
-    intentionally keeps its own private singleton; this one is independent
-    and owns its own lifecycle (an ``atexit`` close is already registered by
+    This is the canonical accessor (F36): ``core.engine._get_cache``
+    delegates here, so the engine, GUI panels, and every other caller share
+    ONE instance per process (one WAL connection pool). Import it from
+    ``core.database`` rather than reaching into ``core.engine``. Lifecycle
+    is owned by the instance itself (an ``atexit`` close is registered by
     ``CacheDB.__init__``).
     """
     global _cache_singleton

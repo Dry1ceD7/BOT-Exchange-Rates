@@ -429,8 +429,9 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
 
     Uses a callback interface to communicate with the parent window.
     The `app` parameter is only used for:
-      - app.after() (thread-safe scheduling)
+      - app._safe_marshal() (post-destroy-safe Tk scheduling)
       - app.event_bus (for LedgerEngine progress)
+      - app._register_worker()/app.thread_registry (worker accounting)
     All UI updates go through callbacks registered on `app` via the
     _get_ui_callbacks() helper.
 
@@ -541,9 +542,10 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
         # between currency/holiday network calls (#2).
         if cancel_event.is_set():
             raise _ExRateCancelled
-        # app destroyed during ExRate generation
-        with contextlib.suppress(RuntimeError):
-            app.after(0, _set_status, msg, t["text_secondary"])
+        # _safe_marshal no-ops once the app is closing and swallows both
+        # RuntimeError AND TclError (TclError is NOT a RuntimeError subclass),
+        # so an app destroyed mid-generation can never kill the worker thread.
+        app._safe_marshal(_set_status, msg, t["text_secondary"])
 
     def _done(success: bool, message: str, *, color: str | None = None):
         """Main-thread callback to restore UI state."""
@@ -639,33 +641,43 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
                 # success (the per-cell verification already ran inside the
                 # engine's atomic save against the temp).
                 _verify_exrate_dest(dest)
-                with contextlib.suppress(RuntimeError):
-                    app.after(0, _done, True,
-                              f"✓ ExRate created: {Path(dest).name} — {summary}")
+                app._safe_marshal(
+                    _done, True,
+                    f"✓ ExRate created: {Path(dest).name} — {summary}",
+                )
             except _ExRateCancelled:
                 # User pressed Cancel — the temp is discarded in the outer
                 # finally and `dest` was never touched, so no data is lost (#2).
                 logger.info("ExRate standalone cancelled by user")
-                with contextlib.suppress(RuntimeError):
-                    app.after(0, lambda: _done(
-                        False, tr("exrate.cancelled"), color=t["warning"]))
+                app._safe_marshal(lambda: _done(
+                    False, tr("exrate.cancelled"), color=t["warning"]))
             except (httpx.RequestError, httpx.HTTPStatusError,
                     OSError, ValueError, BackupError) as e:
                 logger.error("ExRate standalone failed: %s", e)
-                with contextlib.suppress(RuntimeError):
-                    app.after(0, _done, False, _fail_message(e))
+                app._safe_marshal(_done, False, _fail_message(e))
             finally:
                 loop.close()
         except (OSError, ValueError) as e:
             logger.error("ExRate file creation failed: %s", e)
-            with contextlib.suppress(RuntimeError):
-                app.after(0, _done, False, _fail_message(e))
+            app._safe_marshal(_done, False, _fail_message(e))
         finally:
             # Discard the temp file on any failure path so we never leave a
             # blank/partial sibling behind next to the user's real files.
             if tmp_path:
                 with contextlib.suppress(OSError):
                     Path(tmp_path).unlink()
+            # Mirror the RateAuditWorker: drop our registry entry so
+            # _on_app_close's shutdown_all() never waits on a finished worker.
+            if hasattr(app, "thread_registry"):
+                with contextlib.suppress(Exception):
+                    app.thread_registry.unregister("ExRateWorker")
 
-    threading.Thread(target=_worker, daemon=True, name="ExRateWorker").start()
+    worker = threading.Thread(target=_worker, daemon=True, name="ExRateWorker")
+    # Register BEFORE start() (mirrors rate_audit_dialog) so _on_app_close's
+    # registry shutdown can account for the thread before self.destroy().
+    # hasattr keeps headless/CLI embedders without the hook working unchanged.
+    if hasattr(app, "_register_worker"):
+        with contextlib.suppress(Exception):
+            app._register_worker(worker, "ExRateWorker")
+    worker.start()
 

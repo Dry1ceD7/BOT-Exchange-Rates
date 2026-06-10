@@ -236,22 +236,29 @@ class BackupBrowser(SafePanel, ctk.CTkToplevel):
         )
         return chosen or None
 
+    def _app_busy(self) -> bool:
+        """True while a batch / revert / ExRate worker owns the cache or file."""
+        return (
+            getattr(self.app, "_batch_running", False)
+            or getattr(self.app, "_revert_running", False)
+            or getattr(self.app, "_exrate_running", False)
+        )
+
+    def _refuse_busy(self):
+        self._set_status(
+            "Busy — a batch or revert is already running. Try again "
+            "once it finishes.",
+            error=True,
+        )
+
     def _on_restore(self):
         """Confirm, then restore the selected backup over its live file."""
         if not self._selected_path:
             return
         # Never collide with an in-flight batch / revert / ExRate worker that
         # already owns the cache or the same .xlsx (#1, #3 of the wider audit).
-        if (
-            getattr(self.app, "_batch_running", False)
-            or getattr(self.app, "_revert_running", False)
-            or getattr(self.app, "_exrate_running", False)
-        ):
-            self._set_status(
-                "Busy — a batch or revert is already running. Try again "
-                "once it finishes.",
-                error=True,
-            )
+        if self._app_busy():
+            self._refuse_busy()
             return
 
         target = self._target_filepath()
@@ -262,14 +269,26 @@ class BackupBrowser(SafePanel, ctk.CTkToplevel):
         ts = self.backup_mgr._parse_backup_timestamp(self._selected_path)
         when = _format_timestamp(ts)
         from tkinter import messagebox
+        # Backups are keyed by stem only, so a same-named but unrelated file
+        # could be auto-targeted — show the FULL target path so the operator
+        # can spot a wrong target before overwriting it (F139).
         if not messagebox.askyesno(
             "Confirm Restore",
             f"Restore '{Path(target).name}' from the backup dated {when}?\n\n"
+            f"Target file:\n{target}\n\n"
             f"This OVERWRITES the current file with that backup. The current "
             f"version is snapshotted first (.pre-revert) so this is "
             f"recoverable.",
             parent=self,
         ):
+            return
+
+        # Re-check the busy flags AFTER the modal waits: askopenfilename and
+        # askyesno pump the Tk event loop for an unbounded time, so a scheduler
+        # fire can start a batch between the first check and the confirmation
+        # returning (F68 TOCTOU). Refuse rather than collide.
+        if self._app_busy():
+            self._refuse_busy()
             return
 
         # Raise the app's revert busy-flag so a scheduler fire racing in sees a
@@ -307,11 +326,47 @@ class BackupBrowser(SafePanel, ctk.CTkToplevel):
             logger.exception("Backup restore failed for %s", target)
             with contextlib.suppress(RuntimeError, tkinter.TclError):
                 self.app.after(0, self.app._show_revert_error, str(e))
+        except Exception as e:  # noqa: BLE001 — fail-safe, see F140
+            # Anything outside the expected tuple used to die silently in the
+            # daemon thread, leaving app._revert_running True forever (Process
+            # and Revert dead until restart). Log it and surface it through
+            # the same error path as an expected failure.
+            logger.exception(
+                "Unexpected error restoring backup for %s", target,
+            )
+            with contextlib.suppress(RuntimeError, tkinter.TclError):
+                self.app.after(0, self.app._show_revert_error, str(e))
         finally:
+            # Guarantee the busy-flag clear + UI re-enable on EVERY exit
+            # path, marshalled onto the Tk thread (F140). Queued after the
+            # success/error callback, so it normally no-ops (flag already
+            # cleared) and only acts when neither callback got through.
+            marshal = getattr(self.app, "_safe_marshal", None)
+            if marshal is not None:
+                marshal(self._finalize_restore)
+            else:
+                with contextlib.suppress(RuntimeError, tkinter.TclError):
+                    self.app.after(0, self._finalize_restore)
             registry = getattr(self.app, "thread_registry", None)
             if registry is not None:
                 with contextlib.suppress(RuntimeError):
                     registry.unregister("BackupRestoreWorker")
+
+    def _finalize_restore(self):
+        """Tk-thread fail-safe: clear the revert busy-flag and re-enable the
+        Process/Revert buttons if _show_revert_success/_error never ran (F140).
+        Idempotent — the normal callbacks clear the flag first, so this only
+        acts when the worker exited without reaching either callback."""
+        if not getattr(self.app, "_revert_running", False):
+            return
+        logger.warning(
+            "Revert busy-flag still set after restore worker exit — "
+            "clearing (fail-safe)",
+        )
+        self.app._revert_running = False
+        with contextlib.suppress(RuntimeError, tkinter.TclError, AttributeError):
+            self.app.btn_revert.configure(state="normal")
+            self.app.btn_process.configure(state="normal")
 
 
 def show_backup_browser(app, backup_mgr: BackupManager | None = None):

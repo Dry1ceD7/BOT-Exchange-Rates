@@ -723,10 +723,17 @@ class _FakeApp:
         self.event_bus = None
         self._batch_running = False
         self.last_processed_path = None
+        self.marshal_calls = []
 
     def after(self, _delay, func=None, *args):
         if func is not None:
             func(*args)
+
+    def _safe_marshal(self, func, *args):
+        # Spy mirroring BOTExrateApp._safe_marshal: record the routing, then
+        # dispatch via after(0, ...) exactly like the real helper.
+        self.marshal_calls.append((func, args))
+        self.after(0, func, *args)
 
     def update_idletasks(self):
         pass
@@ -1427,3 +1434,159 @@ class TestExrateDestVerification:
         assert "Failed" in msg and "verification" in msg.lower(), (
             f"Expected a verification failure status, got {msg!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# F73 — ExRateWorker thread-registry registration + _safe_marshal routing
+# ---------------------------------------------------------------------------
+
+
+class _RegistryApp(_FakeApp):
+    """_FakeApp plus the registry hooks, recording register/unregister calls."""
+
+    def __init__(self):
+        super().__init__()
+        self.registered = []
+        outer = self
+
+        class _Registry:
+            def unregister(self, name):
+                outer.unregistered.append(name)
+
+        self.unregistered = []
+        self.thread_registry = _Registry()
+
+    def _register_worker(self, worker, name):
+        self.registered.append((worker, name))
+
+
+class TestExrateWorkerRegistration:
+    """F73: the ExRateWorker thread must be registered with the ThreadRegistry
+    BEFORE start() and unregistered in the worker's finally — mirroring the
+    RateAuditWorker — so _on_app_close's registry shutdown accounts for it."""
+
+    def _create(self, monkeypatch, tmp_path, engine_factory):
+        from gui.panels import exrate_dialog
+
+        dest = tmp_path / "ExRate.xlsx"
+        _run_worker_sync(monkeypatch, engine_factory)
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+        app = _RegistryApp()
+        exrate_dialog._create_exrate_file(
+            app, ["USD"], {"Buying TT": "buying_transfer"},
+        )
+        return app
+
+    def test_worker_registered_and_unregistered_on_success(
+        self, monkeypatch, tmp_path,
+    ):
+        app = self._create(
+            monkeypatch, tmp_path, lambda *a, **kw: _SuccessEngine(),
+        )
+        assert [name for _w, name in app.registered] == ["ExRateWorker"]
+        assert app.unregistered == ["ExRateWorker"]
+
+    def test_worker_unregistered_on_failure(self, monkeypatch, tmp_path):
+        import httpx
+
+        app = self._create(
+            monkeypatch, tmp_path,
+            lambda *a, **kw: _RaisingEngine(httpx.ConnectError("boom")),
+        )
+        assert [name for _w, name in app.registered] == ["ExRateWorker"]
+        assert app.unregistered == ["ExRateWorker"], (
+            "worker finally must unregister even when the fetch fails"
+        )
+
+    def test_apps_without_registry_hooks_still_work(
+        self, monkeypatch, tmp_path,
+    ):
+        """_FakeApp has neither _register_worker nor thread_registry — the
+        hasattr guards must keep the worker fully functional without them."""
+        from gui.panels import exrate_dialog
+
+        dest = tmp_path / "ExRate.xlsx"
+        _run_worker_sync(monkeypatch, lambda *a, **kw: _SuccessEngine())
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+        app = _FakeApp()
+        exrate_dialog._create_exrate_file(
+            app, ["USD"], {"Buying TT": "buying_transfer"},
+        )
+        assert "ExRate created" in app.lbl_status.cget("text")
+
+
+class TestExrateMarshalRouting:
+    """F73: worker -> Tk callbacks must route through app._safe_marshal
+    (closing-flag check + RuntimeError AND TclError suppression), never a raw
+    app.after guarded only by contextlib.suppress(RuntimeError)."""
+
+    def test_status_and_done_route_through_safe_marshal(
+        self, monkeypatch, tmp_path,
+    ):
+        from gui.panels import exrate_dialog
+
+        class _TickingEngine(_SuccessEngine):
+            async def update_exrate_standalone(
+                self, filepath, *a, progress_cb=None, **kw,
+            ):
+                if progress_cb:
+                    progress_cb("Fetching USD rates...")
+                return await super().update_exrate_standalone(filepath)
+
+        dest = tmp_path / "ExRate.xlsx"
+        _run_worker_sync(monkeypatch, lambda *a, **kw: _TickingEngine())
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+
+        app = _FakeApp()
+        exrate_dialog._create_exrate_file(
+            app, ["USD"], {"Buying TT": "buying_transfer"},
+        )
+
+        names = [getattr(f, "__name__", "") for f, _ in app.marshal_calls]
+        assert "_set_status" in names, names  # the progress tick
+        assert "_done" in names, names        # the completion callback
+        assert "ExRate created" in app.lbl_status.cget("text")
+
+    def test_failure_routes_done_through_safe_marshal(
+        self, monkeypatch, tmp_path,
+    ):
+        import httpx
+
+        from gui.panels import exrate_dialog
+
+        dest = tmp_path / "ExRate.xlsx"
+        _run_worker_sync(
+            monkeypatch,
+            lambda *a, **kw: _RaisingEngine(httpx.ConnectError("boom")),
+        )
+        monkeypatch.setattr(
+            exrate_dialog.filedialog, "asksaveasfilename",
+            lambda *a, **kw: str(dest),
+        )
+
+        app = _FakeApp()
+        exrate_dialog._create_exrate_file(
+            app, ["USD"], {"Buying TT": "buying_transfer"},
+        )
+
+        names = [getattr(f, "__name__", "") for f, _ in app.marshal_calls]
+        assert "_done" in names, names
+
+    def test_no_raw_app_after_left_in_module(self):
+        """The sweep must leave no raw app.after(...) marshal in the module."""
+        import inspect
+
+        from gui.panels import exrate_dialog
+
+        source = inspect.getsource(exrate_dialog)
+        assert "app.after(" not in source
+        assert "app._safe_marshal(" in source

@@ -63,8 +63,10 @@ def _launch_worker(app, filepath: str) -> None:
     event_bus = getattr(app, "event_bus", None)
 
     def _status_cb(msg: str) -> None:
-        with contextlib.suppress(RuntimeError):
-            app.after(0, _set_status, app, f"Rate audit: {msg}")
+        # _safe_marshal no-ops once the app is closing and swallows both
+        # RuntimeError AND TclError (TclError is NOT a RuntimeError subclass),
+        # so a teardown race can never kill the worker thread.
+        app._safe_marshal(_set_status, app, f"Rate audit: {msg}")
 
     def _done_ok(report, csv_path) -> None:
         app._exrate_running = False
@@ -104,12 +106,10 @@ def _launch_worker(app, filepath: str) -> None:
             csv_path = None
             with contextlib.suppress(Exception):
                 csv_path = write_audit_csv(report)
-            with contextlib.suppress(RuntimeError):
-                app.after(0, _done_ok, report, csv_path)
+            app._safe_marshal(_done_ok, report, csv_path)
         except Exception as e:  # noqa: BLE001 — surfaced to the user via _done_err
             logger.exception("Rate audit worker failed")
-            with contextlib.suppress(RuntimeError):
-                app.after(0, _done_err, str(e))
+            app._safe_marshal(_done_err, str(e))
         finally:
             with contextlib.suppress(Exception):
                 loop.close()

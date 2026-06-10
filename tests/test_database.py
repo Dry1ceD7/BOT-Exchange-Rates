@@ -757,3 +757,114 @@ class TestCloseCheckpoint:
         # The checkpoint still ran on a fresh connection: -wal is gone/empty.
         wal = tmp + "-wal"
         assert (not os.path.exists(wal)) or os.path.getsize(wal) == 0
+
+
+# =========================================================================
+#  FABRICATED BUYING TT CLEANUP (F32 residual — one-shot migration)
+# =========================================================================
+
+class TestFabricatedBuyingCleanup:
+    """DBs migrated by OLDER builds copied the legacy single rate into BOTH
+    the selling AND buying columns. The one-shot cleanup NULLs buying where
+    it exactly equals selling (user_version 0 → 1); the NULLs self-heal via
+    the per-column cache-miss refetch. Post-cleanup DBs are never touched
+    again, so a genuine buying==selling survives later opens."""
+
+    def _make_pre_cleanup_db(self, tmp_path, name="legacy_fab.db") -> str:
+        """A 4-column DB as an OLDER build left it: fabricated buying values
+        (buying == selling verbatim) and user_version still 0."""
+        import sqlite3
+        db_path = str(tmp_path / name)
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE rates (
+                date          TEXT PRIMARY KEY,
+                usd_buying    TEXT,
+                usd_selling   TEXT,
+                eur_buying    TEXT,
+                eur_selling   TEXT
+            );
+        """)
+        # Fabricated row: both buying columns mirror selling exactly.
+        conn.execute(
+            "INSERT INTO rates VALUES "
+            "('2025-03-10', '33.1000', '33.1000', '36.2000', '36.2000')"
+        )
+        # Authentic row: a real spread + an already-NULL eur_buying.
+        conn.execute(
+            "INSERT INTO rates VALUES "
+            "('2025-03-11', '33.0500', '33.2000', NULL, '36.1000')"
+        )
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_equal_pairs_nulled_unequal_left_alone(self, tmp_path):
+        db_path = self._make_pre_cleanup_db(tmp_path)
+        db = CacheDB(db_path=db_path)
+        try:
+            fabricated = db.get_rate(date(2025, 3, 10))
+            # buying == selling exactly → fabricated → NULLed (cache miss).
+            assert fabricated["usd_buying"] is None
+            assert fabricated["eur_buying"] is None
+            # Selling values are untouched — they were always authentic.
+            assert fabricated["usd_selling"] == Decimal("33.1000")
+            assert fabricated["eur_selling"] == Decimal("36.2000")
+
+            authentic = db.get_rate(date(2025, 3, 11))
+            assert authentic["usd_buying"] == Decimal("33.0500")
+            assert authentic["usd_selling"] == Decimal("33.2000")
+            assert authentic["eur_buying"] is None
+            assert authentic["eur_selling"] == Decimal("36.1000")
+        finally:
+            db.close()
+
+    def test_cleanup_stamps_user_version_marker(self, tmp_path):
+        db_path = self._make_pre_cleanup_db(tmp_path)
+        db = CacheDB(db_path=db_path)
+        try:
+            version = db._conn().execute(
+                "PRAGMA user_version"
+            ).fetchone()[0]
+            assert version == database._FABRICATED_BUYING_CLEANUP_VERSION
+        finally:
+            db.close()
+
+    def test_one_shot_skips_on_reopen(self, tmp_path):
+        """After the marker is stamped, a genuine buying==selling pair
+        inserted later survives every subsequent open untouched."""
+        db_path = self._make_pre_cleanup_db(tmp_path)
+        db = CacheDB(db_path=db_path)  # runs the cleanup, stamps version 1
+        db.insert_rate(
+            date(2025, 3, 12),
+            usd_buying="34.0000", usd_selling="34.0000",
+        )
+        db.close()
+
+        reopened = CacheDB(db_path=db_path)
+        try:
+            row = reopened.get_rate(date(2025, 3, 12))
+            assert row["usd_buying"] == Decimal("34.0000")
+            assert row["usd_selling"] == Decimal("34.0000")
+        finally:
+            reopened.close()
+
+    def test_fresh_db_is_stamped_and_never_cleaned(self, tmp_path):
+        """A brand-new DB has nothing to clean: it is stamped immediately,
+        so authentic equal pairs cached later are never NULLed."""
+        db_path = str(tmp_path / "fresh.db")
+        db = CacheDB(db_path=db_path)
+        version = db._conn().execute("PRAGMA user_version").fetchone()[0]
+        assert version == database._FABRICATED_BUYING_CLEANUP_VERSION
+        db.insert_rate(
+            date(2025, 4, 1),
+            eur_buying="36.5000", eur_selling="36.5000",
+        )
+        db.close()
+
+        reopened = CacheDB(db_path=db_path)
+        try:
+            row = reopened.get_rate(date(2025, 4, 1))
+            assert row["eur_buying"] == Decimal("36.5000")
+        finally:
+            reopened.close()

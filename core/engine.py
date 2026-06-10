@@ -38,7 +38,7 @@ from core.constants import (
     humanize_save_error,
     parse_date,
 )
-from core.database import CacheDB
+from core.database import CacheDB, get_cache
 from core.exrate_updater import StandaloneExRateUpdater, WorkbookWriter
 from core.ledger_processing import (
     classify_currencies,
@@ -231,7 +231,6 @@ class BatchManifest:
 # MODULE-LEVEL SINGLETONS (persist across batch clicks)
 # -------------------------------------------------------------------------
 _backup_singleton = None
-_cache_singleton = None
 _singleton_lock = threading.Lock()
 
 
@@ -245,14 +244,14 @@ def _get_backup() -> BackupManager:
 
 
 def _get_cache() -> CacheDB:
-    global _cache_singleton
-    if _cache_singleton is None:
-        with _singleton_lock:
-            if _cache_singleton is None:  # double-check after lock
-                import atexit
-                _cache_singleton = CacheDB()
-                atexit.register(_cache_singleton.close)
-    return _cache_singleton
+    """Delegate to the canonical process-wide accessor (F36).
+
+    ``core.database.get_cache()`` owns the single ``CacheDB`` for the whole
+    process; the engine no longer keeps a second private singleton, so the
+    engine and any GUI callers share one instance (one WAL connection pool,
+    one atexit close — registered by ``CacheDB.__init__`` via weakref).
+    """
+    return get_cache()
 
 
 
@@ -634,17 +633,30 @@ class LedgerEngine:
         usd_selling: dict[date, Decimal],
         eur_buying: dict[date, Decimal],
         eur_selling: dict[date, Decimal],
-    ) -> int:
+        extra_currency_rates: dict[str, dict[date, Decimal]] | None = None,
+    ) -> tuple[int, set[tuple[str, date]]]:
         """Delegate to core.ledger_processing.run_anomaly_check (v3.1.0).
 
-        Injects this engine's anomaly guard and emit callback; returns the
-        number of anomalies found.
+        Injects this engine's anomaly guard and emit callback. The extra
+        (non-USD/EUR) ledger currencies join the check under the engine's
+        snapshotted rate type (F42). Alert-only: the result never blocks,
+        skips, or substitutes a write.
+
+        Returns:
+            ``(anomaly_count, anomalous)`` where ``anomalous`` is the set of
+            flagged ``(currency, date)`` pairs, threaded into the audit
+            trail so matching rows carry Anomaly_Flag (F25).
         """
-        return run_anomaly_check(
+        anomalous: set[tuple[str, date]] = set()
+        count = run_anomaly_check(
             self._anomaly_guard,
             lambda msg, etype="log": self._emit(msg, etype),
             usd_buying, usd_selling, eur_buying, eur_selling,
+            extra_currency_rates=extra_currency_rates,
+            extra_rate_type=self._rate_type,
+            anomalous_out=anomalous,
         )
+        return count, anomalous
 
     # ================================================================== #
     #  PRIVATE HELPERS — Extracted from process_ledger for readability
@@ -908,9 +920,13 @@ class LedgerEngine:
                 extra_currencies, rate_type, ec_start, bot_today(),
             )
 
-        # v3.1.0: Anomaly detection — check for suspicious rate jumps
-        anomaly_count = self._run_anomaly_check(
+        # v3.1.0: Anomaly detection — check for suspicious rate jumps.
+        # Extra (non-USD/EUR) currencies are included (F42); the flagged
+        # (currency, date) set is threaded into the audit trail (F25).
+        # Alert-only: every rate still writes unchanged.
+        anomaly_count, anomalous_rates = self._run_anomaly_check(
             usd_buying, usd_selling, eur_buying, eur_selling,
+            extra_currency_rates=extra_currency_rates,
         )
         self._last_anomaly_count = anomaly_count
         if anomaly_count:
@@ -940,6 +956,7 @@ class LedgerEngine:
             rate_type=rate_type,
             extra_currency_rates=extra_currency_rates,
             unsupported_currencies=unsupported_currencies,
+            anomalous_rates=anomalous_rates,
             audit=None if dry_run else audit,
         )
 

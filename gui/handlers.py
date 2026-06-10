@@ -100,20 +100,17 @@ class BatchHandler:
         except (httpx.ConnectError, httpx.TimeoutException):
             logger.exception("Network error during batch")
             self.bus.push({"type": "error", "msg": "Network error — check your internet connection."})
-            try:
-                self.app.after(
-                    100, self.app._show_error,
-                    "Network error — please check your internet connection.",
-                )
-            except RuntimeError:
-                logger.debug("App already destroyed during network error callback")
+            # _safe_marshal no-ops once the app is closing and swallows both
+            # RuntimeError AND TclError (TclError is NOT a RuntimeError
+            # subclass), so a teardown race can never kill the worker thread.
+            self.app._safe_marshal(
+                self.app._show_error,
+                "Network error — please check your internet connection.",
+            )
         except Exception as e:
             logger.exception("Unhandled error during batch")
             self.bus.push({"type": "error", "msg": str(e)})
-            try:
-                self.app.after(100, self.app._show_error, str(e))
-            except RuntimeError:
-                logger.debug("App already destroyed during error callback")
+            self.app._safe_marshal(self.app._show_error, str(e))
         finally:
             with self._batch_lock:
                 self._batch_active = False
@@ -149,13 +146,9 @@ class BatchHandler:
                         "type": "log",
                         "msg": f"{prefix}[{idx}/{total}] {fname} — OK",
                     })
-                try:
-                    self.app.after(
-                        100, self.app._update_progress,
-                        idx, total, fname, error,
-                    )
-                except RuntimeError:
-                    logger.debug("App already destroyed during progress callback")
+                self.app._safe_marshal(
+                    self.app._update_progress, idx, total, fname, error,
+                )
 
             success, fail, errors = await engine.process_batch(
                 file_queue,
@@ -177,16 +170,13 @@ class BatchHandler:
                     "type": "log",
                     "msg": f"Audit log: {engine.last_audit_path}",
                 })
-            try:
-                # Pass dry_run through so the GUI renders simulation-specific
-                # copy and suppresses the "Show File in Folder" reveal — a dry
-                # run modifies nothing, so offering to open the "output" is a lie.
-                self.app.after(
-                    200, self.app._show_batch_complete,
-                    success, fail, errors, dry_run,
-                )
-            except RuntimeError:
-                logger.debug("App already destroyed during completion callback")
+            # Pass dry_run through so the GUI renders simulation-specific
+            # copy and suppresses the "Show File in Folder" reveal — a dry
+            # run modifies nothing, so offering to open the "output" is a lie.
+            self.app._safe_marshal(
+                self.app._show_batch_complete,
+                success, fail, errors, dry_run,
+            )
 
     def start_revert(self, filepath: str, backup_path: str | None = None):
         """Launch the revert operation in a background thread.
@@ -218,19 +208,13 @@ class BatchHandler:
                 backup_used = backup_mgr.restore_latest(filepath)
             backup_name = Path(backup_used).name
             self.bus.push({"type": "success", "msg": f"Reverted from: {backup_name}"})
-            try:
-                self.app.after(
-                    0, self.app._show_revert_success, filepath, backup_name,
-                )
-            except RuntimeError:
-                logger.debug("App already destroyed during revert success callback")
+            self.app._safe_marshal(
+                self.app._show_revert_success, filepath, backup_name,
+            )
         except (BackupError, OSError, ValueError) as e:
             logger.exception("Revert failed for %s", filepath)
             self.bus.push({"type": "error", "msg": f"Revert failed: {e}"})
-            try:
-                self.app.after(0, self.app._show_revert_error, str(e))
-            except RuntimeError:
-                logger.debug("App already destroyed during revert error callback")
+            self.app._safe_marshal(self.app._show_revert_error, str(e))
         finally:
             if self.registry is not None:
                 self.registry.unregister("RevertWorker")
