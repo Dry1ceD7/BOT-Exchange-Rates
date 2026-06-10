@@ -1108,6 +1108,32 @@ class TestPreloadUsesBotToday:
         }
         assert end_args == {fixed_today}
 
+    def test_extend_to_today_false_bounds_window_to_caller_dates(
+        self, engine, monkeypatch,
+    ):
+        """F60: extend_to_today=False keeps bot_today out of the window.
+
+        The rate audit verifies archived workbooks whose dates may be years
+        old — the fetch window must stay bounded by the sheet's own span,
+        never stretching to the current BOT business date.
+        """
+        fixed_today = date(2025, 3, 14)
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: fixed_today)
+        target = date(2025, 3, 11)  # Tuesday, one day past force_start
+
+        asyncio.run(
+            engine._preload_api_data(
+                {target}, "2025-03-10", extend_to_today=False,
+            )
+        )
+
+        # The fetch's upper bound is the caller's max date, NOT bot_today.
+        assert engine.api.get_exchange_rates.await_count >= 1
+        end_args = {
+            call.args[1] for call in engine.api.get_exchange_rates.await_args_list
+        }
+        assert end_args == {target}
+
 
 # =========================================================================
 #  PER-COLUMN CACHE MISS — SELF-HEALING (F1 regression)

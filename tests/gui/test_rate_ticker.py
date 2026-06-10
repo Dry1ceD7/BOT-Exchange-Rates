@@ -586,6 +586,30 @@ class TestRateTickerIndicatorGating:
             assert call.kwargs.get("timeout", 999) <= 5.0
         ticker.destroy()
 
+    def test_api_fetch_uses_api_client_endpoint_and_headers(self, tk_root):
+        """F147: the ticker reuses core.api_client's gateway URL + header
+        shape instead of hardcoding its own copies."""
+        from core.api_client import (
+            BOT_GATEWAY_URL,
+            EXG_RATE_PATH,
+            build_bot_headers,
+        )
+
+        ticker = _make_ticker(tk_root)
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.json.return_value = {"result": {"data": {"data_detail": []}}}
+        with patch("core.secure_tokens.get_token", return_value="tok"), \
+                patch("httpx.get", return_value=fake_resp) as mock_get:
+            ticker._fetch_today_from_api()
+        assert mock_get.call_count == 2  # USD + EUR
+        for call in mock_get.call_args_list:
+            assert call.args[0].startswith(
+                f"{BOT_GATEWAY_URL}{EXG_RATE_PATH}"
+            )
+            assert call.kwargs["headers"] == build_bot_headers("tok")
+        ticker.destroy()
+
 
 # ---------------------------------------------------------------------------
 # 9. Sparkline (finding #4)

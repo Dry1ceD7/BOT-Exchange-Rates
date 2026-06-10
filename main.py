@@ -382,19 +382,16 @@ def _set_console_log_level(level: int) -> None:
 def _collect_excel_files(input_path: str) -> list[str]:
     """Return the sorted full-path Excel files at ``input_path``.
 
-    A single file yields a one-element list (or empty if it is not Excel); a
-    directory is scanned non-recursively. Dotfiles are skipped. Keeps
-    os.listdir + os.path.join so the returned strings match the exact prior
-    full-path form fed to the engine.
+    Thin wrapper over the shared ``core.constants.collect_excel_files``
+    (single owner of the listing idiom, also used by the scheduler watch
+    paths and the GUI drop resolver): a single file yields a one-element
+    list (or empty if it is not Excel); a directory is scanned
+    non-recursively with dotfiles skipped, returning the exact prior
+    full-path string form fed to the engine.
     """
-    excel_exts = (".xlsx", ".xlsm")
-    if Path(input_path).is_file():
-        return [input_path] if input_path.lower().endswith(excel_exts) else []
-    return sorted([
-        os.path.join(input_path, f)  # noqa: PTH118
-        for f in os.listdir(input_path)  # noqa: PTH208
-        if f.lower().endswith(excel_exts) and not f.startswith(".")
-    ])
+    from core.constants import collect_excel_files
+
+    return collect_excel_files(input_path)
 
 
 def _resolve_input_path(args: argparse.Namespace) -> str:
@@ -416,36 +413,34 @@ def _is_standalone_exrate_file(filepath: str) -> bool:
 
     Read-only probe on a small (<15 MB) workbook; called once per file BEFORE
     processing so the progress callback stays a cheap set lookup. Any probe
-    failure returns False (treat as a normal ledger — never mislabel).
+    failure returns False (treat as a normal ledger — never mislabel). The
+    probe itself is the shared ``core.workbook_io.is_standalone_exrate_workbook``
+    (single owner — the engine's ``_detect_standalone_exrate`` uses it too);
+    the literal 'Date'/'Cur' defaults match this site's prior inline scan.
     """
-    if not filepath.lower().endswith(".xlsx"):
-        return False
-    try:
-        import openpyxl as _opx
+    from core.workbook_io import is_standalone_exrate_workbook
 
-        from core.constants import SKIP_SHEET_NAMES
+    return is_standalone_exrate_workbook(filepath)
 
-        wb = _opx.load_workbook(filepath, read_only=True)
-        try:
-            if "ExRate" not in wb.sheetnames:
-                return False
-            for sheet_name in wb.sheetnames:
-                if sheet_name in SKIP_SHEET_NAMES:
-                    continue
-                ws = wb[sheet_name]
-                for row in ws.iter_rows(min_row=1, max_row=5, values_only=True):
-                    row_strs = [
-                        str(c).strip() if c is not None else "" for c in row
-                    ]
-                    if "Date" in row_strs and "Cur" in row_strs:
-                        # A month tab exists → normal ledger, not standalone.
-                        return False
-            return True
-        finally:
-            wb.close()
-    except Exception:
-        # Probe failure must never mislabel a ledger; fall back to "not standalone".
-        return False
+
+def _print_json_summary(
+    succeeded: int,
+    failed: int,
+    total: int,
+    dry_run: bool,
+    audit_path: str | None,
+    errors: list[str],
+) -> None:
+    """Emit the machine-readable --json summary (single schema for all exits)."""
+    import json
+    print(json.dumps({
+        "succeeded": succeeded,
+        "failed": failed,
+        "total": total,
+        "dry_run": dry_run,
+        "audit_log": audit_path,
+        "errors": errors,
+    }))
 
 
 def _run_headless(args: argparse.Namespace) -> int:
@@ -485,6 +480,10 @@ def _run_headless(args: argparse.Namespace) -> int:
         files = manifest.pending_files()
         if not files:
             print("No interrupted batch to resume.", file=sys.stderr)
+            if args.json:
+                _print_json_summary(
+                    0, 0, 0, bool(args.dry_run), None, [],
+                )
             return EXIT_NOTHING
         start_date = manifest.start_date()
         _emit("BOT Exchange Rate Processor — Headless Resume")
@@ -501,7 +500,12 @@ def _run_headless(args: argparse.Namespace) -> int:
         if not files:
             # 'Nothing to do' is its own code so a cron user notices a
             # misconfigured folder instead of a success-looking exit 0.
+            # --json still gets a summary object so parsers always see JSON.
             print("No Excel files found to process.", file=sys.stderr)
+            if args.json:
+                _print_json_summary(
+                    0, 0, 0, bool(args.dry_run), None, [],
+                )
             return EXIT_NOTHING
 
         _emit("BOT Exchange Rate Processor — Headless Mode")
@@ -525,15 +529,9 @@ def _run_headless(args: argparse.Namespace) -> int:
     )
 
     if args.json:
-        import json
-        print(json.dumps({
-            "succeeded": success,
-            "failed": fail,
-            "total": len(files),
-            "dry_run": bool(args.dry_run),
-            "audit_log": audit_path,
-            "errors": errors,
-        }))
+        _print_json_summary(
+            success, fail, len(files), bool(args.dry_run), audit_path, errors,
+        )
     else:
         _emit("")
         print(f"Results: {success} succeeded, {fail} failed")
@@ -584,12 +582,12 @@ def _process_headless_batch(
                 standalone_idx.add(i)
 
     async def _run() -> tuple[int, int, list[str], str | None]:
-        from core.api_client import BOTClient
+        from core.api_client import CLIENT_TIMEOUT, BOTClient
         from core.engine import LedgerEngine
 
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, connect=10.0),
-        ) as client:
+        # CLIENT_TIMEOUT is built from the centralized core.constants values —
+        # no hardcoded timeout literals here.
+        async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT) as client:
             api = BOTClient(client)
             engine = LedgerEngine(api)
 

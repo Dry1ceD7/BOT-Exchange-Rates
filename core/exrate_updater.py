@@ -35,10 +35,11 @@ from core.excel_io import (
     scan_sheet_headers,
     write_custom_exrate_data,
 )
-from core.exrate_sheet import update_master_exrate_sheet
+from core.exrate_sheet import exrate_fixed_index_keys, update_master_exrate_sheet
 from core.logic import (
     build_holiday_lookup,
     compute_year_start_date,
+    default_fetch_window_start,
     safe_to_decimal,
 )
 from core.workbook_io import atomic_save as _atomic_save
@@ -220,7 +221,8 @@ class WorkbookWriter:
 
             # ── STEP 4: Surface rows the formula cannot fill ─────────────
             # Blank EX Rate cells are otherwise silent. Count both
-            # unavailable-rate rows (date beyond the rollback / no API data)
+            # unavailable-rate rows (no BOT rate for that exact date in the
+            # ExRate sheet — weekend/holiday or outside the fetched range)
             # and unsupported-currency rows, and emit per-file warnings so the
             # accountant is told instead of filing empty rates.
             self._warn_unfilled_rows(
@@ -297,11 +299,9 @@ class WorkbookWriter:
         Counts are reported but the file still saves: a visible warning beats a
         hard failure on what may be a single stray row in a large ledger.
         """
-        # USD/EUR fixed columns vary by rate type (B/D buying, C/E selling).
-        if rate_type == "selling":
-            fixed = {"USD": "usd_selling", "EUR": "eur_selling"}
-        else:
-            fixed = {"USD": "usd_buying", "EUR": "eur_buying"}
+        # USD/EUR fixed columns vary by rate type (B/D buying, C/E selling) —
+        # resolved from the single layout source (core/exrate_sheet.py).
+        fixed = exrate_fixed_index_keys(rate_type)
 
         no_rate = 0
         unsupported_seen: dict[str, int] = {}
@@ -338,9 +338,13 @@ class WorkbookWriter:
                     no_rate += 1
 
         if no_rate:
+            # The XLOOKUP is exact-match: no rollback exists on this path. A
+            # row stays blank when the ExRate sheet has no BOT rate for that
+            # exact date — a weekend/holiday date or one outside the range.
             self._engine._emit(
                 f"{fname}: {no_rate} row(s) had no rate available "
-                "(date beyond the 10-day rollback) — EX Rate left blank",
+                "(no BOT rate for that exact date in the ExRate sheet — "
+                "weekend/holiday or outside range) — EX Rate left blank",
                 etype="warning",
             )
         for ccy, count in sorted(unsupported_seen.items()):
@@ -401,10 +405,9 @@ class WorkbookWriter:
         records stay False. Metadata only — the value is written regardless.
         """
         anomalous = anomalous or set()
-        if rate_type == "selling":
-            fixed = {"USD": "usd_selling", "EUR": "eur_selling"}
-        else:
-            fixed = {"USD": "usd_buying", "EUR": "eur_buying"}
+        # USD/EUR fixed columns vary by rate type (B/D buying, C/E selling) —
+        # resolved from the single layout source (core/exrate_sheet.py).
+        fixed = exrate_fixed_index_keys(rate_type)
         holiday_dates = set(holidays_set or ())
 
         for sheet_name, mapping in sheet_maps.items():
@@ -663,7 +666,7 @@ class StandaloneExRateUpdater:
                 start_dt, end_dt = date_range
             else:
                 target_year = bot_today().year
-                start_dt = date(target_year - 1, 12, 20)
+                start_dt = default_fetch_window_start(target_year)
                 end_dt = bot_today()
 
             # rate_data[currency][api_field][date] = value

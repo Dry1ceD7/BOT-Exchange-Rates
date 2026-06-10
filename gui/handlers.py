@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 
-from core.api_client import BOTClient
+from core.api_client import CLIENT_TIMEOUT, BOTClient
 from core.engine import LedgerEngine
 from core.workers.event_bus import EventBus
 
@@ -126,7 +126,7 @@ class BatchHandler:
     ):
         """Async batch executor."""
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, connect=10.0),
+            timeout=CLIENT_TIMEOUT,
         ) as client:
             api = BOTClient(client)
             engine = LedgerEngine(api, event_bus=self.bus)

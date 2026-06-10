@@ -26,7 +26,7 @@ import re
 import subprocess
 import threading
 import tkinter
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -34,6 +34,11 @@ import customtkinter as ctk
 
 from core.backup_manager import BackupManager
 from core.config_manager import SettingsManager
+from core.constants import (
+    SUPPORTED_EXCEL_EXTENSIONS,
+    bot_today,
+    collect_excel_files,
+)
 from core.i18n import plural, tr
 from core.version import __version__ as APP_VERSION
 from core.workers.event_bus import EventBus
@@ -82,8 +87,9 @@ def parse_drop_data(raw: str, tk_root=None) -> list[str]:
     return [raw] if raw else []
 
 
-# Supported Excel extensions (openpyxl handles .xlsx and .xlsm natively)
-EXCEL_EXTENSIONS = (".xlsx", ".xlsm")
+# Supported Excel extensions (openpyxl handles .xlsx and .xlsm natively).
+# Single source of truth: core.constants.SUPPORTED_EXCEL_EXTENSIONS.
+EXCEL_EXTENSIONS = SUPPORTED_EXCEL_EXTENSIONS
 
 
 def resolve_excel_files(paths: list[str], collect_rejected: bool = False):
@@ -108,14 +114,11 @@ def resolve_excel_files(paths: list[str], collect_rejected: bool = False):
             elif p.lower().endswith(UNSUPPORTED_EXTENSIONS):
                 rejected.append(p)
         elif Path(p).is_dir():
-            # Keep os.listdir + os.path.join: queued entries are full-path
-            # strings handed to the engine; sorting bare names then joining is
-            # the exact prior behavior the os.path.normpath dedup relies on.
-            for fname in sorted(os.listdir(p)):  # noqa: PTH208
-                if fname.startswith("."):
-                    continue
-                if fname.lower().endswith(EXCEL_EXTENSIONS):
-                    queue.append(os.path.join(p, fname))  # noqa: PTH118
+            # Shared listing helper (core.constants.collect_excel_files):
+            # bare names sorted then joined — the exact prior full-path form
+            # the os.path.normpath dedup below relies on. dedup=False because
+            # the identity check runs over the merged queue below.
+            queue.extend(collect_excel_files(p, dedup=False))
     seen = set()
     unique = []
     for f in queue:
@@ -436,7 +439,10 @@ class BOTExrateApp(ctk.CTk):
 
         self.lbl_toggle_hint = ctk.CTkLabel(
             self.manual_date_frame,
-            text=tr("main.today_hint", date=date.today().strftime("%d %b %Y")),
+            # bot_today, not the wall clock: this hint names the exact date a
+            # "Use Today" run will target (_assemble_start_date), so it must
+            # show the BOT business date the pipeline actually uses.
+            text=tr("main.today_hint", date=bot_today().strftime("%d %b %Y")),
             font=ctk.CTkFont(size=11), text_color=t["success"]
         )
         self.lbl_toggle_hint.pack(pady=(4, 4))
@@ -447,7 +453,6 @@ class BOTExrateApp(ctk.CTk):
         # Default the picker to the current BOT business date (Asia/Bangkok)
         # rather than a hardcoded, now-stale "2025" — a manual run with auto-
         # detect off should land on today, not a past year (#10).
-        from core.constants import bot_today
         today = bot_today()
         current_year = today.year
         self._combo_widgets = []
@@ -780,10 +785,12 @@ class BOTExrateApp(ctk.CTk):
         is_today = self.use_today_var.get() == "on"
         self._lock_date_dropdowns(locked=is_today)
         if is_today:
+            # bot_today, not the wall clock — must mirror the date
+            # _assemble_start_date will actually hand to the engine.
             self.lbl_toggle_hint.configure(
                 text=tr(
                     "main.today_hint",
-                    date=date.today().strftime("%d %b %Y"),
+                    date=bot_today().strftime("%d %b %Y"),
                 ),
                 text_color=_get_colors()["success"]
             )
@@ -801,7 +808,10 @@ class BOTExrateApp(ctk.CTk):
 
     def _assemble_start_date(self) -> str | None:
         if self.use_today_var.get() == "on":
-            return datetime.today().strftime("%Y-%m-%d")
+            # Data-targeting: this string becomes the engine's start date, so
+            # it must be the BOT business date (Asia/Bangkok), not the local
+            # wall clock — near midnight the two can differ by a day.
+            return bot_today().strftime("%Y-%m-%d")
         date_str = f"{self.combo_year.get()}-{self.combo_month.get()}-{self.combo_day.get()}"
         try:
             datetime.strptime(date_str, "%Y-%m-%d")
@@ -1139,8 +1149,11 @@ class BOTExrateApp(ctk.CTk):
                     if getattr(self, "_closing", False):
                         return
                     if was_detected:
+                        # Range end shown is bot_today — the engine extends
+                        # its fetch window to the BOT business date, so the
+                        # hint must quote the same end the run will use.
                         self.lbl_auto_hint.configure(
-                            text=f"Detected: {oldest_date.strftime('%d %b %Y')} → {date.today().strftime('%d %b %Y')}",
+                            text=f"Detected: {oldest_date.strftime('%d %b %Y')} → {bot_today().strftime('%d %b %Y')}",
                             text_color=_get_colors()["success"]
                         )
                         self.lbl_status.configure(
@@ -1429,6 +1442,15 @@ class BOTExrateApp(ctk.CTk):
             )
         except (OSError, ValueError, TypeError) as e:
             logger.debug("Persisting scheduler_last_run failed: %s", e)
+
+        # Refresh the scheduler panel's "Last run" row in-session — the
+        # persisted record above only covers future loads (F77).
+        panel = getattr(self, "scheduler_panel", None)
+        if panel is not None and hasattr(panel, "refresh_last_run"):
+            try:
+                panel.refresh_last_run()
+            except (RuntimeError, tkinter.TclError) as e:
+                logger.debug("Scheduler panel last-run refresh failed: %s", e)
 
         # Pull the operator back to the window on failure so the failed-files
         # box is seen rather than buried behind a minimised tray icon.

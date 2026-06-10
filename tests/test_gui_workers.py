@@ -8,7 +8,6 @@ These tests define the contracts for:
   1. core/workers/event_bus.py — Thread-safe Producer-Consumer event queue
   2. gui/panels/live_console.py — Read-only log viewer module
   3. gui/panels/settings_modal.py — JSON-backed settings persistence
-  4. gui/panels/control_panel.py — Drop zone and action buttons module
 """
 
 import os
@@ -119,9 +118,6 @@ class TestPanelModules:
 
     def test_settings_modal_module_exists(self):
         from gui.panels.settings_modal import SettingsModal  # noqa: F401
-
-    def test_control_panel_module_exists(self):
-        from gui.panels.control_panel import ControlPanel  # noqa: F401
 
 
 # ═══════════════════════════════════════════════════════════════════════════

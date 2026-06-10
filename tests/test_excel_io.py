@@ -15,6 +15,7 @@ import openpyxl
 from core.constants import parse_date
 from core.excel_io import (
     build_exrate_index,
+    find_header_row,
     inject_xlookup_formulas,
     scan_sheet_headers,
     write_custom_exrate_data,
@@ -380,6 +381,73 @@ class TestScanSheetHeaders:
             "duplicate" in r.message.lower() and "EX Rate" in r.message
             for r in caplog.records
         )
+        wb.close()
+
+
+# =========================================================================
+#  find_header_row (canonical header-scan primitive)
+# =========================================================================
+
+class TestFindHeaderRow:
+    """Single owner behind scan_sheet_headers / ledger prescan / prescan."""
+
+    def test_anchor_row_and_zero_based_columns(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Notes"])                      # row 1 — no anchor
+        ws.append(["Date", "Cur", "EX Rate"])     # row 2 — header
+        row_idx, cols = find_header_row(
+            ws, (("source", "Date"), ("currency", "Cur")),
+        )
+        assert row_idx == 2
+        assert cols == {"source": 0, "currency": 1}
+        wb.close()
+
+    def test_anchor_absent_returns_none(self):
+        wb = openpyxl.Workbook()
+        wb.active.append(["Cur", "Amount"])
+        row_idx, cols = find_header_row(
+            wb.active, (("source", "Date"),),
+        )
+        assert row_idx is None
+        assert cols == {}
+        wb.close()
+
+    def test_none_label_is_skipped(self):
+        wb = openpyxl.Workbook()
+        wb.active.append(["Date", "Cur"])
+        row_idx, cols = find_header_row(
+            wb.active, (("source", "Date"), ("currency", None)),
+        )
+        assert row_idx == 1
+        assert cols == {"source": 0}
+        wb.close()
+
+    def test_warn_duplicates_false_stays_silent(self, caplog):
+        """The prescan path resolves first-wins WITHOUT an operator warning."""
+        wb = openpyxl.Workbook()
+        wb.active.append(["Date", "Date"])
+        with caplog.at_level("WARNING"):
+            row_idx, cols = find_header_row(
+                wb.active, (("source", "Date"),), warn_duplicates=False,
+            )
+        assert row_idx == 1
+        assert cols == {"source": 0}
+        assert not any(
+            "duplicate" in r.message.lower() for r in caplog.records
+        )
+        wb.close()
+
+    def test_scan_depth_bounds_the_search(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        for _ in range(5):
+            ws.append(["filler"])
+        ws.append(["Date", "Cur"])                # row 6 — beyond depth 5
+        row_idx, _cols = find_header_row(
+            ws, (("source", "Date"),), scan_depth=5,
+        )
+        assert row_idx is None
         wb.close()
 
 

@@ -14,15 +14,62 @@ import openpyxl
 
 import core.exrate_sheet as exrate_sheet_mod
 from core.exrate_sheet import (
+    EXRATE_RATE_COLUMNS,
     _build_date_range,
     _merge_rate_data,
     _parse_cell_date,
+    exrate_fixed_index_keys,
+    exrate_fixed_letters,
+    exrate_holidays_col,
+    exrate_index_key,
     update_master_exrate_sheet,
 )
 
 # =========================================================================
 #  HELPERS
 # =========================================================================
+
+
+class TestLayoutSingleSource:
+    """The ExRate layout constants/helpers consumed by excel_io,
+    exrate_updater and rate_audit — guard against drift."""
+
+    def test_fixed_rate_columns_are_b_to_e(self):
+        assert [c[0] for c in EXRATE_RATE_COLUMNS] == [2, 3, 4, 5]
+
+    def test_fixed_headers_match_standard_layout(self):
+        assert [c[1] for c in EXRATE_RATE_COLUMNS] == [
+            "USD Buying TT Rate", "USD Selling Rate",
+            "EUR Buying TT Rate", "EUR Selling Rate",
+        ]
+
+    def test_index_keys_match_build_exrate_index_names(self):
+        assert exrate_index_key("USD", "buying_transfer") == "usd_buying"
+        assert exrate_index_key("EUR", "selling") == "eur_selling"
+        assert exrate_fixed_index_keys("buying_transfer") == {
+            "USD": "usd_buying", "EUR": "eur_buying",
+        }
+        assert exrate_fixed_index_keys("selling") == {
+            "USD": "usd_selling", "EUR": "eur_selling",
+        }
+
+    def test_fixed_letters_match_ledger_formula_columns(self):
+        assert exrate_fixed_letters("buying_transfer") == {
+            "USD": "B", "EUR": "D",
+        }
+        assert exrate_fixed_letters("selling") == {"USD": "C", "EUR": "E"}
+
+    def test_non_selling_rate_type_falls_back_to_buying(self):
+        # Historical else-branch behavior: anything not "selling" resolves
+        # to the Buying TT columns.
+        assert (
+            exrate_fixed_index_keys("mid_rate")
+            == exrate_fixed_index_keys("buying_transfer")
+        )
+
+    def test_holidays_col_resolver(self):
+        assert exrate_holidays_col(0) == 6   # standard six-column sheet
+        assert exrate_holidays_col(2) == 8   # two appended extra currencies
 
 class TestParseCellDate:
     """Tests for _parse_cell_date helper."""

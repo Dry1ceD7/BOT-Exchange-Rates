@@ -19,8 +19,10 @@ import core.workbook_io as workbook_io_mod
 from core.workbook_io import (
     WorkbookVerifyError,
     atomic_save,
+    atomic_write_text,
     build_cell_verifier,
     ensure_disk_space,
+    is_standalone_exrate_workbook,
 )
 
 _DiskUsage = namedtuple("_DiskUsage", ["total", "used", "free"])
@@ -262,3 +264,110 @@ class TestBuildCellVerifier:
         with pytest.raises(WorkbookVerifyError, match="row missing"):
             atomic_save(wb2, str(target), verify=build_cell_verifier(bad))
         wb2.close()
+
+
+# =========================================================================
+#  atomic_write_text
+# =========================================================================
+
+class TestAtomicWriteText:
+    """Text twin of atomic_save — temp + replace, no partial files."""
+
+    def test_writes_payload(self, tmp_path):
+        target = tmp_path / "manifest.json"
+        atomic_write_text(target, '{"version": 1}')
+        assert target.read_text(encoding="utf-8") == '{"version": 1}'
+
+    def test_overwrites_existing_file(self, tmp_path):
+        target = tmp_path / "manifest.json"
+        target.write_text("old", encoding="utf-8")
+        atomic_write_text(target, "new")
+        assert target.read_text(encoding="utf-8") == "new"
+
+    def test_no_temp_file_left_behind(self, tmp_path):
+        target = tmp_path / "manifest.json"
+        atomic_write_text(target, "payload")
+        assert [p.name for p in tmp_path.iterdir()] == ["manifest.json"]
+
+    def test_failure_leaves_original_and_no_temp(self, tmp_path, monkeypatch):
+        target = tmp_path / "manifest.json"
+        target.write_text("good", encoding="utf-8")
+
+        def _boom(self, *_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(type(target), "replace", _boom)
+        with pytest.raises(OSError, match="disk full"):
+            atomic_write_text(target, "partial")
+        monkeypatch.undo()
+        # Original untouched, partial temp cleaned up.
+        assert target.read_text(encoding="utf-8") == "good"
+        assert [p.name for p in tmp_path.iterdir()] == ["manifest.json"]
+
+
+# =========================================================================
+#  is_standalone_exrate_workbook
+# =========================================================================
+
+class TestIsStandaloneExrateWorkbook:
+    """Shared probe behind engine._detect_standalone_exrate + main.py."""
+
+    def _save(self, tmp_path, name, build):
+        fp = tmp_path / name
+        wb = openpyxl.Workbook()
+        build(wb)
+        wb.save(str(fp))
+        wb.close()
+        return str(fp)
+
+    def test_true_for_exrate_only_workbook(self, tmp_path):
+        def _build(wb):
+            ws = wb.active
+            ws.title = "ExRate"
+            ws.append(["Date", "USD Buying TT", "USD Selling"])
+
+        fp = self._save(tmp_path, "exrate.xlsx", _build)
+        assert is_standalone_exrate_workbook(fp) is True
+
+    def test_false_when_month_tab_present(self, tmp_path):
+        def _build(wb):
+            ws = wb.active
+            ws.title = "Jan2025"
+            ws.append(["Date", "Cur", "EX Rate"])
+            wb.create_sheet("ExRate").append(["Date"])
+
+        fp = self._save(tmp_path, "ledger.xlsx", _build)
+        assert is_standalone_exrate_workbook(fp) is False
+
+    def test_false_without_exrate_sheet(self, tmp_path):
+        def _build(wb):
+            wb.active.title = "Misc"
+
+        fp = self._save(tmp_path, "misc.xlsx", _build)
+        assert is_standalone_exrate_workbook(fp) is False
+
+    def test_false_for_non_xlsx_extension(self, tmp_path):
+        fp = tmp_path / "ledger.xlsm"
+        fp.write_text("not really excel")
+        assert is_standalone_exrate_workbook(str(fp)) is False
+
+    def test_false_on_corrupt_file(self, tmp_path):
+        """ANY probe failure (incl. OSError) returns False — never raises."""
+        fp = tmp_path / "broken.xlsx"
+        fp.write_text("definitely not a zip/xlsx")
+        assert is_standalone_exrate_workbook(str(fp)) is False
+
+    def test_custom_headers_match_engine_target_cols(self, tmp_path):
+        """The engine passes its target_cols labels; a tab carrying them
+        (and not the defaults) must still be recognised as a month tab."""
+        def _build(wb):
+            ws = wb.active
+            ws.title = "Jan2025"
+            ws.append(["Datum", "Waehrung"])
+            wb.create_sheet("ExRate").append(["Date"])
+
+        fp = self._save(tmp_path, "custom.xlsx", _build)
+        assert is_standalone_exrate_workbook(fp) is True
+        assert is_standalone_exrate_workbook(
+            fp, date_header="Datum", currency_header="Waehrung",
+        ) is False

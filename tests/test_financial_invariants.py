@@ -275,7 +275,7 @@ class TestDecimalRoundTrip:
         ws = wb2["ExRate"]
         rows = _rows_by_date(ws)
         for d, values in expected.items():
-            for col, source in zip((2, 3, 4, 5, 6), values):
+            for col, source in zip((2, 3, 4, 5, 6), values, strict=True):
                 cell = ws.cell(row=rows[d], column=col)
                 got = Decimal(str(cell.value))
                 assert got == source, f"{d} col {col}: {got} != {source}"

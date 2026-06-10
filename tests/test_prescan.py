@@ -127,6 +127,30 @@ class TestPrescanOldestDate:
         assert detected is True
         assert oldest == date(2025, 2, 15)
 
+    def test_exrate_master_sheet_is_skipped(self, tmp_path):
+        """F127: the app's own ExRate master sheet must not skew detection.
+
+        The ExRate sheet carries a "Date" column going back to the year
+        start; scanning it would drag the oldest date to dates no ledger row
+        actually needs. Only real ledger sheets count.
+        """
+        fp = tmp_path / "ledger.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "ExRate"
+        ws.append(["Date", "USD Buying TT"])
+        ws.append([date(2024, 1, 2), 34.5])  # much older than the ledger
+
+        ledger = wb.create_sheet("Sheet1")
+        ledger.append(["Date", "Amount"])
+        ledger.append([date(2025, 3, 10), 100])
+        wb.save(str(fp))
+        wb.close()
+
+        oldest, detected = prescan_oldest_date([str(fp)])
+        assert detected is True
+        assert oldest == date(2025, 3, 10)
+
     def test_unreadable_file_is_skipped_not_crashed(self, tmp_path):
         """A locked/permission-denied .xlsx is skipped, not fatal.
 

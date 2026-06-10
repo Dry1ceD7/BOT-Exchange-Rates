@@ -22,6 +22,71 @@ from core.logic import safe_to_decimal
 
 logger = logging.getLogger(__name__)
 
+# ── ExRate standard layout — SINGLE SOURCE OF TRUTH ──────────────────────
+# Fixed columns: A=Date, B=USD Buying TT, C=USD Selling, D=EUR Buying TT,
+# E=EUR Selling. Extra currencies are appended from EXRATE_EXTRA_START_COL;
+# the Holidays/Weekend label always sits in the column AFTER the last rate
+# column (see exrate_holidays_col). Consumed by core/excel_io.py (index +
+# formula columns), core/exrate_updater.py (audit/warning resolution) and
+# core/rate_audit.py (layout validation) — change it HERE only.
+EXRATE_SHEET_NAME = "ExRate"
+EXRATE_DATE_HEADER = "Date"
+EXRATE_HOLIDAYS_HEADER = "Holidays/Weekend"
+
+# Each entry: (1-based column, header label, currency, BOT api rate_type).
+EXRATE_RATE_COLUMNS: tuple[tuple[int, str, str, str], ...] = (
+    (2, "USD Buying TT Rate", "USD", "buying_transfer"),
+    (3, "USD Selling Rate", "USD", "selling"),
+    (4, "EUR Buying TT Rate", "EUR", "buying_transfer"),
+    (5, "EUR Selling Rate", "EUR", "selling"),
+)
+
+# First column for appended extra currencies (immediately after E).
+EXRATE_EXTRA_START_COL = 6
+
+
+def exrate_holidays_col(extra_count: int) -> int:
+    """1-based Holidays/Weekend column for a sheet with N extra currencies."""
+    return EXRATE_EXTRA_START_COL + extra_count
+
+
+def exrate_index_key(currency: str, rate_type: str) -> str:
+    """In-memory lookup key for a fixed rate column ("usd_buying", ...).
+
+    These are the keys build_exrate_index (core/excel_io.py) and the
+    updater's fixed-column resolution use: the BOT api field
+    "buying_transfer" shortens to "buying".
+    """
+    suffix = "buying" if rate_type == "buying_transfer" else "selling"
+    return f"{currency.lower()}_{suffix}"
+
+
+def _fixed_columns_for(rate_type: str) -> tuple[tuple[int, str, str, str], ...]:
+    """The EXRATE_RATE_COLUMNS entries for one ledger rate type.
+
+    The ledger rate_type is normalized upstream to buying_transfer/selling;
+    anything that is not "selling" resolves to the Buying TT columns
+    (preserving the historical else-branch behavior).
+    """
+    rt = "selling" if rate_type == "selling" else "buying_transfer"
+    return tuple(e for e in EXRATE_RATE_COLUMNS if e[3] == rt)
+
+
+def exrate_fixed_index_keys(rate_type: str) -> dict[str, str]:
+    """``{currency: index_key}`` for the fixed USD/EUR columns of one rate type."""
+    return {
+        ccy: exrate_index_key(ccy, rt)
+        for _col, _label, ccy, rt in _fixed_columns_for(rate_type)
+    }
+
+
+def exrate_fixed_letters(rate_type: str) -> dict[str, str]:
+    """``{currency: column_letter}`` for the fixed USD/EUR columns of one rate type."""
+    return {
+        ccy: get_column_letter(col)
+        for col, _label, ccy, _rt in _fixed_columns_for(rate_type)
+    }
+
 
 def update_master_exrate_sheet(
     wb: openpyxl.Workbook,
@@ -65,25 +130,24 @@ def update_master_exrate_sheet(
         (``inject_xlookup_formulas(exrate_col_map=...)``). USD/EUR are NOT in
         the map — they occupy the fixed B-E columns the formula already knows.
     """
-    SHEET_NAME = "ExRate"
+    SHEET_NAME = EXRATE_SHEET_NAME
     HEADER_ROW = 1
     DATA_START_ROW = 2
     extra_rates = extra_currency_rates or {}
     # Deterministic, dict-order column list for the extra currencies.
     extra_codes = list(extra_rates.keys())
-    HEADERS = [
-        "Date", "USD Buying TT Rate", "USD Selling Rate",
-        "EUR Buying TT Rate", "EUR Selling Rate",
-    ]
+    HEADERS = [EXRATE_DATE_HEADER]
+    HEADERS += [label for _col, label, _ccy, _rt in EXRATE_RATE_COLUMNS]
     HEADERS.extend(f"{ccy} Rate" for ccy in extra_codes)
-    HEADERS.append("Holidays/Weekend")
+    HEADERS.append(EXRATE_HOLIDAYS_HEADER)
 
     # Column index (1-based) of each appended extra currency + the trailing
-    # Holidays column. Extra columns start at 6 (after E=EUR Selling).
+    # Holidays column (layout constants above: extras start after E).
     extra_col_index = {
-        ccy: 6 + offset for offset, ccy in enumerate(extra_codes)
+        ccy: EXRATE_EXTRA_START_COL + offset
+        for offset, ccy in enumerate(extra_codes)
     }
-    holidays_col = len(HEADERS)
+    holidays_col = exrate_holidays_col(len(extra_codes))
     exrate_col_map = {
         ccy: get_column_letter(idx) for ccy, idx in extra_col_index.items()
     }

@@ -166,28 +166,3 @@ def delete_token(env_key: str) -> bool:
     except Exception as e:
         logger.debug("Failed to delete token '%s': %s", env_key, e)
         return False
-
-
-def migrate_env_to_keychain(env_path: str | None = None) -> int:
-    """
-    One-time migration: read all tokens from .env and store in keychain.
-
-    Returns the number of tokens successfully migrated.
-    """
-    if not _keyring_available():
-        logger.info("Keyring not available — skipping migration.")
-        return 0
-
-    migrated = 0
-    for env_key in _ENV_TOKEN_KEYS:
-        token = os.environ.get(env_key)
-        if token and set_token(env_key, token):
-            migrated += 1
-
-    if migrated > 0:
-        logger.info(
-            "Migrated %d token(s) to OS keychain. "
-            "You can safely remove them from .env.",
-            migrated,
-        )
-    return migrated

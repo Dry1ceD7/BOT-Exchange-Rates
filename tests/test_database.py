@@ -168,11 +168,14 @@ class TestPartialUpsertPreservesSiblings:
 class TestMultiRates:
     """rates_multi must preserve exact Decimal values (TEXT affinity)."""
 
-    def test_insert_and_get_multi_rate_exact(self, db):
+    def test_insert_and_get_rates_multi_exact(self, db):
         db.insert_multi_rates_bulk([
             ("2025-01-02", "USD", "buying_transfer", Decimal("35.1150")),
         ])
-        rate = db.get_multi_rate(date(2025, 1, 2), "USD", "buying_transfer")
+        rates = db.get_rates_multi(
+            date(2025, 1, 2), date(2025, 1, 2), "USD", "buying_transfer",
+        )
+        rate = rates[date(2025, 1, 2)]
         assert isinstance(rate, Decimal)
         assert rate == Decimal("35.1150")
 
@@ -278,28 +281,6 @@ class TestHolidays:
 
     def test_insert_holidays_empty(self, db):
         db.insert_holidays([])  # Should not raise
-
-
-# =========================================================================
-#  STATS
-# =========================================================================
-
-class TestStats:
-    """Tests for the get_stats utility."""
-
-    def test_empty_stats(self, db):
-        stats = db.get_stats()
-        assert stats["rates"] == 0
-        assert stats["holidays"] == 0
-        assert stats["size_kb"] >= 0
-
-    def test_stats_after_inserts(self, db):
-        db.insert_rate(date(2025, 1, 1), usd_buying=33.0, usd_selling=33.1,
-                       eur_buying=36.0, eur_selling=36.1)
-        db.insert_holidays([("2025-01-01", "NY")])
-        stats = db.get_stats()
-        assert stats["rates"] == 1
-        assert stats["holidays"] == 1
 
 
 # =========================================================================

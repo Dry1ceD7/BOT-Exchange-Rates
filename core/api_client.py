@@ -275,13 +275,38 @@ class BOTTransientServerError(Exception):
     pass
 
 # -------------------------------------------------------------------------
+# GATEWAY URL / AUTH HEADER CONSTANTS (single owner)
+# -------------------------------------------------------------------------
+
+# Canonical BOT gateway base URL + endpoint paths. Exported so lightweight
+# callers (e.g. gui/panels/rate_ticker.py) reuse the same endpoint strings
+# instead of hardcoding their own copies.
+BOT_GATEWAY_URL: str = "https://gateway.api.bot.or.th"
+EXG_RATE_PATH: str = "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
+HOLIDAY_PATH: str = "/financial-institutions-holidays/"
+
+
+def build_bot_headers(token: str) -> dict[str, str]:
+    """Build the standard BOT gateway auth headers for a raw token value.
+
+    Strips any user-pasted "Bearer " prefix first — the single owner of the
+    header shape used by BOTClient, ping_token, and the rate ticker.
+    """
+    clean = (token or "").removeprefix("Bearer ").strip()
+    return {
+        "X-IBM-Client-Id": clean,
+        "Authorization": f"Bearer {clean}",
+        "accept": "application/json",
+    }
+
+
+# -------------------------------------------------------------------------
 # LIGHTWEIGHT CREDENTIAL PROBE (first-run "Test Keys")
 # -------------------------------------------------------------------------
 
 # Lightweight EXG-rate endpoint used purely to verify a key is accepted.
 _PING_URL = (
-    "https://gateway.api.bot.or.th"
-    "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
+    f"{BOT_GATEWAY_URL}{EXG_RATE_PATH}"
     "?start_period=2025-01-01&end_period=2025-01-02&currency=USD"
 )
 
@@ -303,11 +328,7 @@ def ping_token(token: str | None, *, timeout: float = 8.0) -> tuple[bool, str]:
     if not clean:
         return False, "Enter a key first, then test."
 
-    headers = {
-        "X-IBM-Client-Id": clean,
-        "Authorization": f"Bearer {clean}",
-        "accept": "application/json",
-    }
+    headers = build_bot_headers(clean)
     try:
         resp = httpx.get(_PING_URL, headers=headers, timeout=timeout)
     except (httpx.RequestError, OSError):
@@ -355,9 +376,9 @@ class BOTClient:
         # back to the centralized constant. Connect timeout stays constant.
         self.timeout_seconds = self._resolve_timeout_seconds()
 
-        self.gateway = "https://gateway.api.bot.or.th"
-        self.exg_path = "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
-        self.hol_path = "/financial-institutions-holidays/"
+        self.gateway = BOT_GATEWAY_URL
+        self.exg_path = EXG_RATE_PATH
+        self.hol_path = HOLIDAY_PATH
 
     @staticmethod
     def _resolve_timeout_seconds() -> float:
@@ -395,12 +416,7 @@ class BOTClient:
         real connection/timeout errors and on transient 5xx server errors
         (raised as BOTTransientServerError) with exponential backoff.
         """
-        clean_token = token.removeprefix("Bearer ").strip()
-        headers = {
-            "X-IBM-Client-Id": clean_token,
-            "Authorization": f"Bearer {clean_token}",
-            "accept": "application/json"
-        }
+        headers = build_bot_headers(token)
 
         max_retries = MAX_429_RETRIES
         for attempt_429 in range(max_retries):

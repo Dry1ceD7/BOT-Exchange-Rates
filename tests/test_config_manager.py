@@ -145,6 +145,23 @@ class TestDefaultSettingsKeys:
         """'api_timeout_seconds' is wired into the client and must remain."""
         assert "api_timeout_seconds" in DEFAULT_SETTINGS
 
+    def test_api_timeout_default_is_the_constant(self):
+        """F29: the default mirrors core.constants.API_TIMEOUT_SECONDS."""
+        from core.constants import API_TIMEOUT_SECONDS
+
+        assert DEFAULT_SETTINGS["api_timeout_seconds"] == API_TIMEOUT_SECONDS
+
+    def test_scheduler_skip_keys_default_off(self):
+        """F28: skip-weekends/holidays exist and default to False so
+        existing installs keep firing every day unchanged."""
+        assert DEFAULT_SETTINGS["scheduler_skip_weekends"] is False
+        assert DEFAULT_SETTINGS["scheduler_skip_holidays"] is False
+
+    def test_scheduler_last_run_not_seeded(self):
+        """'scheduler_last_run' is machine-local run state — never a default
+        (it must not be seeded, exported, or imported across PCs)."""
+        assert "scheduler_last_run" not in DEFAULT_SETTINGS
+
 
 class TestSettingsManagerReload:
     """Tests for reload() cache invalidation."""
@@ -383,13 +400,15 @@ class TestImportTypeCoercion:
         assert result["anomaly_threshold_pct"] == 7.5
         assert isinstance(result["anomaly_threshold_pct"], float)
 
-    def test_numeric_string_timeout_coerces_to_int(self, config_dir, tmp_path):
+    def test_numeric_string_timeout_coerces_to_float(self, config_dir, tmp_path):
+        # F29: the default is core.constants.API_TIMEOUT_SECONDS (a float),
+        # so imported strings coerce to float, matching the default's type.
         mgr = SettingsManager(config_dir=config_dir)
         src = str(tmp_path / "in.json")
         self._write_json(src, {"api_timeout_seconds": "30"})
         result = mgr.import_settings(src)
         assert result["api_timeout_seconds"] == 30
-        assert isinstance(result["api_timeout_seconds"], int)
+        assert isinstance(result["api_timeout_seconds"], float)
 
     def test_garbage_threshold_falls_back_to_default_with_warning(
         self, config_dir, tmp_path, caplog

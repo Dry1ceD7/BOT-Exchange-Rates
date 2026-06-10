@@ -952,7 +952,6 @@ class TestExrateWorkerBackupFirst:
 
     def test_existing_dest_backed_up_before_move(self, monkeypatch, tmp_path):
         from core.backup_manager import BackupManager
-
         from gui.panels import exrate_dialog
 
         # A pre-existing workbook the user confirmed overwriting.
@@ -984,7 +983,6 @@ class TestExrateWorkerBackupFirst:
 
     def test_new_dest_creates_no_backup(self, monkeypatch, tmp_path):
         from core.backup_manager import BackupManager
-
         from gui.panels import exrate_dialog
 
         # Creation path: dest does not exist yet — nothing to back up.
@@ -1012,7 +1010,6 @@ class TestExrateWorkerBackupFirst:
         self, monkeypatch, tmp_path
     ):
         from core.backup_manager import BackupError
-
         from gui.panels import exrate_dialog
 
         dest = tmp_path / "ExRate.xlsx"

@@ -27,7 +27,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import openpyxl
@@ -36,24 +36,16 @@ from openpyxl.utils import get_column_letter
 from core.audit_logger import AuditLogger
 from core.constants import MIN_DISK_SPACE_MB
 from core.constants import parse_date as _parse_date
+
+# ExRate fixed rate columns + Date header come from the single layout source
+# (core/exrate_sheet.py). Re-exported here so existing importers keep working.
+from core.exrate_sheet import EXRATE_DATE_HEADER, EXRATE_RATE_COLUMNS
 from core.logic import safe_to_decimal
 from core.workbook_io import atomic_save, build_cell_verifier, ensure_disk_space
 
 logger = logging.getLogger(__name__)
 
-# ExRate fixed rate columns (mirror core/exrate_sheet.py):
-#   A=Date, B=USD Buying TT, C=USD Selling, D=EUR Buying TT, E=EUR Selling.
-# Each entry: (1-based column, header label, currency, BOT api field).
-EXRATE_RATE_COLUMNS: tuple[tuple[int, str, str, str], ...] = (
-    (2, "USD Buying TT Rate", "USD", "buying_transfer"),
-    (3, "USD Selling Rate", "USD", "selling"),
-    (4, "EUR Buying TT Rate", "EUR", "buying_transfer"),
-    (5, "EUR Selling Rate", "EUR", "selling"),
-)
 DATA_START_ROW = 2
-
-# Column A header on the standard sheet (core/exrate_sheet.py HEADERS[0]).
-EXRATE_DATE_HEADER = "Date"
 
 # Refusal message for a sheet whose A-E headers do not match the standard
 # layout. Surfaced verbatim in the report and the run() status/error.
@@ -88,6 +80,20 @@ def validate_exrate_layout(ws) -> str | None:
 def rate_key(currency: str, rate_type: str) -> str:
     """Lookup key for the bot_rates map: ``"USD:buying_transfer"`` etc."""
     return f"{currency}:{rate_type}"
+
+
+def _stored_decimal(raw) -> Decimal | None:
+    """The cell's literal stored payload as an UNquantized Decimal.
+
+    Unlike safe_to_decimal this does NOT quantize — it exposes the exact
+    representation sitting in the cell, so the scanner can tell a canonical
+    4dp value apart from a >4dp float-noise encoding of the same value
+    (e.g. 32.50009999 for BOT 32.5001). None when the payload isn't numeric.
+    """
+    try:
+        return Decimal(str(raw))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
 
 
 @dataclass(slots=True)
@@ -152,8 +158,11 @@ def scan_exrate_corrections(
 
     A cell is flagged when, on a trading day, the stored 4dp value differs from
     BOT's published value — including a blank trading-day cell that BOT *does*
-    publish (recorded as a "missing rate filled" correction). A blank weekend/
-    holiday cell is correct by design and is never filled.
+    publish (recorded as a "missing rate filled" correction). A cell whose
+    QUANTIZED value matches BOT but whose stored payload carries >4dp float
+    noise is also rewritten to the canonical 4dp value (flagged "normalized
+    precision"). A blank weekend/holiday cell is correct by design and is
+    never filled.
 
     GUARD — the row-1 headers of columns A-E must match the standard
     core/exrate_sheet.py layout (see :func:`validate_exrate_layout`). On a
@@ -206,7 +215,32 @@ def scan_exrate_corrections(
 
             report.compared_cells += 1
             if old_val == bot_q:
-                continue  # already correct
+                stored = _stored_decimal(raw)
+                if stored is None or stored == bot_q:
+                    continue  # already correct and canonically stored
+                # F128: the cell holds a >4dp representation of the RIGHT
+                # value (legacy float noise) — quantized it matches BOT, but
+                # the stored payload does not. Rewrite the canonical 4dp
+                # Decimal so the sheet is exact; flagged distinctly so the
+                # report/CSV shows it as normalization, not a rate change.
+                report.changes.append(
+                    RateChange(
+                        row=row,
+                        col=col,
+                        cell=f"{get_column_letter(col)}{row}",
+                        rate_date=rate_date,
+                        column_label=label,
+                        currency=ccy,
+                        rate_type=rate_type,
+                        old_value=stored,
+                        new_value=bot_q,
+                        reason=(
+                            f"normalized precision: stored {stored} "
+                            f"rewritten as canonical 4dp {bot_q}"
+                        ),
+                    )
+                )
+                continue
 
             reason = (
                 "missing rate filled from BOT"
@@ -323,14 +357,17 @@ class StandaloneRateAuditor:
         target_year = min(existing_dates).year
         start_str = f"{target_year - 1}-12-20"
         # Audit only verifies dates already in the sheet, so bound the BOT
-        # fetch to the sheet's own span. Do NOT inject bot_today() (the
-        # standard build does, to extend to today): for an old archived ledger
-        # that would pull years of unrelated rates on the 4GB target.
+        # fetch to the sheet's own span. extend_to_today=False keeps the
+        # preload from injecting bot_today() (the standard build does, to
+        # extend to today): for an old archived ledger that would pull years
+        # of unrelated rates on the 4GB target.
         all_target_dates = set(existing_dates)
         (
             logic_engine, usd_selling, eur_selling,
             usd_buying, eur_buying, _usd_data, _eur_data,
-        ) = await self._engine._preload_api_data(all_target_dates, start_str)
+        ) = await self._engine._preload_api_data(
+            all_target_dates, start_str, extend_to_today=False,
+        )
         bot_rates = {
             rate_key("USD", "buying_transfer"): usd_buying,
             rate_key("USD", "selling"): usd_selling,

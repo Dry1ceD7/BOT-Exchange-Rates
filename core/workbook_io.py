@@ -16,6 +16,7 @@ see the patch — module objects are singletons.
 
 import contextlib
 import gc
+import logging
 import shutil
 from collections.abc import Callable
 from datetime import date, datetime
@@ -24,6 +25,10 @@ from pathlib import Path
 
 import openpyxl
 from openpyxl.utils import get_column_letter
+
+from core.constants import SKIP_SHEET_NAMES
+
+logger = logging.getLogger(__name__)
 
 
 class WorkbookVerifyError(OSError):
@@ -53,6 +58,90 @@ def ensure_disk_space(target_dir: Path, min_mb: int) -> None:
             f"Insufficient disk space ({free_mb}MB free, "
             f"need {min_mb}MB). File NOT saved."
         )
+
+
+def atomic_write_text(path: Path, payload: str) -> None:
+    """Atomically (over)write a small text file (the round-7 temp + replace
+    idiom — text twin of :func:`atomic_save`).
+
+    Writes ``payload`` to a sibling temp file in the SAME directory then
+    ``Path.replace`` swaps it in, so the replace stays on one filesystem and
+    a crash mid-write leaves the previous good file untouched. On any
+    failure the partial temp file is removed and never left behind.
+
+    NOTE: ``core.config_manager.SettingsManager._save_locked`` deliberately
+    does NOT use this helper: several long-lived SettingsManager instances
+    save concurrently, so the unique temp name from
+    ``tempfile.NamedTemporaryFile`` is load-bearing there — the fixed
+    ``.tmp~`` sibling used here would let two savers race on one temp path.
+    """
+    tmp_path = path.with_name(f"{path.name}.tmp~")
+    try:
+        tmp_path.write_text(payload, encoding="utf-8")
+        tmp_path.replace(path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        raise
+
+
+def is_standalone_exrate_workbook(
+    filepath: str,
+    *,
+    date_header: str = "Date",
+    currency_header: str = "Cur",
+    scan_depth: int = 5,
+) -> bool:
+    """Read-only probe: is ``filepath`` a standalone ExRate workbook?
+
+    A standalone ExRate workbook has an ``ExRate`` sheet and NO month-tab
+    sheet carrying the ledger date/currency headers (both in one row) within
+    its first ``scan_depth`` rows. Single owner of the probe shared by
+    ``LedgerEngine._detect_standalone_exrate`` (which passes its
+    ``target_cols`` labels) and main.py's headless labeller (which keeps the
+    literal ``'Date'``/``'Cur'`` defaults — the engine's default target_cols
+    are those same literals, so the two callers' match semantics were
+    already identical).
+
+    Depth note: the header SCANS (``core.excel_io.find_header_row``) look at
+    rows 1-10; this probe deliberately keeps the shallower 5-row window both
+    inline copies always used — it only needs to recognise a month tab, it
+    never maps columns.
+
+    Featherweight: read-only load, try/finally close + gc. ANY probe failure
+    (including OSError on a locked/corrupt file) returns False — the probe
+    must never mislabel a ledger or crash the caller.
+    """
+    if not filepath.lower().endswith(".xlsx"):
+        return False
+    wb = None
+    try:
+        wb = openpyxl.load_workbook(filepath, read_only=True)
+        if "ExRate" not in wb.sheetnames:
+            return False
+        for sheet_name in wb.sheetnames:
+            if sheet_name in SKIP_SHEET_NAMES:
+                continue
+            ws = wb[sheet_name]
+            for row in ws.iter_rows(
+                min_row=1, max_row=scan_depth, values_only=True,
+            ):
+                row_strs = [
+                    str(c).strip() if c is not None else "" for c in row
+                ]
+                if date_header in row_strs and currency_header in row_strs:
+                    # A month tab exists → normal ledger, not standalone.
+                    return False
+        return True
+    except Exception as exc:  # noqa: BLE001 — probe must never propagate
+        logger.debug("Standalone detection probe failed: %s", exc)
+        return False
+    finally:
+        if wb is not None:
+            with contextlib.suppress(OSError):
+                wb.close()
+        del wb
+        gc.collect()
 
 
 def atomic_save(

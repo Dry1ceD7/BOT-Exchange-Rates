@@ -487,16 +487,16 @@ class CacheDB:
     def get_multi_rate(
         self, target_date: date, currency: str, rate_type: str,
     ) -> Decimal | None:
-        """Get a single rate from the multi-currency table."""
-        date_str = target_date.strftime("%Y-%m-%d")
-        row = self._conn().execute(
-            "SELECT value FROM rates_multi "
-            "WHERE date = ? AND currency = ? AND rate_type = ?",
-            (date_str, currency, rate_type),
-        ).fetchone()
-        if row is None or row[0] is None:
-            return None
-        return Decimal(str(row[0]))
+        """Get a single rate from the multi-currency table.
+
+        Thin exact-date wrapper over :meth:`get_rates_multi` (the single
+        owner of the rates_multi read path) — a one-day range lookup.
+        No runtime caller; retained as a convenience consumed by the CSV
+        import/round-trip test suites.
+        """
+        return self.get_rates_multi(
+            target_date, target_date, currency, rate_type,
+        ).get(target_date)
 
     def get_rates_multi(
         self, start: date, end: date, currency: str, rate_type: str,
@@ -636,26 +636,6 @@ class CacheDB:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
-
-    def get_stats(self) -> dict:
-        """Returns cache statistics for UI display."""
-        conn = self._conn()
-        rates_count = conn.execute("SELECT COUNT(*) FROM rates").fetchone()[0]
-        hol_count = conn.execute("SELECT COUNT(*) FROM holidays").fetchone()[0]
-        try:
-            multi_count = conn.execute(
-                "SELECT COUNT(*) FROM rates_multi"
-            ).fetchone()[0]
-        except sqlite3.OperationalError:
-            multi_count = 0
-        db_file = Path(self.db_path)
-        size_bytes = db_file.stat().st_size if db_file.exists() else 0
-        return {
-            "rates": rates_count,
-            "rates_multi": multi_count,
-            "holidays": hol_count,
-            "size_kb": round(size_bytes / 1024, 1)
-        }
 
 
 def _atexit_close(db_ref) -> None:

@@ -329,6 +329,30 @@ def test_headless_exit_nothing_to_do_on_empty_folder(monkeypatch, tmp_path):
     assert main._run_headless(args) == main.EXIT_NOTHING
 
 
+def test_headless_json_emits_summary_even_with_zero_files(
+    monkeypatch, tmp_path, capsys,
+):
+    """--json always prints a summary object, even on the EXIT_NOTHING path,
+    so machine parsers never receive an empty stdout."""
+    import json as _json
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_tokens_present", lambda: True)
+    empty = tmp_path / "input"
+    empty.mkdir()
+    args = _headless_args(main, input=str(empty), json=True, dry_run=True)
+    assert main._run_headless(args) == main.EXIT_NOTHING
+    out = capsys.readouterr().out.strip()
+    payload = _json.loads(out)
+    assert payload == {
+        "succeeded": 0,
+        "failed": 0,
+        "total": 0,
+        "dry_run": True,
+        "audit_log": None,
+        "errors": [],
+    }
+
+
 # ── --resume flag (crash-recovery) ───────────────────────────────────────
 def test_headless_resume_no_manifest_exits_nothing(monkeypatch):
     """--resume with no saved batch returns EXIT_NOTHING (nothing to do)."""

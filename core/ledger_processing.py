@@ -27,6 +27,7 @@ from core.constants import (
     SKIP_SHEET_NAMES,
     parse_date,
 )
+from core.excel_io import find_header_row
 
 logger = logging.getLogger(__name__)
 
@@ -163,35 +164,14 @@ def prescan_target_dates_and_currencies(
             if sheet_name in SKIP_SHEET_NAMES:
                 continue
             ws = wb_scan[sheet_name]
-            header_row_idx = None
-            col_indices: dict[str, int] = {}
-            for row_idx, row in enumerate(
-                ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
-            ):
-                row_strs = [
-                    str(c).strip() if c is not None else "" for c in row
-                ]
-                if source_label in row_strs:
-                    header_row_idx = row_idx
-                    # A duplicate source-date/currency column is resolved
-                    # deterministically to the FIRST occurrence (not last-wins,
-                    # which silently depends on column order). Warn so the
-                    # operator can correct the sheet.
-                    for ci, val in enumerate(row_strs):
-                        for key, label in (
-                            ("source", source_label),
-                            ("currency", currency_label),
-                        ):
-                            if label is not None and val == label:
-                                if key in col_indices:
-                                    logger.warning(
-                                        "Sheet '%s': duplicate '%s' header "
-                                        "column — using the first occurrence.",
-                                        sheet_name, label,
-                                    )
-                                else:
-                                    col_indices[key] = ci
-                    break
+            # Header location + first-occurrence duplicate resolution are
+            # owned by core.excel_io.find_header_row (shared with the ledger
+            # write path's scan_sheet_headers and core.prescan).
+            header_row_idx, col_indices = find_header_row(
+                ws,
+                (("source", source_label), ("currency", currency_label)),
+                sheet_name=sheet_name,
+            )
 
             if header_row_idx is None or "source" not in col_indices:
                 continue

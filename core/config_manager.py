@@ -18,6 +18,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from core.constants import API_TIMEOUT_SECONDS
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS: dict[str, Any] = {
@@ -26,7 +28,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     #          Only on-screen text is translated; logs/audit CSV stay English.
     "language": "en",
     "auto_update": True,
-    "api_timeout_seconds": 10,
+    # Single source of truth for the default API read timeout is
+    # core.constants.API_TIMEOUT_SECONDS (BOTClient falls back to the same
+    # constant when this key is missing or invalid).
+    "api_timeout_seconds": API_TIMEOUT_SECONDS,
     # Rate type for ledger formula injection. USD/EUR (and extra currencies)
     # support buying_transfer ("Buying TT") and selling only — those are the
     # rates fetched/stored and the only ExRate columns that exist.
@@ -37,6 +42,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "scheduler_enabled": False,
     "scheduler_time": "23:00",
     "scheduler_paths": [],
+    # Skip a scheduled run when the trigger day is a weekend / BOT holiday.
+    # Off by default — existing installs keep running every day unchanged.
+    "scheduler_skip_weekends": False,
+    "scheduler_skip_holidays": False,
+    # NOTE: "scheduler_last_run" is deliberately NOT a default here — it is
+    # machine-local run state (written by the scheduler after each run) and
+    # must never be seeded, exported, or imported across PCs.
 }
 
 SETTINGS_FILENAME = "settings.json"
@@ -125,7 +137,14 @@ class SettingsManager:
             self._save_locked(settings)
 
     def _save_locked(self, settings: dict[str, Any]) -> None:
-        """Persist settings to disk and update cache. Caller holds the lock."""
+        """Persist settings to disk and update cache. Caller holds the lock.
+
+        Deliberately NOT ``core.workbook_io.atomic_write_text``: several
+        long-lived SettingsManager instances (GUI, scheduler, engine, API
+        client, i18n) can save concurrently, so the unique temp name from
+        ``tempfile.NamedTemporaryFile`` is load-bearing — the shared helper's
+        fixed ``.tmp~`` sibling would let two savers race on one temp path.
+        """
         Path(self._config_dir).mkdir(parents=True, exist_ok=True)
         merged = dict(DEFAULT_SETTINGS)
         merged.update(settings)

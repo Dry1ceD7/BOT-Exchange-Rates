@@ -122,11 +122,29 @@ class TestScanCorrections:
         assert report.unverifiable == 1  # the USD buy cell could not be verified
         wb.close()
 
-    def test_float_noise_does_not_false_positive(self):
-        # A legacy float cell that rounds to BOT's 4dp value must NOT be flagged.
+    def test_float_noise_is_normalized_to_canonical_4dp(self):
+        # F128: a legacy float cell that rounds to BOT's 4dp value is the
+        # RIGHT rate stored with >4dp noise — not a rate change, but the
+        # payload is rewritten to the canonical 4dp value.
         d = date(2026, 5, 27)
         wb, ws = _sheet([(d, 32.50009999, None, None, None, "")])
         bot = _bot(USD_buy={d: D("32.5001")})
+        report = scan_exrate_corrections(ws, bot, set())
+        assert report.change_count == 1
+        ch = report.changes[0]
+        assert ch.old_value == D("32.50009999")  # the stored payload
+        assert ch.new_value == D("32.5001")
+        assert ch.new_value.as_tuple().exponent == -4
+        assert "normalized precision" in ch.reason
+        wb.close()
+
+    def test_exact_stored_representation_is_not_normalized(self):
+        # A payload whose stored representation already equals the BOT value
+        # numerically (canonical float / fewer trailing zeros) needs no
+        # normalization — zero changes.
+        d = date(2026, 5, 27)
+        wb, ws = _sheet([(d, 32.5001, D("32.779"), None, None, "")])
+        bot = _bot(USD_buy={d: D("32.5001")}, USD_sell={d: D("32.7790")})
         report = scan_exrate_corrections(ws, bot, set())
         assert report.change_count == 0
         wb.close()

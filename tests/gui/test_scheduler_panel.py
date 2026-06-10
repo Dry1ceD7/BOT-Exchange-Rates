@@ -1187,6 +1187,19 @@ class TestSchedulerPanelLastRun:
         assert "3 OK, 0 failed" in panel._lbl_last_run.cget("text")
         panel.destroy()
 
+    def test_announce_scheduled_run_refreshes_panel(self, monkeypatch):
+        """F77 wiring: a scheduled fire calls the panel's refresh hook
+        in-session (the persisted record alone only covers future loads)."""
+        from gui.app import BOTExrateApp
+
+        monkeypatch.setattr("gui.app._settings_mgr.set", lambda *a, **k: None)
+        app = MagicMock()
+        app._tray = None  # no tray on this platform
+
+        BOTExrateApp._announce_scheduled_run(app, success=2, fail=0)
+
+        app.scheduler_panel.refresh_last_run.assert_called_once_with()
+
     def test_malformed_last_run_record_hides_row(self, tk_root, _last_run_key):
         settings = {
             "scheduler_paths": [],

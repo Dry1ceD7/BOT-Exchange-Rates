@@ -7,7 +7,7 @@ BOT Exchange Rate Processor — Live Processing Console Panel
 Read-only CTkTextbox that tails the EventBus queue, providing terminal-like
 feedback inside the GUI (e.g., "Fetching USD... Complete").
 
-Color-tagged rendering: errors appear red, successes green, progress blue.
+Color-tagged rendering: errors appear red, successes green, warnings amber.
 
 SFFB: Strict < 200 lines.
 """
@@ -92,10 +92,19 @@ class LiveConsolePanel(SafePanel, ctk.CTkFrame):
 
     @property
     def event_bus(self) -> EventBus:
+        """Return the panel's EventBus.
+
+        Test seam: runtime producers push to the app-owned bus injected via
+        the constructor (gui/app.py); only the widget tests read this back.
+        """
         return self._bus
 
     def append_line(self, text: str, tag: str | None = None) -> None:
-        """Append a single line to the console with optional color tag."""
+        """Append a single line to the console with optional color tag.
+
+        Test seam: the runtime render path is _poll() draining the EventBus;
+        this direct-append API is exercised only by the widget tests.
+        """
         self._textbox.configure(state="normal")
         if tag:
             # Insert with color tag via underlying Tk Text widget
@@ -107,7 +116,11 @@ class LiveConsolePanel(SafePanel, ctk.CTkFrame):
         self._textbox.see("end")
 
     def clear(self) -> None:
-        """Clear all console content."""
+        """Clear all console content.
+
+        Test seam: no runtime caller clears the console; kept as a stable
+        GUI surface exercised by the widget tests.
+        """
         self._textbox.configure(state="normal")
         self._textbox.delete("1.0", "end")
         self._textbox.configure(state="disabled")
@@ -159,7 +172,6 @@ class LiveConsolePanel(SafePanel, ctk.CTkFrame):
                 etype = event.get("type", "log")
                 prefix_map = {
                     "log":      ("[LOG]", "log"),
-                    "progress": ("[...]", "accent"),
                     "error":    ("[ERR]", "error"),
                     "success":  ("[OK ]", "success"),
                     "warning":  ("[WRN]", "warning"),

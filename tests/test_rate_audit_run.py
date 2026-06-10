@@ -54,7 +54,10 @@ def _fake_engine():
     eur_selling = {WED: Decimal("37.5000")}
     logic_engine = SimpleNamespace(holidays=set())
 
-    async def _preload(_dates, _start):
+    async def _preload(_dates, _start, *, extend_to_today=True):
+        # F60: the audit is bounded by the sheet's own dates — it must never
+        # ask the preload to extend the fetch window to today.
+        assert extend_to_today is False
         return (logic_engine, usd_selling, eur_selling,
                 usd_buying, eur_buying, {}, {})
 

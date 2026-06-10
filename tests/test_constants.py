@@ -7,13 +7,17 @@ plausible-year bounds, day-first policy) and the BOT business-date helper.
 ---------------------------------------------------------------------------
 """
 
+import os
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, localcontext
+
+import pytest
 
 from core.constants import (
     LEDGER_SUPPORTED_CURRENCIES,
     PER_100_UNIT_CURRENCIES,
     bot_today,
+    collect_excel_files,
     format_rate_value,
     parse_date,
     parse_decimal_safe,
@@ -189,3 +193,43 @@ class TestParseDecimalSafeNoRounding:
 
     def test_non_numeric_returns_none(self):
         assert parse_decimal_safe("not-a-rate") is None
+
+
+class TestCollectExcelFiles:
+    """Shared directory-listing helper (main.py / scheduler / GUI sites)."""
+
+    def test_directory_sorted_full_paths_dotfiles_skipped(self, tmp_path):
+        (tmp_path / "b.xlsx").write_text("x")
+        (tmp_path / "a.xlsm").write_text("x")
+        (tmp_path / ".hidden.xlsx").write_text("x")
+        (tmp_path / "notes.txt").write_text("x")
+        result = collect_excel_files(str(tmp_path))
+        assert result == [
+            os.path.join(str(tmp_path), "a.xlsm"),
+            os.path.join(str(tmp_path), "b.xlsx"),
+        ]
+
+    def test_single_excel_file_yields_itself(self, tmp_path):
+        fp = tmp_path / "ledger.xlsx"
+        fp.write_text("x")
+        assert collect_excel_files(str(fp)) == [str(fp)]
+
+    def test_single_non_excel_file_yields_empty(self, tmp_path):
+        fp = tmp_path / "ledger.csv"
+        fp.write_text("x")
+        assert collect_excel_files(str(fp)) == []
+
+    def test_case_insensitive_extension_match(self, tmp_path):
+        (tmp_path / "UPPER.XLSX").write_text("x")
+        result = collect_excel_files(str(tmp_path))
+        assert result == [os.path.join(str(tmp_path), "UPPER.XLSX")]
+
+    def test_dedup_false_returns_raw_listing(self, tmp_path):
+        (tmp_path / "a.xlsx").write_text("x")
+        assert collect_excel_files(str(tmp_path), dedup=False) == [
+            os.path.join(str(tmp_path), "a.xlsx"),
+        ]
+
+    def test_missing_directory_raises_oserror(self, tmp_path):
+        with pytest.raises(OSError):
+            collect_excel_files(str(tmp_path / "nope"))
