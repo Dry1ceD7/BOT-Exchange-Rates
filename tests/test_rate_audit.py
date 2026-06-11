@@ -13,9 +13,11 @@ import openpyxl
 
 from core.rate_audit import (
     EXRATE_RATE_COLUMNS,
+    LAYOUT_ERROR_MSG,
     apply_corrections,
     rate_key,
     scan_exrate_corrections,
+    validate_exrate_layout,
 )
 
 HEADERS = [
@@ -24,12 +26,12 @@ HEADERS = [
 ]
 
 
-def _sheet(rows):
+def _sheet(rows, headers=None):
     """Build an ExRate worksheet. rows = list of (date, ub, us, eb, es, label)."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "ExRate"
-    ws.append(HEADERS)
+    ws.append(headers if headers is not None else HEADERS)
     for r in rows:
         ws.append(list(r))
     return wb, ws
@@ -120,11 +122,29 @@ class TestScanCorrections:
         assert report.unverifiable == 1  # the USD buy cell could not be verified
         wb.close()
 
-    def test_float_noise_does_not_false_positive(self):
-        # A legacy float cell that rounds to BOT's 4dp value must NOT be flagged.
+    def test_float_noise_is_normalized_to_canonical_4dp(self):
+        # F128: a legacy float cell that rounds to BOT's 4dp value is the
+        # RIGHT rate stored with >4dp noise — not a rate change, but the
+        # payload is rewritten to the canonical 4dp value.
         d = date(2026, 5, 27)
         wb, ws = _sheet([(d, 32.50009999, None, None, None, "")])
         bot = _bot(USD_buy={d: D("32.5001")})
+        report = scan_exrate_corrections(ws, bot, set())
+        assert report.change_count == 1
+        ch = report.changes[0]
+        assert ch.old_value == D("32.50009999")  # the stored payload
+        assert ch.new_value == D("32.5001")
+        assert ch.new_value.as_tuple().exponent == -4
+        assert "normalized precision" in ch.reason
+        wb.close()
+
+    def test_exact_stored_representation_is_not_normalized(self):
+        # A payload whose stored representation already equals the BOT value
+        # numerically (canonical float / fewer trailing zeros) needs no
+        # normalization — zero changes.
+        d = date(2026, 5, 27)
+        wb, ws = _sheet([(d, 32.5001, D("32.779"), None, None, "")])
+        bot = _bot(USD_buy={d: D("32.5001")}, USD_sell={d: D("32.7790")})
         report = scan_exrate_corrections(ws, bot, set())
         assert report.change_count == 0
         wb.close()
@@ -177,6 +197,83 @@ class TestScanCorrections:
             2: D("32.4507"), 3: D("32.7790"),
             4: D("37.0000"), 5: D("37.5000"),
         }
+        wb.close()
+
+
+class TestLayoutGuard:
+    """F9 — a custom-layout 'ExRate' sheet (e.g. GBP columns) must be refused;
+    auditing it would overwrite foreign-currency cells with USD/EUR values."""
+
+    def test_custom_layout_sheet_yields_zero_corrections(self):
+        d = date(2026, 5, 27)  # trading day
+        gbp_headers = [
+            "Date", "GBP Buying TT", "GBP Selling", "Holidays/Weekend",
+        ]
+        wb, ws = _sheet(
+            [(d, D("42.1234"), D("42.5678"), "")], headers=gbp_headers,
+        )
+        bot = _bot(USD_buy={d: D("32.4507")}, USD_sell={d: D("32.7790")})
+        report = scan_exrate_corrections(ws, bot, set())
+        assert report.layout_error == LAYOUT_ERROR_MSG
+        assert report.change_count == 0
+        assert report.scanned_rows == 0
+        assert report.compared_cells == 0
+        # The GBP cells survive untouched even if apply is (wrongly) called.
+        apply_corrections(ws, report)
+        assert ws.cell(row=2, column=2).value == D("42.1234")
+        assert ws.cell(row=2, column=3).value == D("42.5678")
+        wb.close()
+
+    def test_extra_currency_column_beyond_e_is_valid(self):
+        # Standard A-E layout + an appended "GBP Rate" column F: still the
+        # standard sheet — the audit runs on B-E and never touches F.
+        d = date(2026, 5, 27)
+        headers = HEADERS[:5] + ["GBP Rate", "Holidays/Weekend"]
+        wb, ws = _sheet(
+            [(d, D("32.0000"), D("32.7790"), D("37.0"), D("37.5"),
+              D("42.1234"), "")],
+            headers=headers,
+        )
+        bot = _bot(
+            USD_buy={d: D("32.4507")}, USD_sell={d: D("32.7790")},
+            EUR_buy={d: D("37.0000")}, EUR_sell={d: D("37.5000")},
+        )
+        report = scan_exrate_corrections(ws, bot, set())
+        assert report.layout_error is None
+        assert report.change_count == 1
+        assert report.changes[0].cell == "B2"
+        assert all(c.col <= 5 for c in report.changes)  # F is out of scope
+        wb.close()
+
+    def test_header_check_tolerates_whitespace_and_case(self):
+        d = date(2026, 5, 27)
+        headers = [
+            "  date ", " USD BUYING TT RATE", "usd selling rate ",
+            " EUR Buying TT Rate", "eur SELLING rate", "Holidays/Weekend",
+        ]
+        wb, ws = _sheet(
+            [(d, D("32.0000"), None, None, None, "")], headers=headers,
+        )
+        bot = _bot(USD_buy={d: D("32.4507")})
+        report = scan_exrate_corrections(ws, bot, set())
+        assert report.layout_error is None
+        assert report.change_count == 1
+        assert report.changes[0].new_value == D("32.4507")
+        wb.close()
+
+    def test_missing_or_blank_header_row_is_rejected(self):
+        # No header row at all (e.g. data starts at row 1) is non-standard.
+        d = date(2026, 5, 27)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "ExRate"
+        ws.append([d, D("32.0000"), None, None, None, ""])
+        assert validate_exrate_layout(ws) == LAYOUT_ERROR_MSG
+        report = scan_exrate_corrections(
+            ws, _bot(USD_buy={d: D("32.4507")}), set(),
+        )
+        assert report.layout_error == LAYOUT_ERROR_MSG
+        assert report.change_count == 0
         wb.close()
 
 

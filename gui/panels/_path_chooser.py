@@ -51,7 +51,7 @@ def choose_path_to_remove(parent, paths: list[str]) -> int | None:
         # would return the last segment instead. Keep exact display behavior.
         label = os.path.basename(path) or path  # noqa: PTH119
         ctk.CTkRadioButton(
-            dialog, text=f"📁 {label}",
+            dialog, text=label,
             variable=selected, value=i,
             font=ctk.CTkFont(size=12),
             text_color=t["modal_text"],

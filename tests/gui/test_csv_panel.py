@@ -318,7 +318,7 @@ class TestCSVPanelHumanizedErrors:
 # ── Finding: Export of an empty cache shows success-green '0 rows' ──
 class TestCSVPanelExportEmptyCache:
     """count==0 export uses warning styling + an 'empty cache' message,
-    not the success-green '✓ Exported 0 rate rows'."""
+    not the success-green 'OK: Exported 0 rate rows'."""
 
     def _inline_thread_factory(self):
         def _inline_thread(target=None, daemon=None, name=None):
@@ -360,7 +360,7 @@ class TestCSVPanelExportEmptyCache:
         # Not the success-green color; uses the warning token instead.
         assert label.cget("text_color") == t["warning"]
         assert label.cget("text_color") != t["modal_success"]
-        # The message no longer reads as a successful "✓ Exported 0 rows".
+        # The message no longer reads as a successful "OK: Exported 0 rows".
         text = label.cget("text")
         assert "0 rate rows" not in text
         panel.destroy()
@@ -460,7 +460,7 @@ class TestCSVPanelImportSummary:
         patched_catalog = dict(i18n_mod.CATALOG)
         patched_catalog["csv.import_ok_detail"] = {
             "en": (
-                "✓ Imported {count} entries: {currencies} — {start} to {end}. "
+                "OK: Imported {count} entries: {currencies} — {start} to {end}. "
                 "These rates are now used automatically by Process Batch."
             ),
         }

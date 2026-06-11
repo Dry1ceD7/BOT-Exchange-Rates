@@ -14,6 +14,9 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
+        with:
+          # Pinned for reproducible CI (F171). Keep in sync with v3-release.yml.
+          version: "0.10.11"
 
       - name: Install Python 3.12
         run: uv python install 3.12
@@ -24,8 +27,36 @@ jobs:
       - name: Ruff lint
         run: uv run ruff check .
 
-      - name: Pytest
-        run: uv run pytest tests/
+      # requirements*.txt are generated artifacts derived from uv.lock.
+      # Re-export and fail on any diff so the manifests can never drift (F164).
+      - name: Verify requirements exports match uv.lock
+        run: |
+          uv export --format requirements.txt --no-dev --no-hashes --no-emit-project -o requirements.txt
+          uv export --format requirements.txt --only-dev --no-hashes --no-emit-project -o requirements-dev.txt
+          git diff --exit-code requirements.txt requirements-dev.txt
+
+      # The GUI test lane (tests/gui) auto-skips without a display, so a
+      # virtual X server is provisioned to actually exercise it (F2).
+      - name: Install virtual display (xvfb)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
+      - name: Pytest (full suite under virtual display)
+        run: xvfb-run -a uv run pytest tests/ -q
+
+      # Guard against the GUI lane silently skipping (e.g. xvfb breakage):
+      # run tests/gui alone under xvfb and require the pytest summary line to
+      # report at least one "passed". If every test skipped (no display), the
+      # summary contains only "skipped" and this step fails the build (F2).
+      - name: Guard - GUI tests must actually run
+        run: |
+          summary=$(xvfb-run -a uv run pytest tests/gui -q -p no:cacheprovider 2>&1 | tail -1)
+          echo "GUI lane summary: ${summary}"
+          if ! echo "${summary}" | grep -qE '[0-9]+ passed'; then
+            echo "ERROR: GUI tests did not pass under xvfb (all skipped or failed)." >&2
+            exit 1
+          fi
 
   security-audit:
     name: Dependency Audit
@@ -36,6 +67,9 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
+        with:
+          # Pinned for reproducible CI (F171). Keep in sync with v3-release.yml.
+          version: "0.10.11"
 
       # Audit the locked project environment (not an ephemeral uvx env).
       # Blocking: a vulnerable transitive/runtime pin fails CI.

@@ -12,10 +12,13 @@ v3.2.2: In-memory caching to avoid re-reading disk on every get() call.
 
 import json
 import logging
+import math
 import tempfile
 import threading
 from pathlib import Path
 from typing import Any
+
+from core.constants import API_TIMEOUT_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +28,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     #          Only on-screen text is translated; logs/audit CSV stay English.
     "language": "en",
     "auto_update": True,
-    "api_timeout_seconds": 10,
+    # Single source of truth for the default API read timeout is
+    # core.constants.API_TIMEOUT_SECONDS (BOTClient falls back to the same
+    # constant when this key is missing or invalid).
+    "api_timeout_seconds": API_TIMEOUT_SECONDS,
     # Rate type for ledger formula injection. USD/EUR (and extra currencies)
     # support buying_transfer ("Buying TT") and selling only — those are the
     # rates fetched/stored and the only ExRate columns that exist.
@@ -36,6 +42,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "scheduler_enabled": False,
     "scheduler_time": "23:00",
     "scheduler_paths": [],
+    # Skip a scheduled run when the trigger day is a weekend / BOT holiday.
+    # Off by default — existing installs keep running every day unchanged.
+    "scheduler_skip_weekends": False,
+    "scheduler_skip_holidays": False,
+    # NOTE: "scheduler_last_run" is deliberately NOT a default here — it is
+    # machine-local run state (written by the scheduler after each run) and
+    # must never be seeded, exported, or imported across PCs.
 }
 
 SETTINGS_FILENAME = "settings.json"
@@ -46,6 +59,11 @@ SETTINGS_FILENAME = "settings.json"
 # key is ever added to the settings dict by mistake it can never leak through the
 # multi-PC export/import path. Matching is case-insensitive substring on the key.
 _SENSITIVE_KEY_MARKERS = ("token", "secret", "password", "passwd", "apikey", "api_key", "key")
+
+# Upper bound for the anomaly guardian threshold (%). Shared with the GUI
+# validator (gui/panels/settings_modal.py) so an imported settings file cannot
+# smuggle in a value the modal itself would reject.
+MAX_ANOMALY_THRESHOLD_PCT = 1000.0
 
 
 class SettingsManager:
@@ -78,24 +96,34 @@ class SettingsManager:
         with self._lock:
             if not force and self._cache is not None:
                 return dict(self._cache)
-            if not Path(self._filepath).exists():
-                self._cache = dict(DEFAULT_SETTINGS)
-                return dict(DEFAULT_SETTINGS)
-            try:
-                with Path(self._filepath).open(encoding="utf-8") as f:
-                    data = json.load(f)
-                # Merge with defaults to fill any missing keys
-                merged = dict(DEFAULT_SETTINGS)
-                merged.update(data)
-                self._cache = merged
-                return dict(merged)
-            except (json.JSONDecodeError, OSError, TypeError) as e:
-                logger.warning(
-                    "Settings file corrupt or unreadable (%s). Using defaults.",
-                    e,
-                )
-                self._cache = dict(DEFAULT_SETTINGS)
-                return dict(DEFAULT_SETTINGS)
+            merged = self._read_disk_locked()
+            self._cache = merged
+            return dict(merged)
+
+    def _read_disk_locked(self) -> dict[str, Any]:
+        """Read settings.json and merge with defaults. Caller holds the lock.
+
+        Never consults the in-memory cache: used by paths that must see the
+        latest on-disk state (set/import merge bases), because multiple
+        long-lived SettingsManager instances coexist (GUI, scheduler, engine,
+        API client, i18n) and a per-instance cache can be stale.
+        Returns defaults on any error.
+        """
+        if not Path(self._filepath).exists():
+            return dict(DEFAULT_SETTINGS)
+        try:
+            with Path(self._filepath).open(encoding="utf-8") as f:
+                data = json.load(f)
+            # Merge with defaults to fill any missing keys
+            merged = dict(DEFAULT_SETTINGS)
+            merged.update(data)
+            return merged
+        except (json.JSONDecodeError, OSError, TypeError) as e:
+            logger.warning(
+                "Settings file corrupt or unreadable (%s). Using defaults.",
+                e,
+            )
+            return dict(DEFAULT_SETTINGS)
 
     def reload(self) -> dict[str, Any]:
         """Force re-read from disk, bypassing cache."""
@@ -109,7 +137,14 @@ class SettingsManager:
             self._save_locked(settings)
 
     def _save_locked(self, settings: dict[str, Any]) -> None:
-        """Persist settings to disk and update cache. Caller holds the lock."""
+        """Persist settings to disk and update cache. Caller holds the lock.
+
+        Deliberately NOT ``core.workbook_io.atomic_write_text``: several
+        long-lived SettingsManager instances (GUI, scheduler, engine, API
+        client, i18n) can save concurrently, so the unique temp name from
+        ``tempfile.NamedTemporaryFile`` is load-bearing — the shared helper's
+        fixed ``.tmp~`` sibling would let two savers race on one temp path.
+        """
         Path(self._config_dir).mkdir(parents=True, exist_ok=True)
         merged = dict(DEFAULT_SETTINGS)
         merged.update(settings)
@@ -152,19 +187,15 @@ class SettingsManager:
         Holds the lock across the full load→modify→save cycle so two
         concurrent set() calls cannot clobber each other (the scheduler
         runs on a background thread, so concurrent sets are real).
+
+        The merge base is re-read from DISK, never this instance's cache:
+        several long-lived SettingsManager instances coexist (GUI app,
+        scheduler panel, settings modal, engine, API client, i18n), so a
+        stale per-instance cache would silently revert keys persisted by a
+        sibling instance (lost update). _save_locked refreshes the cache.
         """
         with self._lock:
-            if self._cache is not None:
-                settings = dict(self._cache)
-                settings[key] = value
-                self._save_locked(settings)
-                return
-        # Cache was cold — populate it from disk (acquires the lock), then
-        # retry the locked read-modify-write.
-        self._load_from_disk()
-        with self._lock:
-            settings = dict(self._cache) if self._cache is not None \
-                else dict(DEFAULT_SETTINGS)
+            settings = self._read_disk_locked()
             settings[key] = value
             self._save_locked(settings)
 
@@ -186,6 +217,63 @@ class SettingsManager:
             if not any(m in k.lower() for m in _SENSITIVE_KEY_MARKERS)
         }
 
+    @staticmethod
+    def _coerce_imported(accepted: dict[str, Any]) -> dict[str, Any]:
+        """Coerce imported values to the types declared in DEFAULT_SETTINGS.
+
+        A hand-edited or foreign settings file may carry e.g. "5.0" (string)
+        for the anomaly threshold; without coercion that string propagates
+        into the anomaly guard and aborts a batch with an uncaught TypeError.
+        Numeric keys are coerced via float() (int defaults round-trip through
+        int()); booleans accept real bools or common string spellings.
+        Uncoercible or out-of-range values fall back to the default with a
+        warning naming the key — an import must never poison a batch run.
+        """
+        coerced: dict[str, Any] = {}
+        for key, value in accepted.items():
+            default = DEFAULT_SETTINGS[key]
+            # bool first: bool is a subclass of int, so the numeric branch
+            # below would otherwise swallow it.
+            if isinstance(default, bool):
+                if isinstance(value, bool):
+                    coerced[key] = value
+                    continue
+                text = str(value).strip().lower()
+                if text in ("true", "1", "yes", "on"):
+                    coerced[key] = True
+                    continue
+                if text in ("false", "0", "no", "off"):
+                    coerced[key] = False
+                    continue
+            elif isinstance(default, (int, float)):
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    number = None
+                if number is not None and math.isfinite(number) and number > 0:
+                    if (
+                        key == "anomaly_threshold_pct"
+                        and number > MAX_ANOMALY_THRESHOLD_PCT
+                    ):
+                        pass  # out of range — fall through to the default
+                    else:
+                        coerced[key] = (
+                            int(number) if isinstance(default, int) else number
+                        )
+                        continue
+            elif isinstance(value, type(default)):
+                # str / list keys: accept only the matching container type.
+                coerced[key] = value
+                continue
+            logger.warning(
+                "Imported setting %r has invalid value %r; using default %r.",
+                key,
+                value,
+                default,
+            )
+            coerced[key] = default
+        return coerced
+
     def export_settings(self, dest_path: str) -> str:
         """Write the current settings (minus secrets) to ``dest_path`` as JSON.
 
@@ -206,9 +294,11 @@ class SettingsManager:
         """Load settings from ``src_path``, merge them in, persist, and return.
 
         Only keys recognised in DEFAULT_SETTINGS are accepted (unknown keys are
-        dropped so a hand-edited or foreign file can't inject junk), and any
-        sensitive-looking key is stripped. The merged result is persisted via the
-        normal locked save path and the in-memory cache is refreshed.
+        dropped so a hand-edited or foreign file can't inject junk), any
+        sensitive-looking key is stripped, and values are type-coerced against
+        DEFAULT_SETTINGS (uncoercible values fall back to the default with a
+        warning). The merged result is persisted via the normal locked save
+        path and the in-memory cache is refreshed.
 
         Raises ValueError if the file is not valid JSON or not a JSON object, and
         OSError if it cannot be read (callers humanize these for the user).
@@ -220,13 +310,16 @@ class SettingsManager:
                 raise ValueError(f"Not a valid settings file: {e}") from e
         if not isinstance(incoming, dict):
             raise ValueError("Settings file must contain a JSON object.")
-        # Accept only known keys, then strip any sensitive ones.
-        accepted = self._strip_sensitive(
-            {k: v for k, v in incoming.items() if k in DEFAULT_SETTINGS}
+        # Accept only known keys, strip any sensitive ones, then coerce types.
+        accepted = self._coerce_imported(
+            self._strip_sensitive(
+                {k: v for k, v in incoming.items() if k in DEFAULT_SETTINGS}
+            )
         )
         with self._lock:
-            base = dict(self._cache) if self._cache is not None \
-                else dict(DEFAULT_SETTINGS)
+            # Merge over the latest on-disk state (not this instance's cache)
+            # so the import can't revert keys persisted by a sibling instance.
+            base = self._read_disk_locked()
             base.update(accepted)
             self._save_locked(base)
             return dict(self._cache) if self._cache is not None else base

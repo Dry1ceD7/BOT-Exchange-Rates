@@ -11,7 +11,6 @@ from core.secure_tokens import (
     _purge_env_file_token,
     delete_token,
     get_token,
-    migrate_env_to_keychain,
     set_token,
 )
 
@@ -192,31 +191,3 @@ class TestDeleteToken:
     def test_noop_without_keyring(self, mock_avail):
         result = delete_token("BOT_TOKEN_EXG")
         assert result is False
-
-
-# ── migrate_env_to_keychain ─────────────────────────────────────────────
-
-class TestMigrateEnvToKeychain:
-    """Tests for the one-time .env → keychain migration."""
-
-    @patch("core.secure_tokens._keyring_available", return_value=False)
-    def test_skips_when_no_keyring(self, mock_avail):
-        result = migrate_env_to_keychain()
-        assert result == 0
-
-    @patch("core.secure_tokens.set_token", return_value=True)
-    @patch("core.secure_tokens._keyring_available", return_value=True)
-    def test_migrates_existing_env_tokens(self, mock_avail, mock_set, monkeypatch):
-        monkeypatch.setenv("BOT_TOKEN_EXG", "exg_secret")
-        monkeypatch.setenv("BOT_TOKEN_HOL", "hol_secret")
-        result = migrate_env_to_keychain()
-        assert result == 2
-        assert mock_set.call_count == 2
-
-    @patch("core.secure_tokens.set_token", return_value=True)
-    @patch("core.secure_tokens._keyring_available", return_value=True)
-    def test_migrates_partial(self, mock_avail, mock_set, monkeypatch):
-        monkeypatch.setenv("BOT_TOKEN_EXG", "exg_only")
-        # BOT_TOKEN_HOL not set
-        result = migrate_env_to_keychain()
-        assert result == 1

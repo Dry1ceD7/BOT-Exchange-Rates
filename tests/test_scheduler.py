@@ -26,16 +26,15 @@ class TestAutoScheduler:
         scheduler.stop()
         assert not scheduler.is_running
 
-    def test_properties(self):
+    def test_start_captures_config(self):
         scheduler = AutoScheduler()
         scheduler.start(
             time_str="14:30",
             watch_paths=["/tmp/test"],
             callback=lambda files: None,
         )
-        assert scheduler.target_time == "14:30"
-        assert scheduler.watch_paths == ["/tmp/test"]
-        assert "14:30" in scheduler.next_run_info
+        assert scheduler._target_time == "14:30"
+        assert scheduler._watch_paths == ["/tmp/test"]
         scheduler.stop()
 
     def test_scan_watch_paths(self, tmp_path):
@@ -63,18 +62,6 @@ class TestAutoScheduler:
         scheduler._watch_paths = ["/nonexistent/path"]
         files = scheduler._scan_watch_paths(scheduler._watch_paths)
         assert files == []
-
-    def test_update_config(self):
-        scheduler = AutoScheduler()
-        scheduler.start(
-            time_str="08:00",
-            watch_paths=["/a"],
-            callback=lambda f: None,
-        )
-        scheduler.update_config(time_str="09:00", watch_paths=["/b", "/c"])
-        assert scheduler.target_time == "09:00"
-        assert len(scheduler.watch_paths) == 2
-        scheduler.stop()
 
     def test_callback_fires_at_time(self, tmp_path, monkeypatch):
         """Test that callback fires when current time matches.
@@ -166,7 +153,7 @@ class TestAutoScheduler:
         self, tmp_path, monkeypatch
     ):
         """Fix: the callback receives the watch-path snapshot taken under the
-        lock, so a concurrent update_config() cannot torn-read mid-scan.
+        lock, so a concurrent start() cannot torn-read mid-scan.
         """
         (tmp_path / "test.xlsx").write_text("test")
 

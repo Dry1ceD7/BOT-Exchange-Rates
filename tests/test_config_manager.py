@@ -7,6 +7,7 @@ Unit tests for core/config_manager.py — Settings persistence and caching.
 """
 
 import json
+import logging
 import os
 
 import pytest
@@ -143,6 +144,23 @@ class TestDefaultSettingsKeys:
     def test_api_timeout_seconds_retained(self):
         """'api_timeout_seconds' is wired into the client and must remain."""
         assert "api_timeout_seconds" in DEFAULT_SETTINGS
+
+    def test_api_timeout_default_is_the_constant(self):
+        """F29: the default mirrors core.constants.API_TIMEOUT_SECONDS."""
+        from core.constants import API_TIMEOUT_SECONDS
+
+        assert DEFAULT_SETTINGS["api_timeout_seconds"] == API_TIMEOUT_SECONDS
+
+    def test_scheduler_skip_keys_default_off(self):
+        """F28: skip-weekends/holidays exist and default to False so
+        existing installs keep firing every day unchanged."""
+        assert DEFAULT_SETTINGS["scheduler_skip_weekends"] is False
+        assert DEFAULT_SETTINGS["scheduler_skip_holidays"] is False
+
+    def test_scheduler_last_run_not_seeded(self):
+        """'scheduler_last_run' is machine-local run state — never a default
+        (it must not be seeded, exported, or imported across PCs)."""
+        assert "scheduler_last_run" not in DEFAULT_SETTINGS
 
 
 class TestSettingsManagerReload:
@@ -306,3 +324,157 @@ class TestSettingsManagerImport:
         assert result["appearance"] == "dark"
         assert result["rate_type"] == "mid_rate"
         assert result["anomaly_threshold_pct"] == 7.25
+
+
+class TestMultiInstanceConsistency:
+    """F3 regression: per-instance caches must not cause lost updates.
+
+    Seven-plus long-lived SettingsManager instances coexist in the app (GUI
+    app, scheduler panel, settings modal, engine, API client, i18n, update
+    banner). set()/import_settings() must merge over the latest ON-DISK
+    state, never a stale instance cache, or instance B's save silently
+    reverts a key instance A just persisted.
+    """
+
+    def test_set_on_second_instance_preserves_first_instances_key(
+        self, config_dir
+    ):
+        a = SettingsManager(config_dir=config_dir)
+        b = SettingsManager(config_dir=config_dir)
+        # Warm BOTH caches with defaults so B's cache goes stale after A.set.
+        a.load()
+        b.load()
+        a.set("appearance", "dark")
+        b.set("language", "th")
+        # A fresh reader sees BOTH writes — B did not clobber A's key.
+        fresh = SettingsManager(config_dir=config_dir).load()
+        assert fresh["appearance"] == "dark"
+        assert fresh["language"] == "th"
+
+    def test_set_refreshes_own_cache_with_sibling_writes(self, config_dir):
+        a = SettingsManager(config_dir=config_dir)
+        b = SettingsManager(config_dir=config_dir)
+        a.load()
+        b.load()
+        a.set("appearance", "dark")
+        b.set("language", "th")
+        # B's post-save cache reflects A's earlier write too.
+        assert b.get("appearance") == "dark"
+        assert b.get("language") == "th"
+
+    def test_import_on_second_instance_preserves_first_instances_key(
+        self, config_dir, tmp_path
+    ):
+        a = SettingsManager(config_dir=config_dir)
+        b = SettingsManager(config_dir=config_dir)
+        a.load()
+        b.load()
+        a.set("anomaly_threshold_pct", 9.0)
+        src = str(tmp_path / "in.json")
+        with open(src, "w", encoding="utf-8") as f:
+            json.dump({"appearance": "light"}, f)
+        result = b.import_settings(src)
+        assert result["appearance"] == "light"
+        assert result["anomaly_threshold_pct"] == 9.0
+
+
+class TestImportTypeCoercion:
+    """F27 regression: imported values are coerced to DEFAULT_SETTINGS types.
+
+    A hand-edited file carrying e.g. a string anomaly_threshold_pct must not
+    propagate a str into the anomaly guard (uncaught TypeError aborts the
+    batch). Garbage falls back to the default with a warning naming the key.
+    """
+
+    def _write_json(self, path, payload):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+
+    def test_numeric_string_threshold_coerces_to_float(
+        self, config_dir, tmp_path
+    ):
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "in.json")
+        self._write_json(src, {"anomaly_threshold_pct": "7.5"})
+        result = mgr.import_settings(src)
+        assert result["anomaly_threshold_pct"] == 7.5
+        assert isinstance(result["anomaly_threshold_pct"], float)
+
+    def test_numeric_string_timeout_coerces_to_float(self, config_dir, tmp_path):
+        # F29: the default is core.constants.API_TIMEOUT_SECONDS (a float),
+        # so imported strings coerce to float, matching the default's type.
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "in.json")
+        self._write_json(src, {"api_timeout_seconds": "30"})
+        result = mgr.import_settings(src)
+        assert result["api_timeout_seconds"] == 30
+        assert isinstance(result["api_timeout_seconds"], float)
+
+    def test_garbage_threshold_falls_back_to_default_with_warning(
+        self, config_dir, tmp_path, caplog
+    ):
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "in.json")
+        self._write_json(src, {"anomaly_threshold_pct": "not-a-number"})
+        with caplog.at_level(logging.WARNING, logger="core.config_manager"):
+            result = mgr.import_settings(src)
+        assert result["anomaly_threshold_pct"] == DEFAULT_SETTINGS[
+            "anomaly_threshold_pct"
+        ]
+        assert any(
+            "anomaly_threshold_pct" in rec.getMessage()
+            for rec in caplog.records
+        )
+
+    @pytest.mark.parametrize("bad", ["nan", "inf", "-inf", -3, 0, 1e9, None])
+    def test_nonfinite_or_out_of_range_threshold_falls_back(
+        self, config_dir, tmp_path, bad
+    ):
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "in.json")
+        self._write_json(src, {"anomaly_threshold_pct": bad})
+        result = mgr.import_settings(src)
+        assert result["anomaly_threshold_pct"] == DEFAULT_SETTINGS[
+            "anomaly_threshold_pct"
+        ]
+
+    def test_boolean_string_coerces(self, config_dir, tmp_path):
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "in.json")
+        self._write_json(
+            src, {"auto_update": "false", "scheduler_enabled": "true"}
+        )
+        result = mgr.import_settings(src)
+        assert result["auto_update"] is False
+        assert result["scheduler_enabled"] is True
+
+    def test_garbage_boolean_falls_back_to_default_with_warning(
+        self, config_dir, tmp_path, caplog
+    ):
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "in.json")
+        self._write_json(src, {"auto_update": "maybe"})
+        with caplog.at_level(logging.WARNING, logger="core.config_manager"):
+            result = mgr.import_settings(src)
+        assert result["auto_update"] is DEFAULT_SETTINGS["auto_update"]
+        assert any(
+            "auto_update" in rec.getMessage() for rec in caplog.records
+        )
+
+    def test_wrong_typed_string_key_falls_back(self, config_dir, tmp_path):
+        """A non-string rate_type (e.g. a number) falls back to the default."""
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "in.json")
+        self._write_json(src, {"rate_type": 123, "scheduler_paths": "notalist"})
+        result = mgr.import_settings(src)
+        assert result["rate_type"] == DEFAULT_SETTINGS["rate_type"]
+        assert result["scheduler_paths"] == DEFAULT_SETTINGS["scheduler_paths"]
+
+    def test_coerced_import_persists_to_disk(self, config_dir, tmp_path):
+        """The coerced (not raw) value is what lands in settings.json."""
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "in.json")
+        self._write_json(src, {"anomaly_threshold_pct": "8.25"})
+        mgr.import_settings(src)
+        fresh = SettingsManager(config_dir=config_dir)
+        assert fresh.get("anomaly_threshold_pct") == 8.25

@@ -27,7 +27,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          # Pinned for reproducible builds (F171). Keep in sync with ci.yml.
+          version: "0.10.11"
 
       - name: Set up Python 3.12
         run: uv python install 3.12
@@ -65,15 +66,17 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          # Pinned for reproducible builds (F171). Keep in sync with ci.yml.
+          version: "0.10.11"
 
       - name: Set up Python 3.12
         run: uv python install 3.12
 
-      - name: Install dependencies
-        run: |
-          uv sync
-          uv pip install pyinstaller pillow
+      # Build tooling (pyinstaller, pillow) comes from the locked "build"
+      # dependency group in pyproject.toml — no ad-hoc pip installs at
+      # release time, so build inputs are reproducible from uv.lock.
+      - name: Install dependencies (runtime + build group)
+        run: uv sync --no-dev --group build
 
       - name: Regenerate HD icon.ico from icon.png
         shell: bash
@@ -175,10 +178,10 @@ jobs:
 
           # Verify output
           if (Test-Path "dist\BOT-ExRate-Setup.exe") {
-            Write-Host "✓ Installer created: BOT-ExRate-Setup.exe"
+            Write-Host "OK: Installer created: BOT-ExRate-Setup.exe"
             Get-Item "dist\BOT-ExRate-Setup.exe" | Select-Object Length
           } else {
-            Write-Error "✗ Installer not found!"
+            Write-Error "FAILED: Installer not found!"
             exit 1
           }
 
@@ -188,10 +191,10 @@ jobs:
         shell: bash
         run: |
           if [[ ! -d "dist/BOT-ExRate.app" ]]; then
-            echo "✗ dist/BOT-ExRate.app is missing — PyInstaller did not produce an .app bundle."
+            echo "FAILED: dist/BOT-ExRate.app is missing — PyInstaller did not produce an .app bundle."
             exit 1
           fi
-          echo "✓ Found dist/BOT-ExRate.app"
+          echo "OK: Found dist/BOT-ExRate.app"
 
       # ── macOS: DMG Disk Image ─────────────────────────────────────────
       - name: Build macOS DMG
@@ -211,7 +214,7 @@ jobs:
             -ov -format UDZO \
             dist/BOT-ExRate-macOS.dmg
 
-          echo "✓ DMG created: BOT-ExRate-macOS.dmg"
+          echo "OK: DMG created: BOT-ExRate-macOS.dmg"
           ls -lh dist/BOT-ExRate-macOS.dmg
 
       # ── Linux: tar.gz (unchanged) ─────────────────────────────────────

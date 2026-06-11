@@ -12,8 +12,10 @@ Override via environment variables where noted.
 
 import logging
 import os
+import zipfile
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +30,80 @@ BOT_MAX_FILE_MB environment variable when needed.
 SUPPORTED_EXCEL_EXTENSIONS: tuple = (".xlsx", ".xlsm")
 """File extensions accepted for processing."""
 
+UNSUPPORTED_SPREADSHEET_EXTENSIONS: tuple = (".xls", ".xlsb", ".ods", ".csv")
+"""Spreadsheet-looking extensions we explicitly recognise as UNSUPPORTED.
+
+openpyxl cannot read legacy BIFF .xls (or .xlsb/.ods), and in-place
+overwrite of those formats is impossible with this stack — so they are
+rejected by design. They are listed here (single owner, shared by the GUI
+drop resolver, headless input, and the scheduler) so every entry point can
+NAME the files and tell the user the remedy (open in Excel, save as .xlsx)
+instead of silently skipping them — a folder of legacy exports must never
+read as an empty folder or an API failure."""
+
 PREFORMAT_BUFFER_ROWS: int = 50
 """Number of rows below data to pre-format with DD/MM/YYYY."""
+
+
+def collect_excel_files(
+    path: str, *, dedup: bool = True, collect_rejected: bool = False,
+) -> list[str] | tuple[list[str], list[str]]:
+    """Return the sorted full-path Excel files at ``path``.
+
+    Single owner of the directory-listing idiom (main.py headless input, the
+    scheduler's watch paths, the GUI drop resolver). A single file yields a
+    one-element list (or empty if it is not Excel); a directory is scanned
+    non-recursively with the BARE names sorted before joining — for a single
+    directory the constant prefix makes name order and full-path order
+    identical, so this matches every prior call site (main.py sorted the
+    joined paths; the scheduler/GUI sorted bare names). Dotfiles are skipped
+    in the directory branch only — a directly-passed file is accepted as-is,
+    exactly like the prior main.py single-file branch. Keeps os.listdir +
+    os.path.join so the returned strings match the exact full-path form fed
+    to the engine.
+
+    Args:
+        path: File or directory path (str — engine paths stay strings). A
+            missing directory raises OSError from os.listdir, matching the
+            prior inline listing.
+        dedup: When True, drop ``os.path.normpath`` duplicates while keeping
+            first-seen order. Callers that merge several listings (the
+            scheduler's multiple watch paths, the GUI drop queue) pass
+            ``dedup=False`` and run the same normpath dedup across the
+            merged list themselves.
+        collect_rejected: When True, return ``(files, rejected)`` where
+            ``rejected`` lists present-but-unsupported spreadsheet files
+            (``UNSUPPORTED_SPREADSHEET_EXTENSIONS``, e.g. legacy .xls) so the
+            caller can tell the user WHY nothing was queued instead of
+            reporting a misleading empty listing. ``rejected`` is never
+            deduplicated (it is informational, per-call).
+    """
+    rejected: list[str] = []
+    if Path(path).is_file():
+        lowered = path.lower()
+        files = [path] if lowered.endswith(SUPPORTED_EXCEL_EXTENSIONS) else []
+        if not files and lowered.endswith(UNSUPPORTED_SPREADSHEET_EXTENSIONS):
+            rejected.append(path)
+    else:
+        files = []
+        for f in sorted(os.listdir(path)):  # noqa: PTH208
+            if f.startswith("."):
+                continue
+            lowered = f.lower()
+            if lowered.endswith(SUPPORTED_EXCEL_EXTENSIONS):
+                files.append(os.path.join(path, f))  # noqa: PTH118
+            elif lowered.endswith(UNSUPPORTED_SPREADSHEET_EXTENSIONS):
+                rejected.append(os.path.join(path, f))  # noqa: PTH118
+    if not dedup:
+        return (files, rejected) if collect_rejected else files
+    seen: set[str] = set()
+    unique: list[str] = []
+    for f in files:
+        norm = os.path.normpath(f)
+        if norm not in seen:
+            seen.add(norm)
+            unique.append(f)
+    return (unique, rejected) if collect_rejected else unique
 
 SKIP_SHEET_NAMES: frozenset = frozenset({"ExRate", "Exrate USD", "Exrate EUR"})
 """Sheets that are reference/master and should NOT be processed as ledgers.
@@ -47,10 +121,22 @@ LEDGER_HOME_CURRENCY: str = "THB"
 # the home currency. A ledger row whose currency is none of these (and which the
 # API returns no data for) is reported as unsupported rather than left silently
 # blank — see core/ledger_processing.classify_currencies.
+#
+# JPY is deliberately EXCLUDED: BOT quotes it per 100 yen (~23.x THB/100JPY),
+# so writing the published figure into a ledger EX Rate column would overstate
+# any "amount x rate" conversion 100x. JPY rows take the unsupported path
+# (blank cell + per-file warning) until the department confirms its convention.
 LEDGER_SUPPORTED_CURRENCIES: frozenset = frozenset(
-    {"USD", "EUR", "GBP", "JPY", "CNY", "SGD", "HKD", "AUD", "CHF", "CAD"}
+    {"USD", "EUR", "GBP", "CNY", "SGD", "HKD", "AUD", "CHF", "CAD"}
 )
 """Currency codes the ledger multi-currency path can fetch + write."""
+
+PER_100_UNIT_CURRENCIES: tuple = ("JPY",)
+"""Currencies BOT publishes per 100 units of foreign currency, not per 1.
+
+Documented so a future re-inclusion into LEDGER_SUPPORTED_CURRENCIES knows the
+published rate must be divided by 100 (or the ledger convention confirmed)
+before it is safe to multiply against per-unit amounts."""
 
 BACKUP_MAX_AGE_DAYS: int = int(os.environ.get("BOT_BACKUP_AGE_DAYS", "7"))
 """Auto-cleanup backups older than this many days."""
@@ -214,6 +300,16 @@ def humanize_save_error(filename: str, exc: BaseException) -> str | None:
     Centralized here so the engine, standalone, and scheduler paths reuse one
     translation instead of leaking raw WinError/errno strings to the user.
     """
+    # A non-zip file wearing an .xlsx extension (typically a legacy BIFF .xls
+    # renamed or re-saved with the wrong extension) raises zipfile.BadZipFile
+    # — neither OSError nor InvalidFileException. Translate it to the actual
+    # remedy instead of leaking "File is not a zip file" to an accountant.
+    if isinstance(exc, zipfile.BadZipFile):
+        return (
+            f"{filename}: Not a valid .xlsx workbook — it may be a legacy "
+            ".xls file renamed or saved with the wrong extension. Open it "
+            "in Excel and save as .xlsx, then process again."
+        )
     if not isinstance(exc, OSError):
         return None
     is_locked = isinstance(exc, PermissionError)
@@ -271,13 +367,22 @@ def format_rate_value(value) -> str:
     if value is None:
         return ""
     if isinstance(value, Decimal):
-        return f"{value:.4f}"
+        # Quantize with ROUND_HALF_EVEN (banker's rounding) — the pinned
+        # project standard, explicit so the result never drifts with the
+        # ambient decimal context — pending any department mandate.
+        return f"{value.quantize(Decimal('0.0001'), rounding=ROUND_HALF_EVEN)}"
+    # Float path: Python's fixed-point float formatting is round-half-even
+    # on the binary value (exact decimal ties are vanishingly rare here).
     return f"{float(value):.4f}"
 
 
 def parse_decimal_safe(raw) -> Decimal | None:
     """
     Parse a rate cell into an exact Decimal, preserving the literal digits.
+
+    Deliberately performs NO quantize — no rounding mode applies here; the
+    source digits pass through untouched. Any later 4dp quantize must pin
+    rounding=ROUND_HALF_EVEN (the project standard).
 
     Returns None (and debug-logs) for empty/unparseable values instead of
     silently swallowing them, so mis-formatted data is observable in logs.

@@ -76,10 +76,15 @@ class TestSettingsModalConstruction:
 
     def test_geometry_width_is_420(self, tk_root):
         modal, _ = _make_modal(tk_root)
-        geo = modal.geometry()
         # geometry() returns "WxH+X+Y". The height is now screen-capped (so the
         # window always fits a small legacy screen and the content scrolls), but
         # the width stays fixed at 420 for a tidy single-column layout.
+        # On a WM-less display (xvfb CI) a withdrawn toplevel never realises
+        # its size request — geometry() reports "1x1..." until the window is
+        # mapped and the event loop runs. Map it and pump before reading.
+        modal.deiconify()
+        modal.update()
+        geo = modal.geometry()
         assert geo.startswith("420x"), f"unexpected geometry: {geo}"
         modal.destroy()
 
@@ -259,12 +264,16 @@ class TestOnAppearanceChange:
                 patch.object(modal, "after") as mock_after,
             ):
                 modal._on_appearance_change("Light")
-            # Scheduled with the 150ms delay and the parent's bound callback
-            mock_after.assert_called_once()
-            delay, callback = mock_after.call_args[0]
-            assert delay == 150
-            callback()
+            # Two 150ms deferrals: the parent's bound callback AND the
+            # modal's own retheme (the modal holds the grab — it must not
+            # keep the stale palette while the main window flips).
+            assert mock_after.call_count == 2
+            calls = mock_after.call_args_list
+            assert [c.args[0] for c in calls] == [150, 150]
+            parent_cb = calls[0].args[1]
+            parent_cb()
             assert called == [True]
+            assert calls[1].args[1] == modal._retheme
         finally:
             del tk_root._apply_theme
         modal.destroy()
@@ -506,6 +515,50 @@ class TestAnomalyThreshold:
         modal._save_and_close()
         saved = mock_mgr.save.call_args[0][0]
         assert saved["anomaly_threshold_pct"] == 6.25
+
+    @pytest.mark.parametrize("bad", ["nan", "NaN", "inf", "-inf", "infinity"])
+    def test_non_finite_input_blocks_save_and_close(self, tk_root, bad):
+        """F150 regression: float() parses 'nan'/'inf' happily.
+
+        nan compares False against every bound (slipping past the <= 0
+        check) and inf silently disables the anomaly guardrail entirely —
+        both must trip the existing inline-error UX instead of saving.
+        """
+        modal, mock_mgr = _make_modal(tk_root)
+        modal._anomaly_threshold_var.set(bad)
+        modal._save_and_close()
+        mock_mgr.save.assert_not_called()
+        assert modal.winfo_exists()
+        assert modal._anomaly_error.cget("text")  # error surfaced inline
+        modal.destroy()
+
+    @pytest.mark.parametrize("huge", ["1e9", "1000.01", "99999"])
+    def test_oversized_input_blocks_save_and_close(self, tk_root, huge):
+        """Thresholds above the sane upper bound (1000%) are rejected."""
+        modal, mock_mgr = _make_modal(tk_root)
+        modal._anomaly_threshold_var.set(huge)
+        modal._save_and_close()
+        mock_mgr.save.assert_not_called()
+        assert modal.winfo_exists()
+        assert modal._anomaly_error.cget("text")
+        modal.destroy()
+
+    def test_non_finite_input_keeps_focus_in_entry(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        with patch.object(modal._anomaly_entry, "focus_set") as mock_focus:
+            modal._anomaly_threshold_var.set("inf")
+            modal._save_and_close()
+            mock_focus.assert_called_once()
+        modal.destroy()
+
+    def test_upper_bound_value_is_accepted(self, tk_root):
+        """Exactly 1000 is still valid — the bound is inclusive."""
+        modal, mock_mgr = _make_modal(tk_root)
+        modal._anomaly_threshold_var.set("1000")
+        modal._save_and_close()
+        saved = mock_mgr.save.call_args[0][0]
+        assert saved["anomaly_threshold_pct"] == 1000.0
+        assert not modal.winfo_exists()
 
 
 # ---------------------------------------------------------------------------
@@ -854,3 +907,56 @@ class TestKeyboardShortcuts:
         modal, _ = _make_modal(tk_root)
         modal.destroy()
         assert not modal.winfo_exists()
+
+
+# ---------------------------------------------------------------------------
+# Appearance-change retheme
+# ---------------------------------------------------------------------------
+
+class TestRetheme:
+    """Toggling appearance must refresh the modal's own palette.
+
+    The modal builds its widgets from mode-resolved get_theme() colors, so
+    after ctk.set_appearance_mode the modal kept the stale palette while
+    holding the input grab — a half-themed window the user reads as broken.
+    """
+
+    def test_retheme_rebuilds_with_fresh_palette(self, tk_root):
+        from gui.theme import get_theme
+
+        modal, _ = _make_modal(tk_root)
+        old_children = set(modal.winfo_children())
+        modal._retheme()
+        assert set(modal.winfo_children()) != old_children
+        assert modal._t == get_theme()
+        modal.destroy()
+
+    def test_retheme_preserves_unsaved_control_edits(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        modal._anomaly_threshold_var.set("7.5")
+        modal._rate_type_var.set("Selling")
+        modal._auto_update_var.set("off")
+        modal._retheme()
+        assert modal._anomaly_threshold_var.get() == "7.5"
+        assert modal._rate_type_var.get() == "Selling"
+        assert modal._auto_update_var.get() == "off"
+        modal.destroy()
+
+    def test_retheme_after_destroy_is_noop(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        modal.destroy()
+        modal._retheme()  # must not raise on a torn-down toplevel
+
+    def test_appearance_change_schedules_modal_retheme(self, tk_root):
+        """_on_appearance_change must schedule the modal's own retheme,
+        not just the parent window's _apply_theme."""
+        modal, _ = _make_modal(tk_root)
+        scheduled = []
+        with (
+            patch.object(modal, "after",
+                         side_effect=lambda _ms, fn=None, *a: scheduled.append(fn)),
+            patch("gui.panels.settings_modal.ctk.set_appearance_mode"),
+        ):
+            modal._on_appearance_change("Dark")
+        assert modal._retheme in scheduled
+        modal.destroy()

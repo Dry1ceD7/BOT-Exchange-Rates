@@ -21,6 +21,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from core.constants import parse_date, parse_decimal_safe, to_float
+from core.logic import safe_to_decimal
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,30 @@ _FLUSH_EVERY = 5000
 
 # Valid ISO-4217-style currency code: exactly three uppercase letters.
 _CURRENCY_RE = re.compile(r"[A-Z]{3}")
+
+
+def _parse_rate_4dp(raw) -> Decimal | None:
+    """
+    Parse a rate cell and quantize it to the project's 4dp invariant.
+
+    Layer-1 hard gate: every Decimal that reaches the rates_multi cache
+    (and from there the ExRate sheet) must be a finite, 4dp-quantized
+    value constructed from the source string — safe_to_decimal applies the
+    same quantize the engine and rate-audit paths use, so imported rates
+    can never carry stray precision into Excel. Values that fail to parse
+    or quantize are skipped (debug-logged), matching the importer's
+    handling of other malformed fields.
+    """
+    dec = parse_decimal_safe(raw)
+    if dec is None:
+        return None
+    if not dec.is_finite():
+        logger.debug("Skipped non-finite rate value: %r", raw)
+        return None
+    quantized = safe_to_decimal(dec)
+    if quantized is None:
+        logger.debug("Skipped unquantizable rate value: %r", raw)
+    return quantized
 
 
 def import_bot_csv(csv_path: str, cache_db) -> int:
@@ -152,12 +177,12 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
 
             date_str = parsed_date.strftime("%Y-%m-%d")
 
-            # Collect (rate_type -> Decimal) for this row.
+            # Collect (rate_type -> 4dp-quantized Decimal) for this row.
             rates: dict[str, Decimal] = {}
 
             if is_long_format:
                 rate_type = (row.get(rate_type_key) or "").strip()
-                dec = parse_decimal_safe(row.get(value_key))
+                dec = _parse_rate_4dp(row.get(value_key))
                 if rate_type and dec is not None:
                     rates[rate_type] = dec
             else:
@@ -168,7 +193,7 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
                     (mid_rate_key, "mid_rate"),
                 ]:
                     if key:
-                        dec = parse_decimal_safe(row.get(key))
+                        dec = _parse_rate_4dp(row.get(key))
                         if dec is not None:
                             rates[rate_type] = dec
 
@@ -182,7 +207,9 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
             # Mirror into the legacy USD/EUR table for backward compatibility.
             # That table's columns are REAL; sqlite3 cannot bind Decimal, so
             # coerce to float here. The lossless source of truth stays in
-            # rates_multi (stored as exact Decimal text above).
+            # rates_multi (stored as exact Decimal text above). insert_rate
+            # upserts per-column, so these USD-only / EUR-only calls can never
+            # null the sibling currency's columns for the same date.
             buy_tt = to_float(rates.get("buying_transfer"))
             sell = to_float(rates.get("selling"))
             if currency == "USD":

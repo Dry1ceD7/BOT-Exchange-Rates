@@ -10,11 +10,13 @@ a wrong / raw payload is rejected.
 """
 
 import os
+import shutil
 import stat
 import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -28,10 +30,26 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def isolated_ipc(tmp_path, monkeypatch):
+def short_tmp_dir():
+    """AF_UNIX sun_path is capped (~104 bytes on macOS, 108 on Linux);
+    pytest's tmp_path nests too deep on macOS and the bind fails with
+    "AF_UNIX path too long". Use a short dir directly under the system
+    tempdir instead.
+    """
+    d = Path(tempfile.mkdtemp(prefix="ipc_"))
+    sock_probe = d / "test_ipc.sock"
+    assert len(str(sock_probe).encode()) < 100, (
+        f"socket path still too long for sun_path: {sock_probe}"
+    )
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture
+def isolated_ipc(short_tmp_dir, monkeypatch):
     """Point the socket + nonce lockfile at a temp dir for isolation."""
-    sock = str(tmp_path / "test_ipc.sock")
-    nonce_file = str(tmp_path / ".ipc_nonce")
+    sock = str(short_tmp_dir / "test_ipc.sock")
+    nonce_file = str(short_tmp_dir / ".ipc_nonce")
     monkeypatch.setattr(ipc, "_get_ipc_address", lambda: sock)
     monkeypatch.setattr(ipc, "_lockfile_path", lambda: nonce_file)
     return sock, nonce_file
@@ -100,13 +118,14 @@ def test_address_is_under_per_user_private_dir():
     assert mode == 0o700
 
 
-def test_real_per_user_path_authenticates(tmp_path, monkeypatch):
+def test_real_per_user_path_authenticates(short_tmp_dir, monkeypatch):
     """A full RESTORE round-trip works against the real per-user path resolver.
 
     Only the runtime dir is redirected (into tmp); the address-building logic
     in _get_ipc_address is exercised unchanged so the new path still binds and
     authenticates.
     """
+    tmp_path = short_tmp_dir
     monkeypatch.setattr(ipc, "_ipc_runtime_dir", lambda: str(tmp_path))
     monkeypatch.setattr(ipc, "_lockfile_path", lambda: str(tmp_path / ".ipc_nonce"))
 

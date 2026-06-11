@@ -27,7 +27,10 @@ dependencies = [
     "packaging>=26.2",
     "keyring>=25.7.0",
     "pystray>=0.19.5; sys_platform == 'win32'",
-    "Pillow>=12.2.0; sys_platform == 'win32'",
+    # Pillow is required on all platforms: gui/app.py uses a PIL-based icon
+    # fallback (PhotoImage TclError path) that was unreachable on non-Windows
+    # while Pillow carried a win32-only marker. pystray (win32) also needs it.
+    "Pillow>=12.2.0",
     "sentry-sdk>=2.62.0",
 ]
 
@@ -36,6 +39,12 @@ dev = [
     "ruff>=0.15.0",
     "pytest>=9.0.0",
     "pip-audit>=2.7.0",
+]
+# Release-build tooling (PyInstaller bundling + icon generation).
+# Installed in CI via: uv sync --no-dev --group build
+build = [
+    "pyinstaller>=6",
+    "pillow",
 ]
 
 [tool.ruff]

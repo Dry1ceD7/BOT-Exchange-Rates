@@ -523,7 +523,7 @@ class TestTestKeysButton:
     def test_test_done_success_shows_success_color(self, tk_root, tmp_path):
         dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
         dialog._busy_test = True
-        dialog._test_done(True, "✓ Both keys accepted — connection verified.")
+        dialog._test_done(True, "OK: Both keys accepted — connection verified.")
         assert dialog._busy_test is False
         assert "verified" in dialog._lbl_status.cget("text").lower()
         dialog.destroy()
@@ -531,9 +531,40 @@ class TestTestKeysButton:
     def test_test_done_failure_shows_message(self, tk_root, tmp_path):
         dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
         dialog._busy_test = True
-        dialog._test_done(False, "✗ Key rejected. Check the key and try again.")
+        dialog._test_done(False, "FAILED: Key rejected. Check the key and try again.")
         assert dialog._busy_test is False
         assert "rejected" in dialog._lbl_status.cget("text").lower()
+        dialog.destroy()
+
+    def test_worker_probes_holiday_product_for_hol_key(self, tk_root, tmp_path):
+        """The HOL key must be probed against the HOLIDAY product.
+
+        The BOT gateway scopes each key to one API product, so testing the
+        holiday key against the exchange-rate endpoint (the old behavior)
+        rejects CORRECT holiday keys and passes an EXG key pasted into the
+        HOL field — inverting the validation it claims to perform.
+        """
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        dialog._entry_exg.insert(0, "VALIDEXGKEY999")
+        dialog._entry_hol.insert(0, "VALIDHOLKEY999")
+
+        calls = []
+
+        def _fake_ping(token, **kwargs):
+            calls.append((token, kwargs.get("product", "exg")))
+            return True, "OK: Key accepted — connection verified."
+
+        with (
+            patch("gui.panels.token_dialog.ping_token", side_effect=_fake_ping),
+            patch.object(dialog, "_safe_after"),
+        ):
+            with patch("gui.panels.token_dialog.threading.Thread") as mt:
+                dialog._on_test_keys()
+                worker = mt.call_args.kwargs["target"]
+            worker()
+
+        assert ("VALIDEXGKEY999", "exg") in calls
+        assert ("VALIDHOLKEY999", "hol") in calls
         dialog.destroy()
 
     def test_worker_reports_exg_failure(self, tk_root, tmp_path):
@@ -546,7 +577,7 @@ class TestTestKeysButton:
         dialog._safe_after = lambda d, cb, *a: results.append((cb, a))
 
         def _fake_ping(token, **kw):
-            return (False, "✗ Key rejected. Check the key and try again.")
+            return (False, "FAILED: Key rejected. Check the key and try again.")
 
         with patch("gui.panels.token_dialog.threading.Thread") as mock_thread:
             # Capture the worker target and run it synchronously.
@@ -582,7 +613,7 @@ class TestTestKeysButton:
             mock_thread.side_effect = _capture
             with patch(
                 "gui.panels.token_dialog.ping_token",
-                lambda token, **kw: (True, "✓ ok"),
+                lambda token, **kw: (True, "OK: ok"),
             ):
                 dialog._on_test_keys()
 
@@ -590,6 +621,37 @@ class TestTestKeysButton:
         cb, args = results[0]
         assert cb == dialog._test_done
         assert args[0] is True
+        dialog.destroy()
+
+    def test_worker_exception_resets_busy_state(self, tk_root, tmp_path):
+        """F151: an unexpected worker crash still marshals a busy-reset so
+        _busy_test cannot wedge the Test Keys button forever."""
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        dialog._entry_exg.insert(0, "VALIDEXGKEY999")
+        dialog._entry_hol.insert(0, "VALIDHOLKEY999")
+
+        results = []
+        dialog._safe_after = lambda d, cb, *a: results.append((cb, a))
+
+        def _boom(token, **kw):
+            raise RuntimeError("unexpected interpreter-level failure")
+
+        with patch("gui.panels.token_dialog.threading.Thread") as mock_thread:
+            def _capture(target, **kwargs):
+                inst = MagicMock()
+                inst.start.side_effect = target
+                return inst
+            mock_thread.side_effect = _capture
+            with patch("gui.panels.token_dialog.ping_token", _boom):
+                dialog._on_test_keys()  # the worker crash must not propagate
+
+        assert len(results) == 1
+        cb, args = results[0]
+        assert cb == dialog._test_done
+        assert args[0] is False
+        # Running the marshalled callback releases the busy lock.
+        cb(*args)
+        assert dialog._busy_test is False
         dialog.destroy()
 
     def test_safe_after_skipped_when_destroyed(self, tk_root, tmp_path):
@@ -814,6 +876,10 @@ class TestKeyboardAccessibility:
         # then fire through Tk's event machinery on the realised root.
         dialog.deiconify()
         dialog.bind("<Return>", lambda e: dialog._on_activate())
+        # Key events are delivered to the FOCUS window. On a WM-less display
+        # (xvfb CI) mapping does not grant focus, so without focus_force the
+        # generated KeyPress is silently dropped.
+        dialog.focus_force()
         dialog.update()
         dialog.event_generate("<Return>", when="now")
         dialog.update()
@@ -826,6 +892,9 @@ class TestKeyboardAccessibility:
         dialog._on_close = lambda: called.append(True)
         dialog.deiconify()
         dialog.bind("<Escape>", lambda e: dialog._on_close())
+        # See test_return_invokes_activate: key events need the focus window
+        # on a WM-less display (xvfb CI).
+        dialog.focus_force()
         dialog.update()
         dialog.event_generate("<Escape>", when="now")
         dialog.update()

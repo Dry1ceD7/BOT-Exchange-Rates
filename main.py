@@ -103,32 +103,38 @@ def _sentry_token_scrubber(event, hint):
     """Sentry before_send hook: replace known token values with '***'.
 
     Tokens can otherwise surface in event messages, exception values, or
-    request data. We recursively walk the event and substitute any known
-    token string. Returns the (mutated) event so it is still sent.
+    request data. The event is walked recursively and any known token string
+    is substituted; the scrubbed event is returned so it is still sent.
 
-    Token values are resolved fresh for each event batch (keychain + .env)
-    and cached on the function for the duration of this call.
+    FAIL CLOSED: if scrubbing raises for any reason, the event is DROPPED
+    (return None) rather than sent unscrubbed — an unscrubbed event could
+    carry a live API token to a third-party service. The drop is logged so
+    missing Sentry events are explainable.
     """
-    tokens = _scrubber_token_values()
-    if not tokens:
-        return event
-
-    def _scrub(obj):
-        if isinstance(obj, str):
-            out = obj
-            for tok in tokens:
-                out = out.replace(tok, "***")
-            return out
-        if isinstance(obj, dict):
-            return {k: _scrub(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return [_scrub(v) for v in obj]
-        return obj
-
     try:
+        tokens = _scrubber_token_values()
+        if not tokens:
+            return event
+
+        def _scrub(obj):
+            if isinstance(obj, str):
+                out = obj
+                for tok in tokens:
+                    out = out.replace(tok, "***")
+                return out
+            if isinstance(obj, dict):
+                return {k: _scrub(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_scrub(v) for v in obj]
+            return obj
+
         return _scrub(event)
-    except Exception:
-        return event
+    except Exception as exc:  # noqa: BLE001 — any failure must drop the event
+        logging.getLogger(__name__).warning(
+            "Sentry token scrubber failed — dropping event instead of "
+            "sending it unscrubbed: %s", exc,
+        )
+        return None
 
 
 _SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
@@ -166,9 +172,16 @@ logging.basicConfig(
 
 # SECURITY: redact BOT API token values from all log records before they
 # reach the file/console handlers (defends app.log + Sentry breadcrumbs).
-with contextlib.suppress(Exception):
+# A failure here must not block startup, but it must be VISIBLE — logs are
+# unredacted from this point on, so a silent suppress would hide that fact.
+try:
     from core.api_client import install_token_redaction_filter
     install_token_redaction_filter()
+except Exception as _redaction_exc:  # noqa: BLE001 — startup must not block
+    logging.getLogger(__name__).warning(
+        "Token redaction filter could not be installed — log output will "
+        "not be scrubbed of API tokens: %s", _redaction_exc,
+    )
 
 
 # ── Cold-Start: Ensure required directories exist ────────────────────────
@@ -319,6 +332,11 @@ def main():
         _purge_credentials()
         sys.exit(0)
 
+    # GUI launches silently ignore the headless-only flags; tell the user on
+    # stderr so e.g. "--dry-run" without "--headless" is not mistaken for a
+    # safe preview run of the GUI.
+    _warn_ignored_headless_flags(args)
+
     # Headless batch runs must NOT be blocked by a running GUI. They are
     # stateless and coordinate file safety via per-file backups + the batch
     # lock — not the IPC restore channel. Running the single-instance guard
@@ -365,6 +383,35 @@ def main():
         ipc_server.stop()
 
 
+def _warn_ignored_headless_flags(args: argparse.Namespace) -> None:
+    """Warn on stderr when headless-only flags are passed in GUI mode.
+
+    Flags like ``--dry-run`` or ``--json`` only take effect with
+    ``--headless`` or ``--schedule``; without one of those the GUI launches
+    and silently ignores them, which can mislead an operator into believing
+    a preview/automation option is active.
+    """
+    if args.headless or args.schedule is not None:
+        return
+    ignored = [
+        flag for flag, present in (
+            ("--input", args.input is not None),
+            ("--start-date", args.start_date is not None),
+            ("--dry-run", args.dry_run),
+            ("--quiet", args.quiet),
+            ("--verbose", args.verbose),
+            ("--json", args.json),
+            ("--resume", args.resume),
+        ) if present
+    ]
+    if ignored:
+        print(
+            f"WARNING: {', '.join(ignored)} only take effect with --headless "
+            "or --schedule and will be ignored in GUI mode.",
+            file=sys.stderr,
+        )
+
+
 def _set_console_log_level(level: int) -> None:
     """Adjust the root StreamHandler level (DEBUG for -v, WARNING for -q).
 
@@ -379,22 +426,22 @@ def _set_console_log_level(level: int) -> None:
             handler.setLevel(level)
 
 
-def _collect_excel_files(input_path: str) -> list[str]:
-    """Return the sorted full-path Excel files at ``input_path``.
+def _collect_excel_files(input_path: str) -> tuple[list[str], list[str]]:
+    """Return ``(files, rejected)`` for the Excel files at ``input_path``.
 
-    A single file yields a one-element list (or empty if it is not Excel); a
-    directory is scanned non-recursively. Dotfiles are skipped. Keeps
-    os.listdir + os.path.join so the returned strings match the exact prior
-    full-path form fed to the engine.
+    Thin wrapper over the shared ``core.constants.collect_excel_files``
+    (single owner of the listing idiom, also used by the scheduler watch
+    paths and the GUI drop resolver): a single file yields a one-element
+    list (or empty if it is not Excel); a directory is scanned
+    non-recursively with dotfiles skipped, returning the exact prior
+    full-path string form fed to the engine. ``rejected`` lists
+    present-but-unsupported spreadsheet files (legacy .xls et al.) so the
+    headless run can NAME them instead of printing a misleading
+    'No Excel files found'.
     """
-    excel_exts = (".xlsx", ".xlsm")
-    if Path(input_path).is_file():
-        return [input_path] if input_path.lower().endswith(excel_exts) else []
-    return sorted([
-        os.path.join(input_path, f)  # noqa: PTH118
-        for f in os.listdir(input_path)  # noqa: PTH208
-        if f.lower().endswith(excel_exts) and not f.startswith(".")
-    ])
+    from core.constants import collect_excel_files
+
+    return collect_excel_files(input_path, collect_rejected=True)
 
 
 def _resolve_input_path(args: argparse.Namespace) -> str:
@@ -416,36 +463,34 @@ def _is_standalone_exrate_file(filepath: str) -> bool:
 
     Read-only probe on a small (<15 MB) workbook; called once per file BEFORE
     processing so the progress callback stays a cheap set lookup. Any probe
-    failure returns False (treat as a normal ledger — never mislabel).
+    failure returns False (treat as a normal ledger — never mislabel). The
+    probe itself is the shared ``core.workbook_io.is_standalone_exrate_workbook``
+    (single owner — the engine's ``_detect_standalone_exrate`` uses it too);
+    the literal 'Date'/'Cur' defaults match this site's prior inline scan.
     """
-    if not filepath.lower().endswith(".xlsx"):
-        return False
-    try:
-        import openpyxl as _opx
+    from core.workbook_io import is_standalone_exrate_workbook
 
-        from core.constants import SKIP_SHEET_NAMES
+    return is_standalone_exrate_workbook(filepath)
 
-        wb = _opx.load_workbook(filepath, read_only=True)
-        try:
-            if "ExRate" not in wb.sheetnames:
-                return False
-            for sheet_name in wb.sheetnames:
-                if sheet_name in SKIP_SHEET_NAMES:
-                    continue
-                ws = wb[sheet_name]
-                for row in ws.iter_rows(min_row=1, max_row=5, values_only=True):
-                    row_strs = [
-                        str(c).strip() if c is not None else "" for c in row
-                    ]
-                    if "Date" in row_strs and "Cur" in row_strs:
-                        # A month tab exists → normal ledger, not standalone.
-                        return False
-            return True
-        finally:
-            wb.close()
-    except Exception:
-        # Probe failure must never mislabel a ledger; fall back to "not standalone".
-        return False
+
+def _print_json_summary(
+    succeeded: int,
+    failed: int,
+    total: int,
+    dry_run: bool,
+    audit_path: str | None,
+    errors: list[str],
+) -> None:
+    """Emit the machine-readable --json summary (single schema for all exits)."""
+    import json
+    print(json.dumps({
+        "succeeded": succeeded,
+        "failed": failed,
+        "total": total,
+        "dry_run": dry_run,
+        "audit_log": audit_path,
+        "errors": errors,
+    }))
 
 
 def _run_headless(args: argparse.Namespace) -> int:
@@ -485,6 +530,10 @@ def _run_headless(args: argparse.Namespace) -> int:
         files = manifest.pending_files()
         if not files:
             print("No interrupted batch to resume.", file=sys.stderr)
+            if args.json:
+                _print_json_summary(
+                    0, 0, 0, bool(args.dry_run), None, [],
+                )
             return EXIT_NOTHING
         start_date = manifest.start_date()
         _emit("BOT Exchange Rate Processor — Headless Resume")
@@ -497,11 +546,39 @@ def _run_headless(args: argparse.Namespace) -> int:
             print(f"ERROR: Input path not found: {input_path}", file=sys.stderr)
             return EXIT_CONFIG
 
-        files = _collect_excel_files(input_path)
+        files, rejected = _collect_excel_files(input_path)
+        if rejected:
+            # NAME unsupported spreadsheet files with the remedy: a folder of
+            # legacy .xls exports must never read like an empty folder (or an
+            # API failure) — that misdiagnosis is exactly what support sees.
+            names = ", ".join(Path(p).name for p in rejected)
+            print(
+                f"WARNING: Skipped {len(rejected)} unsupported spreadsheet "
+                f"file(s): {names} — only .xlsx/.xlsm are supported. "
+                "Open them in Excel and save as .xlsx, then re-run.",
+                file=sys.stderr,
+            )
         if not files:
             # 'Nothing to do' is its own code so a cron user notices a
             # misconfigured folder instead of a success-looking exit 0.
-            print("No Excel files found to process.", file=sys.stderr)
+            # --json still gets a summary object so parsers always see JSON.
+            if rejected:
+                print(
+                    "No supported Excel files found to process "
+                    "(unsupported files were skipped — see warning above).",
+                    file=sys.stderr,
+                )
+            else:
+                print("No Excel files found to process.", file=sys.stderr)
+            if args.json:
+                _print_json_summary(
+                    0, 0, 0, bool(args.dry_run), None,
+                    [
+                        "Unsupported file skipped (only .xlsx/.xlsm are "
+                        f"supported): {Path(p).name}"
+                        for p in rejected
+                    ],
+                )
             return EXIT_NOTHING
 
         _emit("BOT Exchange Rate Processor — Headless Mode")
@@ -525,15 +602,9 @@ def _run_headless(args: argparse.Namespace) -> int:
     )
 
     if args.json:
-        import json
-        print(json.dumps({
-            "succeeded": success,
-            "failed": fail,
-            "total": len(files),
-            "dry_run": bool(args.dry_run),
-            "audit_log": audit_path,
-            "errors": errors,
-        }))
+        _print_json_summary(
+            success, fail, len(files), bool(args.dry_run), audit_path, errors,
+        )
     else:
         _emit("")
         print(f"Results: {success} succeeded, {fail} failed")
@@ -584,12 +655,12 @@ def _process_headless_batch(
                 standalone_idx.add(i)
 
     async def _run() -> tuple[int, int, list[str], str | None]:
-        from core.api_client import BOTClient
+        from core.api_client import CLIENT_TIMEOUT, BOTClient
         from core.engine import LedgerEngine
 
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, connect=10.0),
-        ) as client:
+        # CLIENT_TIMEOUT is built from the centralized core.constants values —
+        # no hardcoded timeout literals here.
+        async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT) as client:
             api = BOTClient(client)
             engine = LedgerEngine(api)
 

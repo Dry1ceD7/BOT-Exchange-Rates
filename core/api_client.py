@@ -12,10 +12,12 @@ import asyncio
 import logging
 import random
 import time
+import traceback
 from datetime import date, timedelta
+from decimal import Decimal
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -33,6 +35,7 @@ from core.constants import (
     MAX_429_RETRIES,
     RETRY_AFTER_MAX_SECONDS,
 )
+from core.logic import safe_to_decimal
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +50,7 @@ class TokenRedactionFilter(logging.Filter):
     tenacity's before_sleep_log and traceback formatting can otherwise
     leak tokens (e.g. in request URLs/headers) into app.log or Sentry.
     This filter sources token values from three places so redaction holds
-    even after the env→keychain migration scrubs os.environ:
+    even after the env->keychain migration scrubs os.environ:
       1. values explicitly registered by a live BOTClient instance,
       2. os.environ (legacy / pre-migration),
       3. the OS keychain via secure_tokens.get_token (post-migration).
@@ -135,7 +138,38 @@ class TokenRedactionFilter(logging.Filter):
         if redacted != msg:
             record.msg = redacted
             record.args = ()
+        self._redact_exc_info(record, tokens)
         return True
+
+    def _redact_exc_info(self, record: logging.LogRecord, tokens: list) -> None:
+        """Redact token values from an attached exception traceback.
+
+        ``logging.Formatter.format`` only computes ``record.exc_text`` when it
+        is unset (then appends it after the message), so pre-formatting the
+        traceback here, redacting it, caching it on ``record.exc_text`` and
+        clearing ``record.exc_info`` preserves the formatted output exactly
+        while guaranteeing no handler ever re-formats the raw exception —
+        tracebacks routinely embed tokens (e.g. an httpx error carrying the
+        full request URL or auth header in a frame's repr).
+        """
+        if not record.exc_info:
+            return
+        try:
+            exc_text = "".join(traceback.format_exception(*record.exc_info))
+        except Exception:
+            # Could not format the traceback — drop it entirely rather than
+            # let a handler format (and potentially leak) the raw exc_info.
+            record.exc_info = None
+            record.exc_text = None
+            return
+        # Match logging.Formatter.formatException: no trailing newline.
+        if exc_text.endswith("\n"):
+            exc_text = exc_text[:-1]
+        for tok in tokens:
+            if tok:
+                exc_text = exc_text.replace(tok, self._REPLACEMENT)
+        record.exc_text = exc_text
+        record.exc_info = None
 
 
 # Module-level handle to the installed filter so a live BOTClient can
@@ -198,13 +232,41 @@ def _safe_before_sleep(retry_state) -> None:
 # -------------------------------------------------------------------------
 
 class BOTRateDetail(BaseModel):
-    """Schema for a single day's exchange rate data point."""
+    """Schema for a single day's exchange rate data point.
+
+    Exactness gate (Mathematical Truth): every rate field is an exact
+    ``Decimal`` quantized to 4dp at the parse boundary. Values are built
+    string-safe via the project's safe_to_decimal discipline — never from a
+    binary float — so each downstream consumer (engine, cache, writer)
+    receives exactly the value BOT published. ``_fetch_json`` parses JSON
+    numbers with ``parse_float=Decimal``, so the literal response token
+    reaches this validator without ever existing as a float.
+    """
     period: str
     currency: str = Field(alias="currency_id")
-    buying_transfer: float | None = None
-    buying_sight: float | None = None
-    selling: float | None = None
-    mid_rate: float | None = None
+    buying_transfer: Decimal | None = None
+    buying_sight: Decimal | None = None
+    selling: Decimal | None = None
+    mid_rate: Decimal | None = None
+
+    @field_validator(
+        "buying_transfer", "buying_sight", "selling", "mid_rate",
+        mode="before",
+    )
+    @classmethod
+    def _quantize_rate_4dp(cls, value: object) -> Decimal | None:
+        """String-safe Decimal construction + 4dp quantize (safe_to_decimal).
+
+        Non-numeric junk raises ValueError so the payload still fails schema
+        validation (surfaced as the generic BOTAPIError) instead of being
+        silently coerced or dropped.
+        """
+        if value is None or value == "":
+            return None
+        dec = safe_to_decimal(value)
+        if dec is None:
+            raise ValueError(f"rate value is not numeric: {value!r}")
+        return dec
 
 class BOTRateData(BaseModel):
     data_detail: list[BOTRateDetail]
@@ -245,23 +307,64 @@ class BOTTransientServerError(Exception):
     pass
 
 # -------------------------------------------------------------------------
+# GATEWAY URL / AUTH HEADER CONSTANTS (single owner)
+# -------------------------------------------------------------------------
+
+# Canonical BOT gateway base URL + endpoint paths. Exported so lightweight
+# callers (e.g. gui/panels/rate_ticker.py) reuse the same endpoint strings
+# instead of hardcoding their own copies.
+BOT_GATEWAY_URL: str = "https://gateway.api.bot.or.th"
+EXG_RATE_PATH: str = "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
+HOLIDAY_PATH: str = "/financial-institutions-holidays/"
+
+
+def build_bot_headers(token: str) -> dict[str, str]:
+    """Build the standard BOT gateway auth headers for a raw token value.
+
+    Strips any user-pasted "Bearer " prefix first — the single owner of the
+    header shape used by BOTClient, ping_token, and the rate ticker.
+    """
+    clean = (token or "").removeprefix("Bearer ").strip()
+    return {
+        "X-IBM-Client-Id": clean,
+        "Authorization": f"Bearer {clean}",
+        "accept": "application/json",
+    }
+
+
+# -------------------------------------------------------------------------
 # LIGHTWEIGHT CREDENTIAL PROBE (first-run "Test Keys")
 # -------------------------------------------------------------------------
 
-# Lightweight EXG-rate endpoint used purely to verify a key is accepted.
-_PING_URL = (
-    "https://gateway.api.bot.or.th"
-    "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
-    "?start_period=2025-01-01&end_period=2025-01-02&currency=USD"
-)
+# Lightweight per-product probe URLs used purely to verify a key is accepted.
+# The gateway scopes each key to ONE product (live-verified: a valid holiday
+# key 403s on the exchange-rate endpoint and vice versa), so a key MUST be
+# probed against its own product or the result is meaningless — a correct
+# holiday key would be rejected and an exchange key pasted into the holiday
+# field would pass. The data in the response is irrelevant; only the
+# authentication outcome matters, so both windows are fixed/cheap.
+_PING_URLS = {
+    "exg": (
+        f"{BOT_GATEWAY_URL}{EXG_RATE_PATH}"
+        "?start_period=2025-01-01&end_period=2025-01-02&currency=USD"
+    ),
+    "hol": f"{BOT_GATEWAY_URL}{HOLIDAY_PATH}?year=2025",
+}
 
 
-def ping_token(token: str | None, *, timeout: float = 8.0) -> tuple[bool, str]:
+def ping_token(
+    token: str | None, *, product: str = "exg", timeout: float = 8.0,
+) -> tuple[bool, str]:
     """Probe an *entered* (not yet stored) BOT API key against the gateway.
 
     Used by the first-run token registration dialog so a user can verify a key
     before committing it. A blocking httpx call — callers MUST run it off the
     Tk thread.
+
+    ``product`` selects which gateway product the key is checked against:
+    ``"exg"`` (exchange rates, BOT_TOKEN_EXG) or ``"hol"`` (financial-
+    institution holidays, BOT_TOKEN_HOL). Keys are product-scoped at the
+    gateway, so callers must pass the product the key is actually for.
 
     Returns a ``(ok, message)`` tuple where ``ok`` is True only on an
     authenticated 200. The message distinguishes the three states the audit
@@ -273,24 +376,20 @@ def ping_token(token: str | None, *, timeout: float = 8.0) -> tuple[bool, str]:
     if not clean:
         return False, "Enter a key first, then test."
 
-    headers = {
-        "X-IBM-Client-Id": clean,
-        "Authorization": f"Bearer {clean}",
-        "accept": "application/json",
-    }
+    headers = build_bot_headers(clean)
     try:
-        resp = httpx.get(_PING_URL, headers=headers, timeout=timeout)
+        resp = httpx.get(_PING_URLS[product], headers=headers, timeout=timeout)
     except (httpx.RequestError, OSError):
         # Network/DNS/TLS failure — do NOT surface the exception text, which
         # httpx builds from the request URL (token-free here, but the URL is
         # noise for the user and keeps the message channel clean).
-        return False, "✗ Could not reach the BOT API. Check your connection."
+        return False, "FAILED: Could not reach the BOT API. Check your connection."
 
     if resp.status_code == 200:
-        return True, "✓ Key accepted — connection verified."
+        return True, "OK: Key accepted — connection verified."
     if resp.status_code in (401, 403):
-        return False, "✗ Key rejected. Check the key and try again."
-    return False, f"✗ BOT API returned HTTP {resp.status_code}."
+        return False, "FAILED: Key rejected. Check the key and try again."
+    return False, f"FAILED: BOT API returned HTTP {resp.status_code}."
 
 
 # -------------------------------------------------------------------------
@@ -325,9 +424,9 @@ class BOTClient:
         # back to the centralized constant. Connect timeout stays constant.
         self.timeout_seconds = self._resolve_timeout_seconds()
 
-        self.gateway = "https://gateway.api.bot.or.th"
-        self.exg_path = "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
-        self.hol_path = "/financial-institutions-holidays/"
+        self.gateway = BOT_GATEWAY_URL
+        self.exg_path = EXG_RATE_PATH
+        self.hol_path = HOLIDAY_PATH
 
     @staticmethod
     def _resolve_timeout_seconds() -> float:
@@ -365,12 +464,7 @@ class BOTClient:
         real connection/timeout errors and on transient 5xx server errors
         (raised as BOTTransientServerError) with exponential backoff.
         """
-        clean_token = token.removeprefix("Bearer ").strip()
-        headers = {
-            "X-IBM-Client-Id": clean_token,
-            "Authorization": f"Bearer {clean_token}",
-            "accept": "application/json"
-        }
+        headers = build_bot_headers(token)
 
         max_retries = MAX_429_RETRIES
         for attempt_429 in range(max_retries):
@@ -379,7 +473,10 @@ class BOTClient:
             )
 
             if response.status_code == 200:
-                return response.json()
+                # Exactness gate: parse JSON numbers straight into Decimal
+                # from the literal response token so a BOT rate value never
+                # exists as a binary float anywhere in the pipeline.
+                return response.json(parse_float=Decimal)
             if response.status_code == 404:
                 return {}
             if response.status_code == 429:
@@ -394,7 +491,7 @@ class BOTClient:
                 await asyncio.sleep(wait_time)
                 continue
 
-            # Authentication failure → a rejected/expired/revoked API key.
+            # Authentication failure -> a rejected/expired/revoked API key.
             # Raise a clear, actionable BOTAPIError that tells the user what to
             # do, instead of letting raise_for_status() surface a raw httpx
             # message (status URL + MDN link) that a non-technical accountant
@@ -403,10 +500,10 @@ class BOTClient:
             if response.status_code in (401, 403):
                 raise BOTAPIError(
                     f"Your BOT API key was rejected ({response.status_code}). "
-                    "Open Settings → Manage API Keys and re-enter your keys."
+                    "Open Settings -> Manage API Keys and re-enter your keys."
                 )
 
-            # Transient 5xx → raise a retryable error so tenacity backs off
+            # Transient 5xx -> raise a retryable error so tenacity backs off
             # and retries (raise_for_status would raise a non-retryable
             # HTTPStatusError). Other 4xx still fail fast below.
             if 500 <= response.status_code < 600:
@@ -414,7 +511,7 @@ class BOTClient:
                     f"BOT API server error {response.status_code}."
                 )
 
-            # Any other error (4xx) → raise for caller, fail fast
+            # Any other error (4xx) -> raise for caller, fail fast
             response.raise_for_status()
 
         raise BOTAPIError(
@@ -458,7 +555,7 @@ class BOTClient:
             e_str = current_end.strftime("%Y-%m-%d")
             chunk_idx += 1
             logger.info(
-                "API [%s] chunk %d/%d: %s → %s",
+                "API [%s] chunk %d/%d: %s -> %s",
                 currency, chunk_idx, total_chunks, s_str, e_str,
             )
             url = (

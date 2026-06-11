@@ -59,8 +59,8 @@ CATALOG: dict[str, dict[str, str]] = {
         "th": "รุ่นสำหรับองค์กร",
     },
     "main.settings_btn": {
-        "en": "⚙  Settings",
-        "th": "⚙  ตั้งค่า",
+        "en": "Settings",
+        "th": "ตั้งค่า",
     },
     # ── Main window: date section ─────────────────────────────────────
     "main.date_section": {
@@ -177,6 +177,10 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "ExRate Sheet",
         "th": "สร้างชีตอัตราแลกเปลี่ยน",
     },
+    "main.btn_verify_rates": {
+        "en": "Verify Rates",
+        "th": "ตรวจสอบอัตรา",
+    },
     "main.btn_reveal": {
         "en": "Show File in Folder",
         "th": "แสดงไฟล์ในโฟลเดอร์",
@@ -288,10 +292,6 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "No Valid Files",
         "th": "ไม่พบไฟล์ที่ใช้ได้",
     },
-    "main.no_valid_files_unsupported": {
-        "en": "No supported Excel files found.",
-        "th": "ไม่พบไฟล์ Excel ที่รองรับ",
-    },
     "main.no_valid_files_empty": {
         "en": "No Excel files found in the dropped items.",
         "th": "ไม่พบไฟล์ Excel ในรายการที่ลากมาวาง",
@@ -314,6 +314,58 @@ CATALOG: dict[str, dict[str, str]] = {
             "เพื่อไม่ให้การประมวลผลหยุดที่ไฟล์เหล่านี้"
         ),
     },
+    # ── Main window: revert flow (picker, confirmation, status) ───────
+    "main.revert_picker_title": {
+        "en": "Select the file to revert",
+        "th": "เลือกไฟล์ที่ต้องการย้อนกลับ",
+    },
+    "main.no_backup_title": {
+        "en": "No Backup Found",
+        "th": "ไม่พบไฟล์สำรอง",
+    },
+    "main.no_backup_body": {
+        "en": (
+            "No backup exists for '{name}'.\n\n"
+            "A file must have been processed at least once to have a "
+            "backup to restore from."
+        ),
+        "th": (
+            "ไม่มีไฟล์สำรองสำหรับ '{name}'\n\n"
+            "ไฟล์ต้องผ่านการประมวลผลอย่างน้อยหนึ่งครั้ง"
+            "จึงจะมีไฟล์สำรองให้กู้คืน"
+        ),
+    },
+    "main.confirm_revert_title": {
+        "en": "Confirm Revert",
+        "th": "ยืนยันการย้อนกลับ",
+    },
+    "main.confirm_revert_body": {
+        "en": (
+            "Restore '{name}' from backup dated {when}?\n\n"
+            "This OVERWRITES the current file with the backup. The current "
+            "version is snapshotted first (.pre-revert) so this is "
+            "recoverable."
+        ),
+        "th": (
+            "กู้คืน '{name}' จากไฟล์สำรองของวันที่ {when} หรือไม่?\n\n"
+            "การดำเนินการนี้จะเขียนทับไฟล์ปัจจุบันด้วยไฟล์สำรอง "
+            "ระบบจะบันทึกสำเนาไฟล์ปัจจุบันไว้ก่อน (.pre-revert) "
+            "จึงสามารถกู้คืนได้"
+        ),
+    },
+    # Fallback for {when} above, used if the backup timestamp is unknown.
+    "main.revert_when_fallback": {
+        "en": "the latest backup",
+        "th": "ไฟล์สำรองล่าสุด",
+    },
+    "main.status_restoring": {
+        "en": "Restoring:  {fname}...",
+        "th": "กำลังกู้คืน:  {fname}...",
+    },
+    "main.status_reverted": {
+        "en": "Reverted successfully from backup:  {backup}",
+        "th": "กู้คืนจากไฟล์สำรองสำเร็จ:  {backup}",
+    },
     # ── Main window: Help & About dialog ──────────────────────────────
     "main.help_btn": {
         "en": "Help",
@@ -323,13 +375,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "Help & About",
         "th": "ช่วยเหลือและเกี่ยวกับ",
     },
+    # Two-line footer form: ownership line, then the company name.
     "main.help_license": {
         "en": (
-            "Property of Advanced ID Asia Engineering Co., Ltd (AAE). "
+            "Property of\n"
+            "Advanced ID Asia Engineering., Ltd\n"
             "For internal accounting use."
         ),
         "th": (
-            "ลิขสิทธิ์ของ Advanced ID Asia Engineering Co., Ltd (AAE) — "
+            "ลิขสิทธิ์ของ\n"
+            "Advanced ID Asia Engineering., Ltd\n"
             "ใช้ภายในสำหรับงานบัญชี"
         ),
     },
@@ -544,8 +599,8 @@ CATALOG: dict[str, dict[str, str]] = {
         "th": "กำลังทดสอบคีย์…",
     },
     "token.test_ok": {
-        "en": "✓ Both keys accepted — connection verified.",
-        "th": "✓ คีย์ทั้งสองใช้ได้ — ยืนยันการเชื่อมต่อแล้ว",
+        "en": "OK: Both keys accepted — connection verified.",
+        "th": "OK: คีย์ทั้งสองใช้ได้ — ยืนยันการเชื่อมต่อแล้ว",
     },
     "token.keychain_fallback": {
         "en": (
@@ -560,8 +615,8 @@ CATALOG: dict[str, dict[str, str]] = {
     },
     # ── Scheduler panel ───────────────────────────────────────────────
     "sched.title": {
-        "en": "⏰ Auto-Processing",
-        "th": "⏰ ประมวลผลอัตโนมัติ",
+        "en": "Auto-Processing",
+        "th": "ประมวลผลอัตโนมัติ",
     },
     "sched.run_at": {
         "en": "Run at:",
@@ -576,12 +631,12 @@ CATALOG: dict[str, dict[str, str]] = {
         "th": "+ เพิ่มโฟลเดอร์",
     },
     "sched.btn_remove": {
-        "en": "✕ Remove",
-        "th": "✕ ลบ",
+        "en": "Remove",
+        "th": "ลบ",
     },
     "sched.status_no_folders": {
-        "en": "⚠ No folders selected — add at least one.",
-        "th": "⚠ ยังไม่ได้เลือกโฟลเดอร์ — กรุณาเพิ่มอย่างน้อยหนึ่งโฟลเดอร์",
+        "en": "WARNING: No folders selected — add at least one.",
+        "th": "WARNING: ยังไม่ได้เลือกโฟลเดอร์ — กรุณาเพิ่มอย่างน้อยหนึ่งโฟลเดอร์",
     },
     "sched.status_next_run": {
         "en": "Next run: {time} — watching {count} folder{plural}",
@@ -656,24 +711,24 @@ CATALOG: dict[str, dict[str, str]] = {
         "th": "กำลังส่งออก...",
     },
     "csv.import_ok": {
-        "en": "✓ Imported {count} rate entries",
-        "th": "✓ นำเข้าอัตรา {count} รายการแล้ว",
+        "en": "OK: Imported {count} rate entries",
+        "th": "OK: นำเข้าอัตรา {count} รายการแล้ว",
     },
     # Detailed import confirmation (shown when a date span is known); the
     # plain csv.import_ok above is the no-detail fallback.
     "csv.import_ok_detail": {
         "en": (
-            "✓ Imported {count} entries: {currencies} — {start} to {end}. "
+            "OK: Imported {count} entries: {currencies} — {start} to {end}. "
             "These rates are now used automatically by Process Batch."
         ),
         "th": (
-            "✓ นำเข้า {count} รายการ: {currencies} — {start} ถึง {end} "
+            "OK: นำเข้า {count} รายการ: {currencies} — {start} ถึง {end} "
             "ระบบจะใช้อัตราเหล่านี้โดยอัตโนมัติเมื่อประมวลผลทั้งชุด"
         ),
     },
     "csv.export_ok": {
-        "en": "✓ Exported {count} rate rows",
-        "th": "✓ ส่งออกอัตรา {count} แถวแล้ว",
+        "en": "OK: Exported {count} rate rows",
+        "th": "OK: ส่งออกอัตรา {count} แถวแล้ว",
     },
     "csv.export_empty": {
         "en": "No cached rates to export yet — fetch or import rates first.",
@@ -779,6 +834,119 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "Restore Selected",
         "th": "กู้คืนรายการที่เลือก",
     },
+    # ── Rate Audit (verify an existing workbook's rates against BOT) ──
+    # Status-line strings; {msg} is the English progress/error detail from
+    # core/rate_audit.py (core strings stay English per the SCOPE note).
+    "rateaudit.picker_title": {
+        "en": "Verify a workbook's ExRate rates against BOT",
+        "th": "ตรวจสอบอัตราในชีต ExRate ของไฟล์งานกับข้อมูล ธปท.",
+    },
+    "rateaudit.status_starting": {
+        "en": "Rate audit: starting…",
+        "th": "ตรวจสอบอัตรา: กำลังเริ่ม…",
+    },
+    "rateaudit.status_progress": {
+        "en": "Rate audit: {msg}",
+        "th": "ตรวจสอบอัตรา: {msg}",
+    },
+    "rateaudit.status_applied": {
+        "en": "Rate audit: applied {count} correction(s)",
+        "th": "ตรวจสอบอัตรา: แก้ไขแล้ว {count} รายการ",
+    },
+    "rateaudit.status_all_match": {
+        "en": "Rate audit: all rates already match BOT",
+        "th": "ตรวจสอบอัตรา: อัตราทั้งหมดตรงกับข้อมูล ธปท. แล้ว",
+    },
+    "rateaudit.status_failed": {
+        "en": "Rate audit failed: {msg}",
+        "th": "การตรวจสอบอัตราล้มเหลว: {msg}",
+    },
+    # User-facing twin of core.rate_audit.LAYOUT_ERROR_MSG (which itself
+    # stays English in the report/CSV for auditability).
+    "rateaudit.err_layout": {
+        "en": (
+            "Non-standard ExRate layout — audit supports only the "
+            "standard USD/EUR sheet"
+        ),
+        "th": (
+            "รูปแบบชีต ExRate ไม่เป็นไปตามมาตรฐาน — "
+            "การตรวจสอบรองรับเฉพาะชีต USD/EUR มาตรฐานเท่านั้น"
+        ),
+    },
+    # Report dialog.
+    "rateaudit.report_title": {
+        "en": "Rate Audit Report",
+        "th": "รายงานการตรวจสอบอัตรา",
+    },
+    "rateaudit.workbook_fallback": {
+        "en": "(workbook)",
+        "th": "(ไฟล์งาน)",
+    },
+    "rateaudit.head_corrected": {
+        "en": "Corrected {count} rate(s) in {fname}",
+        "th": "แก้ไขอัตรา {count} รายการในไฟล์ {fname}",
+    },
+    "rateaudit.head_differences": {
+        "en": "{count} difference(s) found in {fname}",
+        "th": "พบความแตกต่าง {count} รายการในไฟล์ {fname}",
+    },
+    "rateaudit.head_all_match": {
+        "en": "All rates already match BOT — {fname}",
+        "th": "อัตราทั้งหมดตรงกับข้อมูล ธปท. แล้ว — {fname}",
+    },
+    "rateaudit.sub_scanned": {
+        "en": "Scanned {rows} trading-day row(s); compared {cells} cell(s).",
+        "th": "สแกนแถววันทำการ {rows} แถว และเปรียบเทียบ {cells} เซลล์แล้ว",
+    },
+    "rateaudit.sub_unverifiable": {
+        "en": "{count} cell(s) had no BOT data to verify.",
+        "th": "เซลล์ {count} เซลล์ไม่มีข้อมูล ธปท. ให้ตรวจสอบ",
+    },
+    "rateaudit.col_date": {"en": "Date", "th": "วันที่"},
+    "rateaudit.col_cell": {"en": "Cell", "th": "เซลล์"},
+    "rateaudit.col_currency_type": {
+        "en": "Currency / Type",
+        "th": "สกุลเงิน / ประเภท",
+    },
+    "rateaudit.col_old": {"en": "Old", "th": "ค่าเดิม"},
+    "rateaudit.col_new": {"en": "New", "th": "ค่าใหม่"},
+    "rateaudit.col_why": {"en": "Why", "th": "เหตุผล"},
+    "rateaudit.blank_value": {
+        "en": "(blank)",
+        "th": "(ว่าง)",
+    },
+    "rateaudit.no_corrections": {
+        "en": (
+            "No corrections were needed — every trading-day rate "
+            "already matched the official BOT value."
+        ),
+        "th": (
+            "ไม่จำเป็นต้องแก้ไขรายการใด — อัตราของทุกวันทำการ"
+            "ตรงกับค่าทางการของ ธปท. อยู่แล้ว"
+        ),
+    },
+    "rateaudit.btn_revert": {
+        "en": "Revert these changes",
+        "th": "ย้อนกลับการแก้ไขเหล่านี้",
+    },
+    "rateaudit.revert_busy": {
+        "en": (
+            "Busy — another operation is running. "
+            "Try again when it finishes."
+        ),
+        "th": (
+            "ไม่ว่าง — มีการทำงานอื่นกำลังดำเนินอยู่ "
+            "กรุณาลองอีกครั้งเมื่อเสร็จสิ้น"
+        ),
+    },
+    "rateaudit.csv_label": {
+        "en": "CSV: {name}",
+        "th": "CSV: {name}",
+    },
+    "rateaudit.btn_close": {
+        "en": "Close",
+        "th": "ปิด",
+    },
     # ── Rate ticker (live-data status indicator) ──────────────────────
     "ticker.connecting": {
         "en": "SYNC",
@@ -878,7 +1046,7 @@ def reload_language() -> str:
 def tr(key: str, **fmt) -> str:
     """Translate ``key`` to the active language with optional formatting.
 
-    Resolution order: active language → English → the key itself. The final
+    Resolution order: active language -> English -> the key itself. The final
     fallback to the key (rather than an empty string) keeps a missing entry
     debuggable on screen instead of silently blanking a label.
 

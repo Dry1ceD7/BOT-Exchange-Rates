@@ -163,3 +163,52 @@ class TestSafeAfterCallback:
         tk_root.update()  # drain pending after() callbacks
         assert called == [1], "callback must execute while panel is alive"
         panel.destroy()
+
+    def test_callback_receives_args(self, tk_root):
+        panel = _make_panel(tk_root)
+        called = []
+        panel._safe_after(0, lambda a, b: called.append((a, b)), "x", 2)
+        tk_root.update()
+        assert called == [("x", 2)]
+        panel.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Tests: destroy() cancels pending after() callbacks (F137)
+# ---------------------------------------------------------------------------
+
+class TestDestroyCancelsPendingAfters:
+    """destroy() must after_cancel every still-pending _safe_after timer."""
+
+    def test_destroy_cancels_pending_timer(self, tk_root):
+        panel = _make_panel(tk_root)
+        called = []
+        panel._safe_after(60000, lambda: called.append(1))
+        assert len(panel._pending_after_ids) == 1
+        after_id = panel._pending_after_ids[0]
+        # The timer is registered with the Tcl interpreter...
+        assert after_id in str(tk_root.tk.call("after", "info"))
+        panel.destroy()
+        # ...and gone once destroy() cancelled it.
+        assert after_id not in str(tk_root.tk.call("after", "info"))
+        assert panel._pending_after_ids == []
+        assert called == []
+
+    def test_fired_callback_drops_tracking_entry(self, tk_root):
+        """Fired callbacks remove their id so the list stays bounded."""
+        panel = _make_panel(tk_root)
+        called = []
+        panel._safe_after(0, lambda: called.append(1))
+        assert len(panel._pending_after_ids) == 1
+        tk_root.update()
+        assert called == [1]
+        assert panel._pending_after_ids == []
+        panel.destroy()
+
+    def test_destroy_survives_stale_after_id(self, tk_root):
+        """after_cancel on an unknown/stale id raises TclError — suppressed."""
+        panel = _make_panel(tk_root)
+        panel._pending_after_ids.append("after#999999999")
+        panel.destroy()  # must not raise
+        assert panel._destroyed is True
+        assert panel._pending_after_ids == []

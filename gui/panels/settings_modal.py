@@ -12,6 +12,7 @@ SFFB: Strict < 200 lines.  (Previously 731 → now ~130)
 
 import contextlib
 import logging
+import math
 import platform
 import subprocess
 import tkinter
@@ -19,7 +20,7 @@ from pathlib import Path
 
 import customtkinter as ctk
 
-from core.config_manager import SettingsManager
+from core.config_manager import MAX_ANOMALY_THRESHOLD_PCT, SettingsManager
 from core.i18n import (
     DEFAULT_LANGUAGE,
     LANGUAGE_LABELS,
@@ -364,6 +365,58 @@ class SettingsModal(ctk.CTkToplevel):
         parent = self.master
         if hasattr(parent, "_apply_theme"):
             self.after(150, parent._apply_theme)
+        # This modal's own widgets are built from mode-resolved get_theme()
+        # colors, so the appearance tracker cannot flip them — without this
+        # the window holding the input grab kept the stale palette (the
+        # half-themed state users read as a frozen/broken UI). Same deferral
+        # as the parent re-theme so both surfaces flip together.
+        self._schedule_retheme()
+
+    def _schedule_retheme(self):
+        """Schedule the deferred rebuild, coalescing rapid toggles.
+
+        Without the cancel, flipping Dark/Light/System N times inside the
+        150ms window queued N full teardown+rebuild cycles — correctness-
+        neutral but N× the rebuild cost on the 4GB legacy target. Only the
+        LAST toggle's rebuild runs.
+        """
+        if getattr(self, "_retheme_after_id", None) is not None:
+            with contextlib.suppress(ValueError, tkinter.TclError):
+                self.after_cancel(self._retheme_after_id)
+        self._retheme_after_id = self.after(150, self._retheme)
+
+    def _retheme(self):
+        """Rebuild this modal's UI with the freshly resolved theme palette.
+
+        Widgets here are configured with mode-resolved single colors from
+        ``get_theme()``, so CustomTkinter's appearance tracker cannot flip
+        them after a Dark/Light toggle. Rebuilding is the cheapest correct
+        refresh; the control Vars are carried across so unsaved edits
+        survive. Transient status labels (ping result, import/export
+        status) reset by design. Safe to fire after the modal is destroyed
+        (the deferred after() may outlive a quick Escape).
+        """
+        self._retheme_after_id = None
+        with contextlib.suppress(tkinter.TclError):
+            if not self.winfo_exists():
+                return
+            state = {
+                "appearance": self._appearance_var.get(),
+                "language": self._language_var.get(),
+                "rate_type": self._rate_type_var.get(),
+                "anomaly": self._anomaly_threshold_var.get(),
+                "auto_update": self._auto_update_var.get(),
+            }
+            for child in list(self.winfo_children()):
+                child.destroy()
+            self._t = get_theme()
+            self.configure(fg_color=self._t["modal_bg"])
+            self._build_ui()
+            self._appearance_var.set(state["appearance"])
+            self._language_var.set(state["language"])
+            self._rate_type_var.set(state["rate_type"])
+            self._anomaly_threshold_var.set(state["anomaly"])
+            self._auto_update_var.set(state["auto_update"])
 
     def _on_open_logs(self):
         """Reveal data/logs (audit CSVs + rotated logs) in the OS file manager.
@@ -471,6 +524,9 @@ class SettingsModal(ctk.CTkToplevel):
         parent = self.master
         if hasattr(parent, "_apply_theme"):
             self.after(150, parent._apply_theme)
+        # Same stale-palette gap as _on_appearance_change: an imported
+        # appearance flip must also refresh this modal's own widgets.
+        self._schedule_retheme()
 
         rate_field = self._settings.get("rate_type", "buying_transfer")
         self._rate_type_var.set(
@@ -499,6 +555,15 @@ class SettingsModal(ctk.CTkToplevel):
         try:
             threshold = float(raw)
         except (TypeError, ValueError):
+            self._anomaly_error.configure(
+                text=tr("settings.anomaly_invalid")
+            )
+            self._anomaly_entry.focus_set()
+            return None
+        # float() happily parses 'nan'/'inf': nan compares False against
+        # everything (slipping past the bound checks) and inf would silently
+        # disable the guardrail, so both are rejected explicitly.
+        if not math.isfinite(threshold) or threshold > MAX_ANOMALY_THRESHOLD_PCT:
             self._anomaly_error.configure(
                 text=tr("settings.anomaly_invalid")
             )

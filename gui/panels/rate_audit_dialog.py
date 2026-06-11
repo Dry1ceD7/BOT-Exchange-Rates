@@ -23,7 +23,8 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
-from core.rate_audit import write_audit_csv
+from core.i18n import tr
+from core.rate_audit import LAYOUT_ERROR_MSG, write_audit_csv
 from gui.theme import get_theme
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,9 @@ def show_rate_audit_dialog(app) -> None:
     file picker, release that lock immediately so the UI is not left stuck.
     """
     filepath = filedialog.askopenfilename(
-        title="Verify a workbook's ExRate rates against BOT",
+        title=tr("rateaudit.picker_title"),
+        # .xlsm stays selectable: the workbook pipeline loads macro-enabled
+        # files with keep_vba so their VBA project survives the round-trip.
         filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")],
     )
     if not filepath:
@@ -61,16 +64,22 @@ def _launch_worker(app, filepath: str) -> None:
     event_bus = getattr(app, "event_bus", None)
 
     def _status_cb(msg: str) -> None:
-        with contextlib.suppress(RuntimeError):
-            app.after(0, _set_status, app, f"Rate audit: {msg}")
+        # _safe_marshal no-ops once the app is closing and swallows both
+        # RuntimeError AND TclError (TclError is NOT a RuntimeError subclass),
+        # so a teardown race can never kill the worker thread.
+        # ``msg`` is the English progress detail from core/rate_audit.py
+        # (core strings stay English per the i18n SCOPE note).
+        app._safe_marshal(
+            _set_status, app, tr("rateaudit.status_progress", msg=msg)
+        )
 
     def _done_ok(report, csv_path) -> None:
         app._exrate_running = False
         n = report.change_count
         _set_status(
             app,
-            f"Rate audit: applied {n} correction(s)"
-            if n else "Rate audit: all rates already match BOT",
+            tr("rateaudit.status_applied", count=n)
+            if n else tr("rateaudit.status_all_match"),
             t["process_text"] if n else t["text_secondary"],
         )
         with contextlib.suppress(Exception):
@@ -78,7 +87,11 @@ def _launch_worker(app, filepath: str) -> None:
 
     def _done_err(msg: str) -> None:
         app._exrate_running = False
-        _set_status(app, f"Rate audit failed: {msg}", t["warning"])
+        # The layout refusal is the one structured, user-meaningful failure —
+        # show its translated twin; other details stay verbatim (English).
+        if msg == LAYOUT_ERROR_MSG:
+            msg = tr("rateaudit.err_layout")
+        _set_status(app, tr("rateaudit.status_failed", msg=msg), t["warning"])
 
     def _worker() -> None:
         import httpx
@@ -102,12 +115,10 @@ def _launch_worker(app, filepath: str) -> None:
             csv_path = None
             with contextlib.suppress(Exception):
                 csv_path = write_audit_csv(report)
-            with contextlib.suppress(RuntimeError):
-                app.after(0, _done_ok, report, csv_path)
+            app._safe_marshal(_done_ok, report, csv_path)
         except Exception as e:  # noqa: BLE001 — surfaced to the user via _done_err
             logger.exception("Rate audit worker failed")
-            with contextlib.suppress(RuntimeError):
-                app.after(0, _done_err, str(e))
+            app._safe_marshal(_done_err, str(e))
         finally:
             with contextlib.suppress(Exception):
                 loop.close()
@@ -121,7 +132,7 @@ def _launch_worker(app, filepath: str) -> None:
     if hasattr(app, "_register_worker"):
         with contextlib.suppress(Exception):
             app._register_worker(worker, "RateAuditWorker")
-    _set_status(app, "Rate audit: starting…", t["text_secondary"])
+    _set_status(app, tr("rateaudit.status_starting"), t["text_secondary"])
     worker.start()
 
 
@@ -129,7 +140,7 @@ def _show_report_dialog(app, report, csv_path: str | None) -> None:
     """Modal report listing every correction (date, cell, old → new, why)."""
     t = get_theme()
     dlg = ctk.CTkToplevel(app)
-    dlg.title("Rate Audit Report")
+    dlg.title(tr("rateaudit.report_title"))
     dlg.geometry("720x480")
     with contextlib.suppress(Exception):
         dlg.transient(app)
@@ -138,25 +149,30 @@ def _show_report_dialog(app, report, csv_path: str | None) -> None:
     with contextlib.suppress(Exception):
         dlg.configure(fg_color=t["modal_bg"])
 
-    fname = Path(report.file).name if report.file else "(workbook)"
+    fname = (
+        Path(report.file).name if report.file
+        else tr("rateaudit.workbook_fallback")
+    )
     n = report.change_count
     if report.applied and n:
-        head = f"Corrected {n} rate(s) in {fname}"
+        head = tr("rateaudit.head_corrected", count=n, fname=fname)
     elif n:
-        head = f"{n} difference(s) found in {fname}"
+        head = tr("rateaudit.head_differences", count=n, fname=fname)
     else:
-        head = f"All rates already match BOT — {fname}"
+        head = tr("rateaudit.head_all_match", fname=fname)
     ctk.CTkLabel(
         dlg, text=head, font=ctk.CTkFont(size=16, weight="bold"),
         text_color=t["modal_text"], wraplength=680,
     ).pack(pady=(16, 4), padx=16)
 
-    sub = (
-        f"Scanned {report.scanned_rows} trading-day row(s); "
-        f"compared {report.compared_cells} cell(s)."
+    sub = tr(
+        "rateaudit.sub_scanned",
+        rows=report.scanned_rows, cells=report.compared_cells,
     )
     if report.unverifiable:
-        sub += f"  {report.unverifiable} cell(s) had no BOT data to verify."
+        sub += "  " + tr(
+            "rateaudit.sub_unverifiable", count=report.unverifiable
+        )
     ctk.CTkLabel(
         dlg, text=sub, font=ctk.CTkFont(size=11), text_color=t["modal_muted"],
         wraplength=680,
@@ -168,7 +184,11 @@ def _show_report_dialog(app, report, csv_path: str | None) -> None:
     if report.changes:
         hdr_font = ctk.CTkFont(size=11, weight="bold")
         cell_font = ctk.CTkFont(size=11)
-        headers = ("Date", "Cell", "Currency / Type", "Old", "New", "Why")
+        headers = (
+            tr("rateaudit.col_date"), tr("rateaudit.col_cell"),
+            tr("rateaudit.col_currency_type"), tr("rateaudit.col_old"),
+            tr("rateaudit.col_new"), tr("rateaudit.col_why"),
+        )
         for col, label in enumerate(headers):
             ctk.CTkLabel(
                 body, text=label, font=hdr_font, text_color=t["modal_muted"],
@@ -179,7 +199,8 @@ def _show_report_dialog(app, report, csv_path: str | None) -> None:
                 ch.rate_date.strftime("%Y-%m-%d"),
                 ch.cell,
                 f"{ch.currency} {ch.rate_type}",
-                "(blank)" if ch.old_value is None else str(ch.old_value),
+                tr("rateaudit.blank_value")
+                if ch.old_value is None else str(ch.old_value),
                 str(ch.new_value),
                 ch.reason,
             )
@@ -192,8 +213,7 @@ def _show_report_dialog(app, report, csv_path: str | None) -> None:
     else:
         ctk.CTkLabel(
             body,
-            text="No corrections were needed — every trading-day rate "
-                 "already matched the official BOT value.",
+            text=tr("rateaudit.no_corrections"),
             font=ctk.CTkFont(size=12), text_color=t["modal_text"],
             wraplength=640,
         ).pack(pady=24)
@@ -205,27 +225,48 @@ def _show_report_dialog(app, report, csv_path: str | None) -> None:
         def _revert() -> None:
             # Restore the EXACT pre-correction backup we captured, not merely
             # the latest — a batch could have snapshotted the file since.
-            with contextlib.suppress(Exception):
-                app.batch_handler.start_revert(
-                    report.file, backup_path=report.backup_path,
+            # Route through the guarded app entry: our _exrate_running lease
+            # was released before this dialog opened, so the entry re-checks
+            # the batch/revert/ExRate busy flags and raises _revert_running,
+            # ensuring the RevertWorker can never run concurrently with a
+            # scheduler-fired batch on the same workbook.
+            try:
+                started = app._start_guarded_revert(
+                    report.file, report.backup_path,
                 )
+            except Exception:  # noqa: BLE001 — keep the dialog usable
+                logger.exception("Rate audit revert launch failed")
+                started = False
+            if not started:
+                # Refused (another operation owns the file) or failed to
+                # launch — say so here; the grab hides the main status bar.
+                with contextlib.suppress(Exception):
+                    lbl_revert_status.configure(
+                        text=tr("rateaudit.revert_busy"),
+                    )
+                return
             with contextlib.suppress(Exception):
                 dlg.destroy()
 
         ctk.CTkButton(
-            btn_row, text="Revert these changes",
+            btn_row, text=tr("rateaudit.btn_revert"),
             fg_color=t["warning"],
             hover_color=t.get("warning_hover", t["warning"]),
             font=ctk.CTkFont(size=12, weight="bold"),
             command=_revert,
         ).pack(side="left")
+        lbl_revert_status = ctk.CTkLabel(
+            btn_row, text="", font=ctk.CTkFont(size=11),
+            text_color=t["warning"], wraplength=320, justify="left",
+        )
+        lbl_revert_status.pack(side="left", padx=10)
 
     if csv_path:
         ctk.CTkLabel(
-            btn_row, text=f"CSV: {Path(csv_path).name}",
+            btn_row, text=tr("rateaudit.csv_label", name=Path(csv_path).name),
             font=ctk.CTkFont(size=10), text_color=t["modal_muted"],
         ).pack(side="left", padx=12)
 
     ctk.CTkButton(
-        btn_row, text="Close", command=dlg.destroy,
+        btn_row, text=tr("rateaudit.btn_close"), command=dlg.destroy,
     ).pack(side="right")

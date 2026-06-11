@@ -5,6 +5,9 @@ tests/conftest.py
 Shared pytest fixtures for the BOT Exchange Rate Processor test suite.
 ---------------------------------------------------------------------------
 Provides:
+  - isolated_settings (autouse): redirects SettingsManager's DEFAULT config
+    dir to a per-test temp dir so no test can read or write the developer's
+    real data/settings.json.
   - ledger_xlsx: factory building a real workbook with Date/Cur/EX Rate
     columns across one or more monthly tabs.
   - tmp_cache: a CacheDB backed by a temporary on-disk SQLite file.
@@ -23,7 +26,40 @@ from unittest.mock import AsyncMock
 import openpyxl
 import pytest
 
+from core.config_manager import SettingsManager
 from core.database import CacheDB
+
+
+@pytest.fixture(autouse=True)
+def isolated_settings(tmp_path_factory, monkeypatch):
+    """Point SettingsManager's default config dir at an isolated temp dir.
+
+    SettingsManager() with no argument resolves its config dir to
+    <project_root>/data, i.e. the developer's REAL data/settings.json.
+    LedgerEngine snapshots rate_type and the anomaly threshold from there at
+    construction, so without isolation a test outcome could depend on local
+    machine state (and a test calling set() could corrupt the real file).
+
+    This fixture rewrites only the DEFAULT config_dir resolution. It composes
+    with the rest of the suite:
+      - tests passing an explicit config_dir (test_config_manager.py) keep
+        their own directory untouched;
+      - tests substituting a fake SettingsManager class or patching its
+        methods bypass __init__ entirely and are unaffected.
+
+    Yields the isolated directory path so a test can pre-seed settings.json
+    before code under test constructs a default SettingsManager.
+    """
+    isolated_dir = tmp_path_factory.mktemp("settings_isolated")
+    orig_init = SettingsManager.__init__
+
+    def _patched_init(self, config_dir=None):
+        if config_dir is None:
+            config_dir = str(isolated_dir)
+        orig_init(self, config_dir)
+
+    monkeypatch.setattr(SettingsManager, "__init__", _patched_init)
+    yield str(isolated_dir)
 
 
 @pytest.fixture

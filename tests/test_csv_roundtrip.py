@@ -69,6 +69,48 @@ def test_export_import_export_is_identical(tmp_path):
     assert _read_bytes(export1) == _read_bytes(export2)
 
 
+def test_overprecise_external_csv_quantized_then_roundtrips(tmp_path):
+    """F30: an external CSV carrying >4dp digits imports as exact 4dp
+    Decimals (the Layer-1 hard gate), and the subsequent export -> import ->
+    export cycle is byte-identical — quantization is idempotent after the
+    first import, so the 4dp lossless guarantee is preserved."""
+    external = str(tmp_path / "external.csv")
+    with open(external, "w", encoding="utf-8") as f:
+        f.write(
+            "Period,Currency_ID,Rate_Type,Value\n"
+            "2025-01-02,USD,buying_transfer,42.123456\n"
+            "2025-01-02,USD,selling,34.800049\n"
+        )
+
+    db1 = CacheDB(db_path=str(tmp_path / "db1.db"))
+    assert import_bot_csv(external, db1) == 2
+
+    # Cache holds exactly the 4dp-quantized Decimals, at exactly 4dp.
+    buy = db1.get_multi_rate(date(2025, 1, 2), "USD", "buying_transfer")
+    assert buy == Decimal("42.1235")
+    assert buy.as_tuple().exponent == -4
+    sell = db1.get_multi_rate(date(2025, 1, 2), "USD", "selling")
+    assert sell == Decimal("34.8000")
+    for _, _, _, v in db1.get_all_multi_rates():
+        assert v is not None and v.as_tuple().exponent == -4
+
+    export1 = str(tmp_path / "export1.csv")
+    assert export_rates_csv(export1, db1) == 2
+    db1.close()
+
+    db2 = CacheDB(db_path=str(tmp_path / "db2.db"))
+    assert import_bot_csv(export1, db2) == 2
+    assert db2.get_multi_rate(
+        date(2025, 1, 2), "USD", "buying_transfer",
+    ) == Decimal("42.1235")
+
+    export2 = str(tmp_path / "export2.csv")
+    assert export_rates_csv(export2, db2) == 2
+    db2.close()
+
+    assert _read_bytes(export1) == _read_bytes(export2)
+
+
 def test_roundtrip_preserves_all_decimals_exactly(tmp_path):
     src = CacheDB(db_path=str(tmp_path / "src.db"))
     _seed(src)

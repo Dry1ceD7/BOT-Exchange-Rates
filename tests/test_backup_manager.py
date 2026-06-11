@@ -439,3 +439,47 @@ class TestRestoreSpecific:
         open(empty, "wb").close()
         with pytest.raises(BackupError, match="empty"):
             mgr.restore_specific(test_file, empty)
+
+    def test_restore_specific_rejects_path_outside_backup_dir(self, backup_env):
+        """SECURITY (F103): a matching NAME outside the backups dir is refused."""
+        mgr, test_file, _, tmpdir = backup_env
+        ts = datetime.now().strftime(BackupManager._TS_FORMAT)
+        outside = os.path.join(tmpdir, f"ledger__bak__{ts}.xlsx")
+        with open(outside, "wb") as f:
+            f.write(b"PLANTED_OUTSIDE_BACKUPS")
+        with pytest.raises(BackupError, match="outside the backups directory"):
+            mgr.restore_specific(test_file, outside)
+        # The live file was never overwritten by the planted copy.
+        with open(test_file, "rb") as f:
+            assert f.read() == b"FAKE_XLSX_CONTENT_ORIGINAL"
+
+    def test_restore_specific_rejects_traversal_out_of_backup_dir(
+        self, backup_env,
+    ):
+        """SECURITY (F103): '..' traversal that escapes the backups dir is
+        refused even when the path STARTS inside it."""
+        mgr, test_file, backup_dir, tmpdir = backup_env
+        ts = datetime.now().strftime(BackupManager._TS_FORMAT)
+        planted = os.path.join(tmpdir, f"ledger__bak__{ts}.xlsx")
+        with open(planted, "wb") as f:
+            f.write(b"PLANTED_OUTSIDE_BACKUPS")
+        sneaky = os.path.join(backup_dir, "..", f"ledger__bak__{ts}.xlsx")
+        with pytest.raises(BackupError, match="outside the backups directory"):
+            mgr.restore_specific(test_file, sneaky)
+
+    def test_restore_specific_accepts_unnormalized_inside_path(
+        self, backup_env,
+    ):
+        """A path that resolves INSIDE the backups dir still restores."""
+        mgr, test_file, backup_dir, _ = backup_env
+        backup = mgr.create_backup(test_file)
+        with open(test_file, "wb") as f:
+            f.write(b"CORRUPTED")
+        unnormalized = os.path.join(
+            backup_dir, "..", os.path.basename(backup_dir),
+            os.path.basename(backup),
+        )
+        used = mgr.restore_specific(test_file, unnormalized)
+        assert os.path.basename(used) == os.path.basename(backup)
+        with open(test_file, "rb") as f:
+            assert f.read() == b"FAKE_XLSX_CONTENT_ORIGINAL"

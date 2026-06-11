@@ -389,7 +389,7 @@ class TestSchedulerPanelStatusLabel:
         panel._update_status()
         text = panel._lbl_status.cget("text")
         assert text != "", "Status must not be empty when no paths"
-        assert "No folders" in text or "no" in text.lower() or "warning" in text.lower() or "⚠" in text
+        assert "No folders" in text or "no" in text.lower() or "warning" in text.lower() or "WARNING:" in text
         panel.destroy()
 
     def test_status_shows_success_when_paths_present(self, tk_root, tmp_path):
@@ -995,7 +995,7 @@ class TestSchedulerPanelMissingFolders:
         content = panel._path_list.get("1.0", "end")
         panel._path_list.configure(state="disabled")
         # The unavailable marker glyph distinguishes it from a healthy folder.
-        assert "⚠" in content
+        assert "WARNING:" in content
         assert "gone" in content
         panel.destroy()
 
@@ -1186,6 +1186,19 @@ class TestSchedulerPanelLastRun:
         panel.refresh_last_run()
         assert "3 OK, 0 failed" in panel._lbl_last_run.cget("text")
         panel.destroy()
+
+    def test_announce_scheduled_run_refreshes_panel(self, monkeypatch):
+        """F77 wiring: a scheduled fire calls the panel's refresh hook
+        in-session (the persisted record alone only covers future loads)."""
+        from gui.app import BOTExrateApp
+
+        monkeypatch.setattr("gui.app._settings_mgr.set", lambda *a, **k: None)
+        app = MagicMock()
+        app._tray = None  # no tray on this platform
+
+        BOTExrateApp._announce_scheduled_run(app, success=2, fail=0)
+
+        app.scheduler_panel.refresh_last_run.assert_called_once_with()
 
     def test_malformed_last_run_record_hides_row(self, tk_root, _last_run_key):
         settings = {

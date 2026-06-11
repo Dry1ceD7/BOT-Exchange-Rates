@@ -2,7 +2,7 @@
 """
 core/workers/event_bus.py
 ---------------------------------------------------------------------------
-Thread-safe Producer-Consumer event queue for GUI ↔ Worker communication.
+Thread-safe Producer-Consumer event queue for GUI <-> Worker communication.
 ---------------------------------------------------------------------------
 Workers push structured events; the CTk main loop drains and renders them.
 """
@@ -108,12 +108,12 @@ class EventBus:
         if existing_marker is not None:
             existing_marker["_dropped"] += 1
             existing_marker["msg"] = (
-                f"⚠ {existing_marker['_dropped']} log lines dropped (queue full)"
+                f"WARNING: {existing_marker['_dropped']} log lines dropped (queue full)"
             )
         else:
             self._queue.appendleft({
                 "type": "warning",
-                "msg": "⚠ 1 log lines dropped (queue full)",
+                "msg": "WARNING: 1 log lines dropped (queue full)",
                 "_dropped": 1,
             })
 

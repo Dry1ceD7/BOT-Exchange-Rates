@@ -35,6 +35,16 @@ def apply_theme_to_app(app) -> None:
         app.lbl_header_title.configure(text_color=t["header_text"])
     if hasattr(app, "lbl_header_sub"):
         app.lbl_header_sub.configure(text_color=t["header_sub"])
+    # Header buttons — same tokens as app._build_header.
+    for attr in ("_btn_settings", "_btn_help"):
+        widget = getattr(app, attr, None)
+        if widget:
+            widget.configure(
+                fg_color=t["settings_btn"],
+                hover_color=t["settings_btn_hover"],
+                text_color=t["settings_btn_text"],
+                border_color=t["settings_btn_border"],
+            )
 
     # ── Card ──────────────────────────────────────────────────────
     if hasattr(app, "card"):
@@ -97,9 +107,30 @@ def apply_theme_to_app(app) -> None:
     if hasattr(app, "dz_sub"):
         app.dz_sub.configure(text_color=t["text_muted"])
 
+    # ── Empty-state walkthrough label ─────────────────────────────
+    if hasattr(app, "lbl_empty_state"):
+        app.lbl_empty_state.configure(text_color=t["text_muted"])
+
     # ── Queue label ───────────────────────────────────────────────
     if hasattr(app, "lbl_queue"):
         app.lbl_queue.configure(text_color=t["text_secondary"])
+    if hasattr(app, "btn_clear_queue"):
+        app.btn_clear_queue.configure(
+            fg_color=t["btn_secondary"],
+            hover_color=t["btn_secondary_hover"],
+        )
+
+    # ── Dry-run simulation toggle (same tokens as app._build_card) ─
+    if hasattr(app, "toggle_dryrun"):
+        app.toggle_dryrun.configure(
+            text_color=t["text_secondary"],
+            progress_color=t["warning"],
+            button_color=t["switch_thumb"],
+            button_hover_color=t["switch_hover"],
+            fg_color=t["switch_track"],
+        )
+    if hasattr(app, "lbl_dryrun_hint"):
+        app.lbl_dryrun_hint.configure(text_color=t["text_muted"])
 
     # ── Status box ────────────────────────────────────────────────
     if hasattr(app, "lbl_status"):
@@ -124,6 +155,21 @@ def apply_theme_to_app(app) -> None:
         app.btn_revert.configure(
             fg_color=t["revert_bg"],
             hover_color=t["revert_hover"],
+        )
+    if hasattr(app, "btn_backups"):
+        app.btn_backups.configure(
+            fg_color=t["btn_secondary"],
+            hover_color=t["btn_secondary_hover"],
+        )
+    if hasattr(app, "btn_export_exrate"):
+        app.btn_export_exrate.configure(
+            fg_color=t["accent_indigo"],
+            hover_color=t["accent_indigo_hover"],
+        )
+    if hasattr(app, "btn_verify_rates"):
+        app.btn_verify_rates.configure(
+            fg_color=t["btn_secondary"],
+            hover_color=t["btn_secondary_hover"],
         )
     if hasattr(app, "btn_reveal"):
         app.btn_reveal.configure(

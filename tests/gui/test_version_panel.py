@@ -171,7 +171,7 @@ class TestVersionPanelPingDone:
         panel._busy_ping = True
         panel._btn_ping.configure(state="disabled")
 
-        panel._ping_done("✓ API connected & authenticated", "#00aa00")
+        panel._ping_done("OK: API connected & authenticated", "#00aa00")
 
         assert panel._btn_ping.cget("state") == "normal"
         panel.destroy()
@@ -180,9 +180,9 @@ class TestVersionPanelPingDone:
         panel = _make_panel(tk_root)
         panel._busy_ping = True
 
-        panel._ping_done("✓ API connected & authenticated", "#00aa00")
+        panel._ping_done("OK: API connected & authenticated", "#00aa00")
 
-        assert panel._lbl_ping.cget("text") == "✓ API connected & authenticated"
+        assert panel._lbl_ping.cget("text") == "OK: API connected & authenticated"
         panel.destroy()
 
     def test_ping_done_clears_busy_flag(self, tk_root):
@@ -198,9 +198,9 @@ class TestVersionPanelPingDone:
         panel = _make_panel(tk_root)
         panel._busy_ping = True
 
-        panel._ping_done("✗ Connection refused", "#ff0000")
+        panel._ping_done("FAILED: Connection refused", "#ff0000")
 
-        assert "✗" in panel._lbl_ping.cget("text")
+        assert "FAILED:" in panel._lbl_ping.cget("text")
         panel.destroy()
 
 
@@ -240,7 +240,7 @@ class TestVersionPanelCheckUpdate:
         panel._busy_update = True
         panel._btn_update.configure(state="disabled")
 
-        panel._update_done("✓ Up to date (V3.2.8)", "#00aa00", None)
+        panel._update_done("OK: Up to date (V3.2.8)", "#00aa00", None)
 
         assert panel._btn_update.cget("state") == "normal"
         panel.destroy()
@@ -249,7 +249,7 @@ class TestVersionPanelCheckUpdate:
         panel = _make_panel(tk_root)
         panel._busy_update = True
 
-        panel._update_done("✓ Up to date (V3.2.8)", "#00aa00", None)
+        panel._update_done("OK: Up to date (V3.2.8)", "#00aa00", None)
 
         assert "Up to date" in panel._lbl_update.cget("text")
         panel.destroy()
@@ -269,7 +269,7 @@ class TestVersionPanelCheckUpdate:
         panel = _make_panel(tk_root)
         panel._busy_update = True
 
-        panel._update_done("✓ Up to date (V3.2.8)", "#00aa00", None)
+        panel._update_done("OK: Up to date (V3.2.8)", "#00aa00", None)
 
         assert panel._busy_update is False
         panel.destroy()
@@ -924,4 +924,93 @@ class TestVersionPanelRestartBatchGuard:
 
         fake_modal.destroy.assert_called_once()
         mock_exit.assert_called_once_with(0)
+        panel.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Test API Connection — both gateway products
+# ---------------------------------------------------------------------------
+
+class TestPingProbesBothProducts:
+    """The ping must exercise BOTH per-product keys, not just EXG.
+
+    The BOT gateway scopes each key to one API product (live-verified:
+    EXG key on the holiday endpoint → 403). A green ping that only checks
+    the EXG key coexists with a batch whose mandatory holiday fetch fails —
+    the exact 'Test is green but the API does not work' support case.
+    """
+
+    def _run_ping_worker(self, panel, fake_get, tokens):
+        captured = {}
+
+        def _capture(_ms, fn, *args):
+            captured["fn"] = fn
+            captured["args"] = args
+
+        with (
+            patch("core.api_client.httpx.get", side_effect=fake_get),
+            patch("gui.panels.version_panel.get_token",
+                  side_effect=lambda name: tokens.get(name)),
+            patch.object(panel, "_safe_after", side_effect=_capture),
+        ):
+            with patch("gui.panels.version_panel.threading.Thread") as mt:
+                panel._on_ping_api()
+                worker = mt.call_args.kwargs["target"]
+            worker()
+        return captured
+
+    def test_worker_probes_both_endpoints(self, tk_root):
+        from core.api_client import EXG_RATE_PATH, HOLIDAY_PATH
+
+        panel = _make_panel(tk_root)
+        urls = []
+
+        def _fake_get(url, *, headers, timeout):
+            urls.append(url)
+            resp = MagicMock()
+            resp.status_code = 200
+            return resp
+
+        self._run_ping_worker(panel, _fake_get, {
+            "BOT_TOKEN_EXG": "EXGKEY123456",
+            "BOT_TOKEN_HOL": "HOLKEY123456",
+        })
+        assert any(EXG_RATE_PATH in u for u in urls)
+        assert any(HOLIDAY_PATH in u for u in urls)
+        panel.destroy()
+
+    def test_hol_rejection_fails_ping_even_when_exg_ok(self, tk_root):
+        from core.api_client import EXG_RATE_PATH
+
+        panel = _make_panel(tk_root)
+
+        def _fake_get(url, *, headers, timeout):
+            resp = MagicMock()
+            resp.status_code = 200 if EXG_RATE_PATH in url else 401
+            return resp
+
+        captured = self._run_ping_worker(panel, _fake_get, {
+            "BOT_TOKEN_EXG": "EXGKEY123456",
+            "BOT_TOKEN_HOL": "REVOKEDHOL99",
+        })
+        text = captured["args"][0]
+        assert "holiday" in text.lower()
+        assert "ok: api connected & authenticated" not in text.lower()
+        panel.destroy()
+
+    def test_missing_hol_key_is_named_not_green(self, tk_root):
+        panel = _make_panel(tk_root)
+
+        def _fake_get(url, *, headers, timeout):
+            resp = MagicMock()
+            resp.status_code = 200
+            return resp
+
+        captured = self._run_ping_worker(panel, _fake_get, {
+            "BOT_TOKEN_EXG": "EXGKEY123456",
+            "BOT_TOKEN_HOL": None,
+        })
+        text = captured["args"][0]
+        assert "holiday" in text.lower()
+        assert "ok: api connected & authenticated" not in text.lower()
         panel.destroy()

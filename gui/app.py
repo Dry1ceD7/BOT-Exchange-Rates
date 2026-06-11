@@ -26,7 +26,7 @@ import re
 import subprocess
 import threading
 import tkinter
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -34,6 +34,12 @@ import customtkinter as ctk
 
 from core.backup_manager import BackupManager
 from core.config_manager import SettingsManager
+from core.constants import (
+    SUPPORTED_EXCEL_EXTENSIONS,
+    UNSUPPORTED_SPREADSHEET_EXTENSIONS,
+    bot_today,
+    collect_excel_files,
+)
 from core.i18n import plural, tr
 from core.version import __version__ as APP_VERSION
 from core.workers.event_bus import EventBus
@@ -82,20 +88,21 @@ def parse_drop_data(raw: str, tk_root=None) -> list[str]:
     return [raw] if raw else []
 
 
-# Supported Excel extensions (openpyxl handles .xlsx and .xlsm natively)
-EXCEL_EXTENSIONS = (".xlsx", ".xlsm")
+# Supported Excel extensions (openpyxl handles .xlsx and .xlsm natively).
+# Single source of truth: core.constants.SUPPORTED_EXCEL_EXTENSIONS.
+EXCEL_EXTENSIONS = SUPPORTED_EXCEL_EXTENSIONS
 
 
 def resolve_excel_files(paths: list[str], collect_rejected: bool = False):
     """Resolve individual files and directories into a flat list of Excel files.
 
     When ``collect_rejected`` is True, returns ``(accepted, rejected)`` where
-    ``rejected`` lists directly-dropped files with an unsupported spreadsheet
-    extension (e.g. .xlsb, .xls) so the caller can warn the user. Otherwise
+    ``rejected`` lists files with an unsupported spreadsheet extension
+    (e.g. .xlsb, .xls) — both directly-dropped files AND files found inside
+    dropped folders — so the caller can warn the user. A folder of legacy
+    .xls exports must never resolve to a silent empty queue. Otherwise
     returns just the accepted list (backward compatible).
     """
-    # Spreadsheet-looking extensions we explicitly recognise as unsupported.
-    UNSUPPORTED_EXTENSIONS = (".xlsb", ".xls", ".ods", ".csv")
     queue = []
     rejected = []
     for p in paths:
@@ -105,17 +112,18 @@ def resolve_excel_files(paths: list[str], collect_rejected: bool = False):
                 continue
             if p.lower().endswith(EXCEL_EXTENSIONS):
                 queue.append(p)
-            elif p.lower().endswith(UNSUPPORTED_EXTENSIONS):
+            elif p.lower().endswith(UNSUPPORTED_SPREADSHEET_EXTENSIONS):
                 rejected.append(p)
         elif Path(p).is_dir():
-            # Keep os.listdir + os.path.join: queued entries are full-path
-            # strings handed to the engine; sorting bare names then joining is
-            # the exact prior behavior the os.path.normpath dedup relies on.
-            for fname in sorted(os.listdir(p)):  # noqa: PTH208
-                if fname.startswith("."):
-                    continue
-                if fname.lower().endswith(EXCEL_EXTENSIONS):
-                    queue.append(os.path.join(p, fname))  # noqa: PTH118
+            # Shared listing helper (core.constants.collect_excel_files):
+            # bare names sorted then joined — the exact prior full-path form
+            # the os.path.normpath dedup below relies on. dedup=False because
+            # the identity check runs over the merged queue below.
+            found, dir_rejected = collect_excel_files(
+                p, dedup=False, collect_rejected=True,
+            )
+            queue.extend(found)
+            rejected.extend(dir_rejected)
     seen = set()
     unique = []
     for f in queue:
@@ -282,7 +290,7 @@ class BOTExrateApp(ctk.CTk):
                 try:
                     icon_image = PhotoImage(file=str(png_path))
                 except tkinter.TclError:
-                    # Fallback: use PIL to convert PNG → Tk-compatible format
+                    # Fallback: use PIL to convert PNG -> Tk-compatible format
                     try:
                         from PIL import Image, ImageTk
                         pil_img = Image.open(png_path).resize((64, 64))
@@ -436,7 +444,10 @@ class BOTExrateApp(ctk.CTk):
 
         self.lbl_toggle_hint = ctk.CTkLabel(
             self.manual_date_frame,
-            text=tr("main.today_hint", date=date.today().strftime("%d %b %Y")),
+            # bot_today, not the wall clock: this hint names the exact date a
+            # "Use Today" run will target (_assemble_start_date), so it must
+            # show the BOT business date the pipeline actually uses.
+            text=tr("main.today_hint", date=bot_today().strftime("%d %b %Y")),
             font=ctk.CTkFont(size=11), text_color=t["success"]
         )
         self.lbl_toggle_hint.pack(pady=(4, 4))
@@ -447,7 +458,6 @@ class BOTExrateApp(ctk.CTk):
         # Default the picker to the current BOT business date (Asia/Bangkok)
         # rather than a hardcoded, now-stale "2025" — a manual run with auto-
         # detect off should land on today, not a past year (#10).
-        from core.constants import bot_today
         today = bot_today()
         current_year = today.year
         self._combo_widgets = []
@@ -636,7 +646,7 @@ class BOTExrateApp(ctk.CTk):
         # Verify an existing workbook's ExRate rates against BOT and correct
         # any differing trading-day cells (file backed up first; revertable).
         self.btn_verify_rates = ctk.CTkButton(
-            secondary_row, text="Verify Rates",
+            secondary_row, text=tr("main.btn_verify_rates"),
             height=42, width=150,
             fg_color=t["btn_secondary"], hover_color=t["btn_secondary_hover"],
             font=ctk.CTkFont(size=13, weight="bold"),
@@ -780,10 +790,12 @@ class BOTExrateApp(ctk.CTk):
         is_today = self.use_today_var.get() == "on"
         self._lock_date_dropdowns(locked=is_today)
         if is_today:
+            # bot_today, not the wall clock — must mirror the date
+            # _assemble_start_date will actually hand to the engine.
             self.lbl_toggle_hint.configure(
                 text=tr(
                     "main.today_hint",
-                    date=date.today().strftime("%d %b %Y"),
+                    date=bot_today().strftime("%d %b %Y"),
                 ),
                 text_color=_get_colors()["success"]
             )
@@ -801,7 +813,10 @@ class BOTExrateApp(ctk.CTk):
 
     def _assemble_start_date(self) -> str | None:
         if self.use_today_var.get() == "on":
-            return datetime.today().strftime("%Y-%m-%d")
+            # Data-targeting: this string becomes the engine's start date, so
+            # it must be the BOT business date (Asia/Bangkok), not the local
+            # wall clock — near midnight the two can differ by a day.
+            return bot_today().strftime("%Y-%m-%d")
         date_str = f"{self.combo_year.get()}-{self.combo_month.get()}-{self.combo_day.get()}"
         try:
             datetime.strptime(date_str, "%Y-%m-%d")
@@ -825,7 +840,7 @@ class BOTExrateApp(ctk.CTk):
         # walk) — doing that on the Tk thread freezes the UI for a big share.
         # Offload the listing to a worker and marshal the result back via
         # after() so the window stays responsive; a pure FILE drop is cheap and
-        # stays synchronous so the existing drop→preflight→queue order holds (#8).
+        # stays synchronous so the existing drop->preflight->queue order holds (#8).
         if any(Path(p).is_dir() for p in paths):
             self.lbl_status.configure(
                 text=tr("main.scanning_folder"),
@@ -879,12 +894,11 @@ class BOTExrateApp(ctk.CTk):
             # APPEND to the existing queue (dedup) rather than REPLACE it, so the
             # operator can build a batch incrementally across several drops (#2).
             self._set_queue(self.file_queue + new_files)
-        elif rejected:
-            messagebox.showwarning(
-                tr("main.no_valid_files_title"),
-                tr("main.no_valid_files_unsupported"),
-            )
-        else:
+        elif not rejected:
+            # Nothing accepted AND nothing rejected — a genuinely empty drop.
+            # (When everything was rejected, the format warning above already
+            # named the files and the save-as-.xlsx remedy; a second generic
+            # dialog on top of it was pure noise.)
             messagebox.showwarning(
                 tr("main.no_valid_files_title"),
                 tr("main.no_valid_files_empty"),
@@ -929,11 +943,17 @@ class BOTExrateApp(ctk.CTk):
             ]
         )
         if paths:
-            # APPEND to the queue (dedup) so browse accumulates like drop (#2).
-            new_files = self._dedup_new(list(paths))
-            if new_files:
-                self._preflight_warn(new_files)
-            self._set_queue(self.file_queue + new_files)
+            # Route the picked files through the same resolver + terminal
+            # handler as a drop: the 'All files (*.*)' filter lets a legacy
+            # .xls into the selection, and _preflight_warn deliberately skips
+            # the unsupported-extension case on the assumption the resolver
+            # already warned — which was only true for drops. _finish_drop
+            # also APPENDS to the queue (dedup) so browse accumulates like
+            # drop (#2).
+            excel_files, rejected = resolve_excel_files(
+                list(paths), collect_rejected=True,
+            )
+            self._finish_drop(excel_files, rejected)
 
     def _preflight_warn(self, files: list[str]):
         """Selection-time pre-flight feedback for the engine seam.
@@ -1139,14 +1159,17 @@ class BOTExrateApp(ctk.CTk):
                     if getattr(self, "_closing", False):
                         return
                     if was_detected:
+                        # Range end shown is bot_today — the engine extends
+                        # its fetch window to the BOT business date, so the
+                        # hint must quote the same end the run will use.
                         self.lbl_auto_hint.configure(
-                            text=f"Detected: {oldest_date.strftime('%d %b %Y')} → {date.today().strftime('%d %b %Y')}",
+                            text=f"Detected: {oldest_date.strftime('%d %b %Y')} -> {bot_today().strftime('%d %b %Y')}",
                             text_color=_get_colors()["success"]
                         )
                         self.lbl_status.configure(
                             text=(
                                 f"Connecting to BOT API...  range: "
-                                f"{oldest_date.strftime('%d %b %Y')} → today  (0 of {total})"
+                                f"{oldest_date.strftime('%d %b %Y')} -> today  (0 of {total})"
                             ),
                             text_color=_get_colors()["process_text"]
                         )
@@ -1194,11 +1217,11 @@ class BOTExrateApp(ctk.CTk):
         by a real run and updated per completed file. If unprocessed files
         remain — i.e. the previous run did NOT finish cleanly and was NOT
         cancelled — ask the operator whether to finish only those files:
-          * Yes  → load the unfinished files into the queue (after the usual
+          * Yes  -> load the unfinished files into the queue (after the usual
                    preflight) so a normal Process Batch re-runs only the
                    remainder. The manifest is left in place; the next run
                    rewrites it from the new selection.
-          * No   → delete the manifest so the prompt does not reappear.
+          * No   -> delete the manifest so the prompt does not reappear.
         Never runs while a batch is already in flight, and any error degrades to
         a no-op (a resume offer must never block startup)."""
         if self._batch_running:
@@ -1430,6 +1453,15 @@ class BOTExrateApp(ctk.CTk):
         except (OSError, ValueError, TypeError) as e:
             logger.debug("Persisting scheduler_last_run failed: %s", e)
 
+        # Refresh the scheduler panel's "Last run" row in-session — the
+        # persisted record above only covers future loads (F77).
+        panel = getattr(self, "scheduler_panel", None)
+        if panel is not None and hasattr(panel, "refresh_last_run"):
+            try:
+                panel.refresh_last_run()
+            except (RuntimeError, tkinter.TclError) as e:
+                logger.debug("Scheduler panel last-run refresh failed: %s", e)
+
         # Pull the operator back to the window on failure so the failed-files
         # box is seen rather than buried behind a minimised tray icon.
         if fail > 0:
@@ -1631,7 +1663,7 @@ class BOTExrateApp(ctk.CTk):
         # Default the picker to the folder/file of the most recently processed
         # ledger so the operator lands on the file they likely want to undo (#5).
         dialog_kwargs = {
-            "title": "Select the file to revert",
+            "title": tr("main.revert_picker_title"),
             # .xlsm is accepted everywhere else in the app — don't hide the very
             # macro-enabled ledger the operator needs to restore (#8).
             "filetypes": [
@@ -1656,20 +1688,19 @@ class BOTExrateApp(ctk.CTk):
             backups = []
         if not backups:
             messagebox.showwarning(
-                "No Backup Found",
-                f"No backup exists for '{Path(path).name}'.\n\n"
-                f"A file must have been processed at least once to have a "
-                f"backup to restore from.",
+                tr("main.no_backup_title"),
+                tr("main.no_backup_body", name=Path(path).name),
             )
             return
         latest_backup = backups[0]
         ts = self.backup_mgr._parse_backup_timestamp(latest_backup)
-        when = ts.strftime("%d %b %Y %H:%M") if ts is not None else "the latest backup"
+        when = (
+            ts.strftime("%d %b %Y %H:%M") if ts is not None
+            else tr("main.revert_when_fallback")
+        )
         if not messagebox.askyesno(
-            "Confirm Revert",
-            f"Restore '{Path(path).name}' from backup dated {when}?\n\n"
-            f"This OVERWRITES the current file with the backup. The current "
-            f"version is snapshotted first (.pre-revert) so this is recoverable.",
+            tr("main.confirm_revert_title"),
+            tr("main.confirm_revert_body", name=Path(path).name, when=when),
         ):
             return
 
@@ -1679,7 +1710,7 @@ class BOTExrateApp(ctk.CTk):
         self.btn_revert.configure(state="disabled")
         self.btn_process.configure(state="disabled")
         self.lbl_status.configure(
-            text=f"Restoring:  {Path(path).name}...",
+            text=tr("main.status_restoring", fname=Path(path).name),
             text_color=_get_colors()["warning"]
         )
         self.progressbar.configure(mode="indeterminate")
@@ -1687,6 +1718,37 @@ class BOTExrateApp(ctk.CTk):
 
         self.batch_handler.start_revert(path)
 
+    def _start_guarded_revert(
+        self, filepath: str, backup_path: str | None = None
+    ) -> bool:
+        """Programmatic revert entry for sibling dialogs (Rate Audit report).
+
+        The audit report dialog appears AFTER the audit worker released its
+        _exrate_running lease, so its Revert button must re-acquire the busy
+        guard itself: refuse while a batch, another revert, or an ExRate
+        worker owns the cache/file (#1, #3), otherwise raise _revert_running
+        and lock Process/Revert exactly like the manual flow above. The
+        RevertWorker finishes through the same _show_revert_success/_error
+        callbacks, which clear the flag and re-enable the UI. Returns True
+        when the revert was dispatched, False when refused so the caller can
+        surface the refusal to the operator."""
+        if self._batch_running or self._revert_running or self._exrate_running:
+            self._flash_busy_status()
+            return False
+        # Raise the busy flag BEFORE spawning the worker so a scheduler fire
+        # racing in on the UI thread sees the revert in progress (#3).
+        self._revert_running = True
+        self.btn_revert.configure(state="disabled")
+        self.btn_process.configure(state="disabled")
+        self.lbl_status.configure(
+            text=tr("main.status_restoring", fname=Path(filepath).name),
+            text_color=_get_colors()["warning"]
+        )
+        self.progressbar.configure(mode="indeterminate")
+        self.progressbar.start()
+
+        self.batch_handler.start_revert(filepath, backup_path=backup_path)
+        return True
 
     def _show_revert_success(self, filepath: str, backup_name: str):
         self._revert_running = False
@@ -1694,7 +1756,7 @@ class BOTExrateApp(ctk.CTk):
         self.progressbar.configure(mode="determinate")
         self.progressbar.set(1)
         self.lbl_status.configure(
-            text=f"Reverted successfully from backup:  {backup_name}",
+            text=tr("main.status_reverted", backup=backup_name),
             text_color=_get_colors()["success"]
         )
         self.btn_process.configure(state="normal")
@@ -1984,18 +2046,22 @@ class BOTExrateApp(ctk.CTk):
         t = get_theme()
         self.footer_frame = ctk.CTkFrame(
             self, fg_color=t["footer_bg"], corner_radius=0,
-            border_width=0, height=26,
+            border_width=0, height=34,
         )
         self.footer_frame.pack(fill="x", side="bottom")
         self.footer_frame.pack_propagate(False)
 
+        # Two stacked lines: ownership line, then the company name with the
+        # version beside it. Kept as a single label so theme_applicator's
+        # lbl_footer recolor keeps covering the whole footer text.
         self.lbl_footer = ctk.CTkLabel(
             self.footer_frame,
             text=(
-                f"Property of Advanced ID Asia Engineering., Ltd (AAE)"
-                f"  \u2502  V{APP_VERSION}"
+                "Property of\n"
+                f"Advanced ID Asia Engineering., Ltd  \u2502  V{APP_VERSION}"
             ),
             font=ctk.CTkFont(size=10),
+            justify="center",
             text_color=t["text_muted"],
         )
         self.lbl_footer.pack(expand=True)

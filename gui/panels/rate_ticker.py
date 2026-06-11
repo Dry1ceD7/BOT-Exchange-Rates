@@ -11,11 +11,12 @@ fallback on startup. Auto-refreshes every 60 seconds.
 
 import logging
 import threading
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import customtkinter as ctk
 
+from core.constants import bot_today
 from core.i18n import tr
 from gui.panels._base_panel import SafePanel
 from gui.theme import MONO_FONT, get_theme
@@ -210,8 +211,10 @@ class RateTicker(SafePanel, ctk.CTkFrame):
         if self._cache is None:
             return None
 
-        # Try today, then step back up to 5 days for weekends/holidays
-        target = date.today()
+        # Try today, then step back up to 5 days for weekends/holidays.
+        # "Today" is the BOT business date (Asia/Bangkok), not the local wall
+        # clock, so the lookup matches the dates the cache is keyed by.
+        target = bot_today()
         for _ in range(6):
             rate = self._cache.get_rate(target)
             if rate and any(v is not None for v in rate.values()):
@@ -229,19 +232,23 @@ class RateTicker(SafePanel, ctk.CTkFrame):
             if not token:
                 return None
 
-            clean_token = token.removeprefix("Bearer ").strip()
-            headers = {
-                "X-IBM-Client-Id": clean_token,
-                "Authorization": f"Bearer {clean_token}",
-                "accept": "application/json",
-            }
-            gateway = "https://gateway.api.bot.or.th"
-            today_str = date.today().strftime("%Y-%m-%d")
+            # Endpoint + auth header shape owned by core.api_client — keep
+            # the import lazy alongside httpx (this path only runs on a
+            # cache miss, so the GUI stays light at import time).
+            from core.api_client import (
+                BOT_GATEWAY_URL,
+                EXG_RATE_PATH,
+                build_bot_headers,
+            )
+
+            headers = build_bot_headers(token)
+            # BOT business date (Asia/Bangkok) — what the API publishes under.
+            today_str = bot_today().strftime("%Y-%m-%d")
 
             results = {}
             for ccy in ("USD", "EUR"):
                 url = (
-                    f"{gateway}/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
+                    f"{BOT_GATEWAY_URL}{EXG_RATE_PATH}"
                     f"?start_period={today_str}"
                     f"&end_period={today_str}"
                     f"&currency={ccy}"
@@ -332,7 +339,8 @@ class RateTicker(SafePanel, ctk.CTkFrame):
             return
         t = get_theme()
         try:
-            end = date.today()
+            # Cache rows are keyed by the BOT business date — window on it.
+            end = bot_today()
             start = end - timedelta(days=7)
             bulk = self._cache.get_rates_bulk(start, end)
         except (OSError, ValueError, RuntimeError) as e:

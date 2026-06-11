@@ -55,14 +55,14 @@ def _humanize_csv_error(action: str, exc: BaseException) -> str:
     # save-error humanizer (it already covers WinError 32 / EACCES / EBUSY).
     locked = humanize_save_error("That file", exc)
     if locked is not None:
-        return f"✗ {action} failed: That file is open in another program — close it and try again."
+        return f"{action} failed: That file is open in another program — close it and try again."
     if isinstance(exc, FileNotFoundError):
-        return f"✗ {action} failed: The file could not be found. Check the location and try again."
+        return f"{action} failed: The file could not be found. Check the location and try again."
     if isinstance(exc, OSError):
-        return f"✗ {action} failed: The file could not be read or written. Check the file and try again."
+        return f"{action} failed: The file could not be read or written. Check the file and try again."
     if isinstance(exc, ValueError | KeyError):
-        return f"✗ {action} failed: This CSV format wasn't recognized. Check it is a BOT exchange-rate CSV."
-    return f"✗ {action} failed: An unexpected error occurred. See the log for details."
+        return f"{action} failed: This CSV format wasn't recognized. Check it is a BOT exchange-rate CSV."
+    return f"{action} failed: An unexpected error occurred. See the log for details."
 
 
 class CSVPanel(SafePanel, ctk.CTkFrame):

@@ -6,43 +6,40 @@ BOT Exchange Rate Processor (v2.6.1) - Featherweight Architecture
 ---------------------------------------------------------------------------
 Holiday-aware trading-day utilities plus Decimal helpers.
 
-This module is the pure-logic layer: weekend/holiday detection, day-by-day
-rollback to the nearest historical trading day, year-end start-date
-computation, and exact Decimal coercion. It holds NO Excel I/O.
-
-NOTE on Excel formulas: the live ledger write path injects XLOOKUP formulas
-(the intended design per README); it does NOT consume ``resolve_rate``.
-``resolve_rate`` / ``resolve_rate_for_currency`` are the standalone/utility
-path that returns hard Decimal values for callers needing a resolved rate
-in code (CSV export, anomaly checks, headless helpers). Do not treat them as
-the live ledger engine.
+This module is the pure-logic layer: weekend/holiday detection, year-end
+start-date computation, calendar fetch-window helpers, and exact Decimal
+coercion. It holds NO Excel I/O and NO rate resolution — the approved
+ledger contract is exact-match (rates are looked up for the exact ledger
+date; there is no day-by-day rollback resolver here).
 """
 
 import re
 from datetime import date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
+
+from core.constants import bot_today
 
 # -------------------------------------------------------------------------
-# EXCEPTIONS
-# -------------------------------------------------------------------------
-
-class RateNotFoundError(Exception):
-    """Raised when a valid rate cannot be found within the strict rollback limit."""
-    pass
-
-# -------------------------------------------------------------------------
-# BUSINESS DAY & RATE RESOLUTION LOGIC
+# BUSINESS DAY LOGIC
 # -------------------------------------------------------------------------
 
 class BOTLogicEngine:
-    """Mathematical engine for resolving strict Bank of Thailand trading dates."""
+    """Holiday container + trading-day predicate for BOT calendar checks.
+
+    Downstream consumers (``core.engine``, ``core.exrate_updater``,
+    ``core.rate_audit``) read ``logic_engine.holidays`` as the master
+    holiday set; ``is_trading_day`` is the canonical weekend/holiday
+    predicate.
+    """
 
     def __init__(self, holidays: list[date], max_rollback_days: int = 10):
         """
         Args:
             holidays: A list of official BOT holiday dates.
-            max_rollback_days: The safety guardrail. Maximum consecutive days
-                               to backtrack before raising an alert.
+            max_rollback_days: Retained for the constructor contract only
+                               (core.engine still passes it); nothing in
+                               this class consumes it since the dead
+                               rollback resolvers were removed.
         """
         self.holidays = set(holidays) # Set for O(1) lookup
         self.max_rollback_days = max_rollback_days
@@ -55,99 +52,40 @@ class BOTLogicEngine:
             return False
         return target_date not in self.holidays
 
-    def _get_rate_for_date(self, target_date: date, rates_data: dict[date, Decimal]) -> Decimal | None:
-        """Safely extracts a Decimal rate for a specific date from the data dictionary."""
-        return rates_data.get(target_date)
+# -------------------------------------------------------------------------
+# CALENDAR-WINDOW HELPERS (pure functions — extracted from engine)
+# -------------------------------------------------------------------------
 
-    def resolve_rate(
-        self, target_date: date,
-        usd_rates: dict[date, Decimal],
-        eur_rates: dict[date, Decimal],
-    ) -> tuple[date, Decimal | None, Decimal | None]:
-        """
-        Standalone/utility date resolver (V2.5).
+def weekdays_between(start: date, end: date) -> set[date]:
+    """Return every calendar weekday (Mon-Fri) in the inclusive window.
 
-        Returns the rate for the EXACT date provided. If the target date is
-        a weekend or BOT holiday, it rolls back day-by-day until it finds
-        the first valid historical trading day with available data.
+    Calendar weekdays only — holidays are NOT excluded. This feeds the
+    cache-miss computations in core.engine (which weekday dates lack cached
+    rates); holiday gaps there are resolved later by the rollback logic,
+    never by narrowing the fetch window.
+    """
+    out: set[date] = set()
+    check = start
+    while check <= end:
+        if check.weekday() < 5:
+            out.add(check)
+        check += timedelta(days=1)
+    return out
 
-        This serves the standalone/utility path (CSV export, anomaly checks,
-        headless helpers) and returns hard Decimal values. It is NOT the live
-        ledger engine — the ledger write path injects XLOOKUP formulas and
-        does not call this method.
 
-        Examples:
-            - Target is Tuesday (trading day)  → returns Tuesday's rate
-            - Target is Saturday               → rolls back to Friday
-            - Target is Monday (BOT holiday)   → rolls back to Friday
+def default_fetch_window_start(target_year: int) -> date:
+    """Return the default rate FETCH-WINDOW start: Dec 20 of the prior year.
 
-        Args:
-            target_date: The date from the "Date" column in the ledger.
-            usd_rates: Dictionary mapping dates to USD Decimal rates.
-            eur_rates: Dictionary mapping dates to EUR Decimal rates.
+    This is a fetch-window anchor, NOT a trading-day computation — Dec 20
+    may itself fall on a weekend/holiday and that is fine: it only needs to
+    open the API/cache window wide enough to cover the year-start rollback.
+    The actual year-start trading day is ``compute_year_start_date``. The
+    prescan's separate Dec-28 fallback
+    (``core.prescan.prescan_oldest_date``) is a narrower "no dates detected"
+    anchor, deliberately not this window.
+    """
+    return date(target_year - 1, 12, 20)
 
-        Returns:
-            Tuple containing: (Confirmed Trading Date, USD Rate, EUR Rate)
-
-        Raises:
-            RateNotFoundError: If the backtrack limit is triggered or
-                               a required rate is missing on a valid trading day.
-        """
-        # STANDARD RESOLUTION: Start from the exact target date
-        current_date = target_date
-        days_rolled_back = 0
-
-        # Guardrail Loop
-        while days_rolled_back <= self.max_rollback_days:
-            if self.is_trading_day(current_date):
-                # We found a valid trading day. Now, pull the exact numerical rates.
-                usd_val = self._get_rate_for_date(current_date, usd_rates)
-                eur_val = self._get_rate_for_date(current_date, eur_rates)
-
-                # Both USD and EUR must be present for a valid trading day
-                if usd_val is not None and eur_val is not None:
-                    return current_date, usd_val, eur_val
-
-                # If BOT data is mysteriously missing on a valid trading day,
-                # we must keep rolling back (e.g., BOT system failure that day).
-
-            current_date -= timedelta(days=1)
-            days_rolled_back += 1
-
-        # If we exit the loop, we hit the safety limit
-        raise RateNotFoundError(
-            f"<ERROR: No Rate Found> Backtracked {self.max_rollback_days} days "
-            f"from {target_date.strftime('%Y-%m-%d')} without hitting valid BOT data."
-        )
-
-    def resolve_rate_for_currency(
-        self, target_date: date, currency: str,
-        usd_rates: dict[date, Decimal], eur_rates: dict[date, Decimal]
-    ) -> tuple[date, Decimal | None]:
-        """
-        Currency-aware date resolver.
-
-        - THB: Returns (target_date, Decimal("1.0000")) immediately.
-        - USD: Returns (trade_date, usd_rate) via standard resolve.
-        - EUR: Returns (trade_date, eur_rate) via standard resolve.
-        - Other: Returns (target_date, None) — no rate available.
-        """
-        ccy = currency.strip().upper() if currency else ""
-
-        if ccy == "THB":
-            return target_date, Decimal("1.0000")
-
-        if ccy in ("USD", "EUR"):
-            trade_date, usd_rt, eur_rt = self.resolve_rate(
-                target_date, usd_rates, eur_rates
-            )
-            if ccy == "USD":
-                return trade_date, usd_rt
-            else:
-                return trade_date, eur_rt
-
-        # Unsupported currency — skip silently
-        return target_date, None
 
 # -------------------------------------------------------------------------
 # YEAR-END & HOLIDAY HELPERS (pure functions — extracted from engine)
@@ -204,9 +142,11 @@ def build_holiday_lookup(
     holidays_names: dict[date, str] = {}
     master_holidays_set = set(logic_engine.holidays)
 
+    # Anchor "today" on the BOT business date (Asia/Bangkok), not naive local
+    # time, so the holiday lookup covers the same year set the engine targets.
     for year in {
         d.year
-        for d in (all_target_dates | {computed_start, date.today()})
+        for d in (all_target_dates | {computed_start, bot_today()})
     }:
         cached_hols = cache.get_holidays(year)
         for h_str, h_name in cached_hols:
@@ -246,8 +186,11 @@ def safe_to_decimal(value: object) -> Decimal | None:
     if value is None or value == "":
         return None
     try:
-        # Quantize to 4 decimal places as per standard Thai accounting format
+        # Quantize to 4 decimal places as per standard Thai accounting format.
+        # ROUND_HALF_EVEN (banker's rounding) is the pinned project standard —
+        # explicit so behavior never drifts with the ambient decimal context —
+        # pending any department mandate to change it.
         d = Decimal(str(value))
-        return d.quantize(Decimal('0.0000'))
+        return d.quantize(Decimal('0.0000'), rounding=ROUND_HALF_EVEN)
     except (InvalidOperation, TypeError):
         return None

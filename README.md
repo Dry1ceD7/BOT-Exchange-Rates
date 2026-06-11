@@ -8,7 +8,6 @@ Version 3.5.1  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Rele
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-1347%20Passed-brightgreen)](tests/)
 
 ---
 
@@ -26,7 +25,7 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 |---------|-------------|
 | **Weekend/Holiday rates blank (v3.2.8 restored)** | The ExRate master sheet no longer carries a prior trading-day rate forward into weekend/holiday rows — those rows keep only the Date and the "Weekend"/holiday label. No fabricated rate on non-trading days. |
 | **Ledger rate type corrected** | The rate-type selector is restricted to the two BOT rates actually fetched/stored for USD/EUR — **Buying TT** and **Selling**. "Buying Sight" / "Mid Rate" (which silently wrote Buying TT) were removed; a legacy/unsupported saved value is normalized to Buying TT with a warning. |
-| **Rate Audit (new)** | A **Verify Rates** button re-checks an existing workbook's ExRate values against the **live BOT API** and corrects any differing trading-day cell to the exact 4dp value (file backed up first). A report dialog lists every change — date, cell, old → new, and why — with a **Revert** button. Weekend/holiday rows are never touched. |
+| **Rate Audit (new)** | A **Verify Rates** button re-checks an existing workbook's ExRate values against the **live BOT API** and corrects any differing trading-day cell to the exact 4dp value (file backed up first). A report dialog lists every change — date, cell, old -> new, and why — with a **Revert** button. Weekend/holiday rows are never touched. |
 | **Hardening** | The scheduler can no longer collide with an in-flight ExRate run; a locked `.xlsx` no longer crashes the headless/scheduled prescan; dead code removed; the Settings modal stays above its owner. Added an opt-in live BOT API smoke test (`BOT_LIVE_TEST=1`). |
 
 ### What's New in V3.5.0 (Behavior Audit — 58 Findings Resolved, Thai UI, Backup Browser)
@@ -36,12 +35,12 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 | **Thai / English UI** | New language toggle in Settings — the main window and all dialogs render in professional Thai or English (logs and audit CSVs stay English for compliance). |
 | **Backup Browser** | Browse every automatic backup grouped by file with timestamps and restore any version by date, with an explicit confirmation preview. Revert now also confirms, previews, and supports `.xlsm`. |
 | **Audit Trail (Real)** | The audit CSV now records every modified cell on both GUI and CLI runs — previously the log was an empty header. The engine owns one populated log per run and the app surfaces its path. |
-| **Multi-Currency End-to-End** | Ledger rows in any cached/API currency are filled (not just USD/EUR), CSV-imported offline rates are consulted cache-first, unavailable rates write a visible `<ERROR: No Rate>` sentinel with per-file warnings. |
+| **Multi-Currency End-to-End** | Ledger rows in any cached/API currency are filled (not just USD/EUR), CSV-imported offline rates are consulted cache-first, unavailable rates leave the EX Rate cell blank and are reported as per-file warnings. |
 | **Scheduler Upgrades** | Persisted schedules actually re-arm after restart; minute-precision time picker; skip-weekends / skip-Thai-holidays toggles; missed slots within 120 min still fire; tray notification + last-run summary for minimized runs. |
 | **Headless / CLI Power** | `--headless` no longer blocked by an open GUI; new `--dry-run`, `--schedule`, `--quiet` / `--verbose`; documented exit codes (0 ok / 1 total / 2 partial / 3 config / 4 nothing to do). |
-| **First-Run & Token UX** | Test Connection button verifies keys before saving, pasted keys are validated/stripped, rejected keys (401/403) produce a clear "re-enter your API keys" message, keychain fallback to .env now warns. |
+| **First-Run & Token UX** | Test Connection button verifies keys before saving, pasted keys are validated/stripped, rejected keys (401/403) produce a clear re-enter-the-API-keys message, keychain fallback to .env now warns. |
 | **Batch UX & Feedback** | Failed files are listed with reasons on completion, the queue clears after a run, dry runs are honestly labeled, oversized/unsupported files are flagged at selection time, locked Excel files explain "close the file in Excel and retry". |
-| **Accessibility & Fit** | Light-mode text meets WCAG AA contrast (≥4.5:1, regression-locked by tests), minimum window size enforced for small legacy screens. Suite grew 806 → 1173 tests. |
+| **Accessibility & Fit** | Light-mode text meets WCAG AA contrast (≥4.5:1, regression-locked by tests), minimum window size enforced for small legacy screens. Suite grew 806 -> 1173 tests. |
 
 ### What's New in V3.4.0 (Deep-Audit Hardening — 57 Findings Resolved)
 
@@ -54,7 +53,7 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 | **Thai Date Correctness** | Buddhist-Era years auto-detected in `parse_date`; "today" resolved in Asia/Bangkok (UTC+7) regardless of PC timezone; audit-log retention policy added. |
 | **GUI Consistency** | Theme-token consistency pass, live-console line cap (memory bound), update-install progress surfacing, tray/banner features gated Windows-only. |
 | **Supply-Chain Gate** | `pip-audit` now blocking in CI, CVE-driven dependency locks (urllib3/idna/pillow), ruff `S` (bandit) security lint family enabled, Node 24 GitHub Actions bumps. |
-| **Installer & Legal** | Uninstaller offers consented data cleanup, macOS DMG ships a proper `.app` bundle, proprietary LICENSE added. Suite grew 703 → 806 tests. |
+| **Installer & Legal** | Uninstaller offers consented data cleanup, macOS DMG ships a proper `.app` bundle, proprietary LICENSE added. Suite grew 703 -> 806 tests. |
 
 ### What's New in V3.3.0 (Security Hardening & Engine Decomposition)
 
@@ -66,7 +65,7 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 | **Mathematical Truth** | All write paths (including multi-currency custom ranges) quantize to 4dp `Decimal` — float contamination eliminated. |
 | **Engine Decomposition** | `engine.py` reduced to a cache-first orchestrator; write pipeline and standalone ExRate updater extracted to `core/exrate_updater.py` with a centralized disk-space guard (`core/workbook_io.py`). |
 | **SafePanel Lifecycle** | Shared `SafePanel` mixin guards every panel's `after()` scheduling against post-destroy callbacks (teardown crash class removed). |
-| **GUI Widget Test Lane** | New `tests/gui/` suite drives real CustomTkinter widgets behind a display-guarded fixture — suite grew 349 → 703 tests. |
+| **GUI Widget Test Lane** | New `tests/gui/` suite drives real CustomTkinter widgets behind a display-guarded fixture — suite grew 349 -> 703 tests. |
 | **CI Quality Gate** | `ci.yml` runs ruff + full pytest on every push/PR plus a non-blocking `pip-audit` dependency scan. |
 
 ### What's New in V3.2.8 (Enterprise UI Stabilization & Core Architecture)
@@ -93,7 +92,7 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 | **Audit Trail (CSV)** | Every cell modification logged to `data/logs/Audit_Log_*.csv` with timestamp, file, currency, and anomaly flags |
 | **Live Rate Ticker** | Compact USD/EUR rate display in the header bar — auto-refreshes from cache with API fallback |
 | **Auto-Scheduler** | Background timer for scheduled batch processing with folder-watch and time picker (no full-PC scan) |
-| **Rate Type Selector** | Choose Buying TT, Selling, Buying Sight, or Mid Rate from Settings — controls which rate the formula references |
+| **Rate Type Selector** | Choose the rate type from Settings — controls which rate the formula references. *(Historical: the original Buying Sight / Mid Rate options were removed in v3.5.1 — only Buying TT and Selling remain.)* |
 | **Offline CSV Import** | Import BOT's official downloadable CSV into local cache for air-gapped or offline environments |
 | **Headless CLI Mode** | `python main.py --headless --input ./ledgers` — run unattended via cron/Task Scheduler |
 | **Multi-Currency Cache** | New `rates_multi` SQLite table supports arbitrary currencies beyond USD/EUR |
@@ -108,7 +107,7 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 | **Skip-If-Correct Optimizer** | Batch engine skips rows with existing IFS formulas, radically accelerating differential runs |
 | **In-Place File Processing** | Modifies files directly with hidden background backups for zero duplication |
 | **Instant One-Click Revert** | "Revert Previous Edit" button instantly unwinds the last file change using the backup manager |
-| **100% Formatting Preservation** | Pure Python `.xls` fallback fully preserves all fonts, cell sizes, background colors, and borders |
+| **100% Formatting Preservation** | Pure Python `openpyxl` engine fully preserves all fonts, cell sizes, background colors, and borders |
 | **Auto-Detect Date Range** | Opt-in toggle to automatically parse the oldest required dates directly from dropped ledgers |
 | **In-App Auto-Updater** | Built-in GitHub Releases updater with background download and deferred installer launching |
 | **Native App Icon & UI Polishing** | Crisp multi-resolution `.ico`/`.icns` embedded deeply into the OS taskbar and app windows |
@@ -120,7 +119,7 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                          main.py                                 │
-│  .env Loader → Token Validation → argparse (GUI / --headless)    │
+│  .env Loader -> Token Validation -> argparse (GUI / --headless)  │
 │  Global Exception Handler (error.log + GUI popup)                │
 ├──────────────────────────────────────────────────────────────────┤
 │                        gui/app.py                                │
@@ -134,13 +133,13 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 │  Scheduler   │                       │                           │
 ├──────────────┴───────────────────────┴───────────────────────────┤
 │                   core/engine.py (Orchestrator)                  │
-│     Prescan → Cache → AnomalyGuard → Backup → Dispatch → GC      │
+│   Prescan -> Cache -> AnomalyGuard -> Backup -> Dispatch -> GC   │
 ├──────────────────────────┬───────────────────────────────────────┤
 │  core/exrate_updater.py  │  WorkbookWriter (ledger pipeline)     │
 │  core/workbook_io.py     │  StandaloneExRateUpdater · disk guard │
 ├──────────────┬───────────┴─────────────┬─────────────────────────┤
 │  api_client  │  logic · database       │  backup_manager         │
-│  Async BOT   │  Zero-Guess Rollback    │  Timestamped            │
+│  Async BOT   │  Trading-Day Calendar   │  Timestamped            │
 │  Concurrent  │  SQLite Cache (WAL)     │  Backup + Revert        │
 ├──────────────┼─────────────────────────┼─────────────────────────┤
 │  prescan.py  │  exrate_sheet.py        │  anomaly_guard.py       │
@@ -165,7 +164,7 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 ## Features
 
 ### Core Processing
-- **Zero-Guess Rollback Engine** — If a date falls on a weekend or BOT holiday, the engine steps back 1 day at a time (max 10 days, then halts with `<ERROR: No Rate>`). Automatically unpacks hidden weekend substitutions and overlays static Thai public holidays for 100% calendar accuracy.
+- **Exact-Match Date Resolution** — Ledger `EX Rate` cells resolve by exact-match `XLOOKUP` against the ExRate master sheet. Weekend, holiday, and out-of-range dates resolve to a blank cell (the formula is guarded so an empty master-sheet cell renders blank, never `0`), and blank-resolving rows are reported as per-file warnings — no fabricated or carried-forward rate, no per-row rollback. The only rollback is the year-start computation (Dec 30 of the prior year, stepped back through December to the last trading day). Hidden weekend substitutions are unpacked and static Thai public holidays overlaid for 100% calendar accuracy.
 - **Concurrent Dual Currency** — Simultaneous (async) USD and EUR rate resolution per row.
 - **Decimal Precision** — All rates written as `Decimal` values quantized to 4 decimal places (Thai accounting standard).
 - **Smart Date Pre-Scanner** — Scans all queued Excel files to find the oldest date, then fetches only the necessary API range.
@@ -181,7 +180,7 @@ It replaces a fragmented, error-prone multi-script workflow with a single, produ
 - **One-Click Revert** — Restore any file instantly from its most recent timestamped backup if an error was made.
 - **Live Rate Ticker** — Real-time USD/EUR rate display in the header bar with auto-refresh.
 - **Auto-Scheduler Panel** — Schedule daily processing with folder-watch and time picker controls.
-- **Rate Type Selector** — Choose the rate type (Buying TT, Selling, Buying Sight, Mid Rate) from Settings.
+- **Rate Type Selector** — Choose the rate type (Buying TT or Selling) from Settings.
 - **Offline CSV Import** — Import BOT's official CSV files into local cache for offline operation.
 
 ### Engine & Data Pipeline
@@ -211,9 +210,9 @@ cd BOT-Exchange-Rates
 
 ---
 
-### Step 2 — Get Your BOT API Keys
+### Step 2 — Get the BOT API Keys
 
-You need **two free API keys** from the Bank of Thailand:
+Two **free API keys** from the Bank of Thailand are required:
 
 1. Go to **https://apiportal.bot.or.th/** and create a free account
 2. Subscribe to these APIs:
@@ -223,15 +222,15 @@ You need **two free API keys** from the Bank of Thailand:
 | **Daily Weighted-average Exchange Rate** | Official USD and EUR exchange rates |
 | **Financial Institution Holidays** | Market closure dates |
 
-3. Copy your API keys from "My Subscriptions"
+3. Copy the API keys from "My Subscriptions"
 
-> **Keep your API keys private.** Never share them or commit them to Git.
+> **API keys must be kept private.** They must never be shared or committed to Git.
 
 ---
 
 ### Step 3 — Install and Run
 
-The app will **automatically prompt you** for your API keys on first launch via a registration dialog. No manual file editing needed.
+The app **automatically prompts** for the API keys on first launch via a registration dialog. No manual file editing is needed.
 
 **With uv (recommended):**
 
@@ -256,11 +255,11 @@ python main.py     # Windows
 
 The application automatically:
 1. Creates `data/`, `data/input/`, `data/backups/`, and `data/logs/` directories
-2. Validates your API keys (popup error if missing)
+2. Validates the API keys (popup error if missing)
 3. Initializes SQLite cache at `data/cache.db`
 4. Checks for updates via GitHub Releases API
 
-Drop your `.xlsx` ledger files into the app and click **"Process Batch"**.
+Drop `.xlsx` ledger files into the app and click **"Process Batch"**.
 
 ---
 
@@ -289,6 +288,9 @@ python main.py --headless --verbose
 
 # Emit a machine-readable JSON summary to stdout (for monitoring wrappers)
 python main.py --headless --json
+
+# Finish an interrupted/crashed batch from the saved manifest
+python main.py --headless --resume
 ```
 
 Headless mode:
@@ -310,6 +312,7 @@ Headless mode:
 | `--quiet`, `-q` | Suppress per-file lines; print only the final summary. |
 | `--verbose`, `-v` | Raise the console log level to DEBUG for troubleshooting. |
 | `--json` | Emit a machine-readable JSON summary (counts, errors, audit-log path) to stdout. |
+| `--resume` | Finish an interrupted/crashed batch from the saved manifest (`data/batch_state.json`), processing only the files not yet completed. Ignores `--input`; exits `4` when no saved batch exists. |
 | `--schedule HH:MM` | Run the auto-scheduler in the foreground (cron-friendly), firing a headless batch daily at `HH:MM`. |
 | `--purge-credentials` | Delete the stored BOT API tokens from the OS keychain and exit. Invoked by the Windows uninstaller; safe to run manually to wipe saved keys. |
 
@@ -324,7 +327,7 @@ of a coarse success/failure:
 | `1` | Total failure — every file failed. |
 | `2` | Partial failure — some succeeded, some failed. |
 | `3` | Usage/config error — missing tokens, bad input path, or bad date. |
-| `4` | Nothing to do — no Excel files found to process. |
+| `4` | Nothing to do — no Excel files found to process (or `--resume` with no saved batch). |
 
 ### Foreground scheduler
 
@@ -338,6 +341,19 @@ python main.py --schedule 23:00 --input ./ledgers
 
 Times are local machine time. `--dry-run`, `--quiet`, and `--verbose` apply to
 the batches it fires.
+
+### Environment variables
+
+Optional tuning knobs read at startup (defaults apply when unset):
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `BOT_MAX_FILE_MB` | `15` | Maximum accepted Excel input file size in MB (featherweight guardrail). |
+| `BOT_BACKUP_AGE_DAYS` | `7` | Retention window for timestamped backups in `data/backups/`. |
+| `BOT_AUDIT_LOG_AGE_DAYS` | `30` | Retention window for audit-trail CSVs in `data/logs/`. |
+| `BOT_MAX_429_RETRIES` | `10` | Maximum retries when the BOT API responds with HTTP 429 (rate limit). |
+| `BOT_POLL_INTERVAL` | `30` | Background scheduler polling interval in seconds. |
+| `BOT_SCHED_CATCHUP_MIN` | `120` | Missed-schedule catch-up window in minutes (clamped to 1-720): a slot missed by less than this still fires. |
 
 ---
 
@@ -376,14 +392,17 @@ uv run python main.py
 
 ## License
 
-Proprietary. Copyright (c) 2026 AAE. All rights reserved. This project is
-developed for internal enterprise use only; redistribution is not permitted.
-See [LICENSE](LICENSE) for the full terms.
+Proprietary. Copyright (c) 2026 Advanced ID Asia Engineering., Ltd. All rights
+reserved. This project is developed for internal enterprise use only;
+redistribution is not permitted. See [LICENSE](LICENSE) for the full terms.
 
 ---
 
 <div align="center">
 
 *Built for the Finance Department  ·  Bank of Thailand API  ·  V3.5.1*
+
+Property of  
+Advanced ID Asia Engineering., Ltd
 
 </div>

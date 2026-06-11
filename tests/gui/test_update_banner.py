@@ -207,8 +207,8 @@ class TestShowBanner:
         mgr._show_banner("1.2.3", "https://example.com")
 
         all_text = _collect_button_texts(mgr._banner)
-        assert any("✕" in t for t in all_text), (
-            f"Close (✕) button not found; found: {all_text}"
+        assert any(t.strip() == "X" for t in all_text), (
+            f"Close (X) button not found; found: {all_text}"
         )
 
     def test_banner_stores_pending_version(self, tk_root):

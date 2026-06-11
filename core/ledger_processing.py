@@ -8,8 +8,8 @@ Near-pure helpers extracted from core/engine.py to keep the orchestrator
 slim. These functions take all of their dependencies as explicit parameters
 (no engine ``self`` state), so they are independently testable.
 
-  - run_anomaly_check    → anomaly orchestration over loaded rate dicts
-  - prescan_target_dates → read-only workbook scan for target dates
+  - run_anomaly_check    -> anomaly orchestration over loaded rate dicts
+  - prescan_target_dates -> read-only workbook scan for target dates
 """
 
 import contextlib
@@ -27,6 +27,7 @@ from core.constants import (
     SKIP_SHEET_NAMES,
     parse_date,
 )
+from core.excel_io import find_header_row
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +39,14 @@ def run_anomaly_check(
     usd_selling: dict[date, Decimal],
     eur_buying: dict[date, Decimal],
     eur_selling: dict[date, Decimal],
+    extra_currency_rates: dict[str, dict[date, Decimal]] | None = None,
+    extra_rate_type: str = "buying_transfer",
+    anomalous_out: set[tuple[str, date]] | None = None,
 ) -> int:
     """Run anomaly detection across all loaded rates (v3.1.0).
+
+    Alert-only by contract: this function reports via ``emit_fn`` and the
+    return count — it has no channel to veto, rewrite, or skip a rate.
 
     Args:
         anomaly_guard: An object exposing ``check_rates_bulk(rates_bundle)``
@@ -49,6 +56,15 @@ def run_anomaly_check(
         usd_selling: USD selling rates keyed by date.
         eur_buying: EUR buying-transfer rates keyed by date.
         eur_selling: EUR selling rates keyed by date.
+        extra_currency_rates: Optional extra (non-USD/EUR) ledger currencies
+            as ``{ccy: {date: Decimal}}`` (F42). Each series joins the bundle
+            under ``"{CCY}_{extra_rate_type}"`` so GBP/CNY/etc. jumps are
+            flagged exactly like the four fixed USD/EUR series.
+        extra_rate_type: Rate-type label for the extra series (the engine's
+            snapshotted rate type — the extra fetch carries only that type).
+        anomalous_out: Optional set that receives one ``(currency, date)``
+            tuple per anomaly, so callers can thread the flagged cells into
+            the audit trail (F25) without changing the return contract.
 
     Returns:
         The number of anomalies found.
@@ -59,13 +75,17 @@ def run_anomaly_check(
         "EUR_buying_transfer": eur_buying,
         "EUR_selling": eur_selling,
     }
+    for ccy, series in (extra_currency_rates or {}).items():
+        rates_bundle[f"{ccy}_{extra_rate_type}"] = series
     anomalies = anomaly_guard.check_rates_bulk(rates_bundle)
+    if anomalous_out is not None:
+        anomalous_out.update((a.currency, a.check_date) for a in anomalies)
     for a in anomalies:
         emit_fn(
-            f"⚠ ANOMALY: {a.currency} {a.rate_type} on "
+            f"WARNING: ANOMALY: {a.currency} {a.rate_type} on "
             f"{a.check_date.strftime('%d %b %Y')}: "
             f"{a.pct_change:.2f}% change "
-            f"({a.prev_value} → {a.new_value})",
+            f"({a.prev_value} -> {a.new_value})",
             "warning",
         )
     if anomalies:
@@ -92,7 +112,7 @@ def prescan_target_dates(
         filepath: Path to the .xlsx/.xlsm workbook.
         target_cols: Column-name mapping; ``target_cols["source_date"]`` is
             the header label of the date column.
-        parse_date_fn: Cell-value → date parser (defaults to shared parser).
+        parse_date_fn: Cell-value -> date parser (defaults to shared parser).
         emit_fn: Optional status callback ``emit(msg)``.
 
     Returns:
@@ -122,7 +142,7 @@ def prescan_target_dates_and_currencies(
         filepath: Path to the .xlsx/.xlsm workbook.
         target_cols: Column-name mapping; ``target_cols["source_date"]`` and
             ``target_cols["currency"]`` are the header labels scanned.
-        parse_date_fn: Cell-value → date parser (defaults to shared parser).
+        parse_date_fn: Cell-value -> date parser (defaults to shared parser).
         emit_fn: Optional status callback ``emit(msg)``.
 
     Returns:
@@ -144,35 +164,14 @@ def prescan_target_dates_and_currencies(
             if sheet_name in SKIP_SHEET_NAMES:
                 continue
             ws = wb_scan[sheet_name]
-            header_row_idx = None
-            col_indices: dict[str, int] = {}
-            for row_idx, row in enumerate(
-                ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
-            ):
-                row_strs = [
-                    str(c).strip() if c is not None else "" for c in row
-                ]
-                if source_label in row_strs:
-                    header_row_idx = row_idx
-                    # A duplicate source-date/currency column is resolved
-                    # deterministically to the FIRST occurrence (not last-wins,
-                    # which silently depends on column order). Warn so the
-                    # operator can correct the sheet.
-                    for ci, val in enumerate(row_strs):
-                        for key, label in (
-                            ("source", source_label),
-                            ("currency", currency_label),
-                        ):
-                            if label is not None and val == label:
-                                if key in col_indices:
-                                    logger.warning(
-                                        "Sheet '%s': duplicate '%s' header "
-                                        "column — using the first occurrence.",
-                                        sheet_name, label,
-                                    )
-                                else:
-                                    col_indices[key] = ci
-                    break
+            # Header location + first-occurrence duplicate resolution are
+            # owned by core.excel_io.find_header_row (shared with the ledger
+            # write path's scan_sheet_headers and core.prescan).
+            header_row_idx, col_indices = find_header_row(
+                ws,
+                (("source", source_label), ("currency", currency_label)),
+                sheet_name=sheet_name,
+            )
 
             if header_row_idx is None or "source" not in col_indices:
                 continue

@@ -8,7 +8,6 @@ These tests define the contracts for:
   1. core/workers/event_bus.py — Thread-safe Producer-Consumer event queue
   2. gui/panels/live_console.py — Read-only log viewer module
   3. gui/panels/settings_modal.py — JSON-backed settings persistence
-  4. gui/panels/control_panel.py — Drop zone and action buttons module
 """
 
 import os
@@ -120,9 +119,6 @@ class TestPanelModules:
     def test_settings_modal_module_exists(self):
         from gui.panels.settings_modal import SettingsModal  # noqa: F401
 
-    def test_control_panel_module_exists(self):
-        from gui.panels.control_panel import ControlPanel  # noqa: F401
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 4. gui/app.py PURE HELPERS (no Tk root required)
@@ -167,3 +163,39 @@ class TestAppExtensionResolution:
         )
         assert [p.rsplit("/", 1)[-1] for p in accepted] == ["a.xlsx"]
         assert [p.rsplit("/", 1)[-1] for p in rejected] == ["old.xls"]
+
+    def test_resolve_collects_rejected_from_dropped_folder(self, tmp_path):
+        """A FOLDER drop must surface unsupported spreadsheets it contains.
+
+        Repro for the silent legacy-export case: a dropped folder holding
+        only .xls files previously produced ([], []) — indistinguishable
+        from an empty folder — so the user got a generic 'No Valid Files'
+        (or nothing) instead of the format warning naming the files.
+        """
+        from gui.app import resolve_excel_files
+
+        folder = tmp_path / "exports"
+        folder.mkdir()
+        (folder / "Sale Report 2026.xls").write_text("x")
+        (folder / "keep.xlsx").write_text("x")
+
+        accepted, rejected = resolve_excel_files(
+            [str(folder)], collect_rejected=True,
+        )
+        assert [p.rsplit("/", 1)[-1] for p in accepted] == ["keep.xlsx"]
+        assert [p.rsplit("/", 1)[-1] for p in rejected] == [
+            "Sale Report 2026.xls",
+        ]
+
+    def test_resolve_folder_with_only_unsupported_is_not_silent(self, tmp_path):
+        from gui.app import resolve_excel_files
+
+        folder = tmp_path / "exports"
+        folder.mkdir()
+        (folder / "only.xls").write_text("x")
+
+        accepted, rejected = resolve_excel_files(
+            [str(folder)], collect_rejected=True,
+        )
+        assert accepted == []
+        assert [p.rsplit("/", 1)[-1] for p in rejected] == ["only.xls"]

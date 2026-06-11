@@ -51,11 +51,17 @@ def _load_tray_icon() -> "Image.Image | None":
             # legacy base dir; wrap in Path for the joins below.
             base_str = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # noqa: PTH100, PTH120
             base = Path(base_str)
-        # Try .ico first (best for Windows tray), then .png
+        # Try .ico first (best for Windows tray), then .png. A corrupt or
+        # unreadable icon file falls through to the next candidate and
+        # finally the generated square — one bad asset must not cost the
+        # whole tray (and with it the only way back from close-to-tray).
         for name in ("icon.ico", "icon.png"):
             path = base / "assets" / name
-            if path.exists():
-                return Image.open(path)
+            try:
+                if path.exists():
+                    return Image.open(path)
+            except (OSError, ValueError) as e:
+                logger.debug("Tray icon asset %s unusable: %s", name, e)
         # Fallback: generate a tiny coloured square
         img = Image.new("RGB", (64, 64), color=(59, 130, 246))
         return img
@@ -151,16 +157,30 @@ class TrayManager:
     # ── Callbacks ────────────────────────────────────────────────────────
 
     def _on_close(self) -> None:
-        """Called when the user clicks the window 'X' button."""
+        """Called when the user clicks the window 'X' button.
+
+        If the tray icon never started (icon load failed, pystray thread not
+        running), hiding the window would strand it with no visible way back
+        — fall back to a normal application quit instead.
+        """
+        if self._icon is None:
+            logger.info("Tray icon unavailable — window close quits normally")
+            close_handler = getattr(
+                self._app, "_on_app_close", self._app.destroy
+            )
+            close_handler()
+            return
         self._app.withdraw()  # hide the window
         self._is_hidden = True
         logger.info("Window hidden to system tray")
 
     def _on_show(self, icon=None, item=None) -> None:
         """Restore the window from the tray."""
-        # Schedule on the Tk main thread
-        with contextlib.suppress(RuntimeError):  # app already destroyed
-            self._app.after(0, self._restore_window)
+        # Schedule on the Tk main thread. _safe_marshal no-ops once the app
+        # is closing and swallows both RuntimeError AND TclError (TclError is
+        # NOT a RuntimeError subclass), so a teardown race can never raise
+        # unhandled inside the pystray thread.
+        self._app._safe_marshal(self._restore_window)
 
     def _restore_window(self) -> None:
         """Bring the window back and focus it.
@@ -203,9 +223,10 @@ class TrayManager:
             self._icon.stop()
         # Schedule the app-level close handler on the Tk main thread so workers
         # are torn down cleanly before destroy (falls back to destroy).
+        # _safe_marshal guards the pystray thread against app-teardown races
+        # (RuntimeError + TclError, no-op once _closing).
         close_handler = getattr(self._app, "_on_app_close", self._app.destroy)
-        with contextlib.suppress(RuntimeError):  # app already destroyed
-            self._app.after(0, close_handler)
+        self._app._safe_marshal(close_handler)
 
     def restore_if_hidden(self) -> None:
         """

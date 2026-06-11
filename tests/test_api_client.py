@@ -7,12 +7,16 @@ Unit tests for core/api_client.py — BOTClient with mocked HTTP responses.
 """
 
 import asyncio
+import json as jsonlib
 import logging
+import sys
 from datetime import date
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from core.api_client import (
     BOTAPIError,
@@ -40,7 +44,8 @@ class TestBOTRateDetail:
         rate = BOTRateDetail(**data)
         assert rate.period == "2025-03-10"
         assert rate.currency == "USD"
-        assert rate.selling == 33.10
+        assert rate.selling == Decimal("33.10")
+        assert rate.buying_transfer == Decimal("32.60")
 
     def test_optional_fields_default_to_none(self):
         data = {
@@ -50,6 +55,49 @@ class TestBOTRateDetail:
         rate = BOTRateDetail(**data)
         assert rate.selling is None
         assert rate.buying_transfer is None
+
+    def test_rate_fields_are_exact_4dp_decimals(self):
+        """Layer-1 exactness gate: every rate field is a Decimal quantized
+        to 4dp at the parse boundary — never a binary float."""
+        rate = BOTRateDetail(
+            period="2025-03-10", currency_id="USD",
+            buying_transfer=32.60, buying_sight="32.55",
+            selling=Decimal("33.1"), mid_rate=32.875,
+        )
+        for field in ("buying_transfer", "buying_sight", "selling", "mid_rate"):
+            value = getattr(rate, field)
+            assert isinstance(value, Decimal)
+            assert value.as_tuple().exponent == -4
+        # str-safe construction preserves the human-readable digits.
+        assert str(rate.buying_transfer) == "32.6000"
+        assert str(rate.buying_sight) == "32.5500"
+        assert str(rate.selling) == "33.1000"
+        assert str(rate.mid_rate) == "32.8750"
+
+    def test_six_dp_value_quantizes_half_even_to_4dp(self):
+        rate = BOTRateDetail(
+            period="2025-03-10", currency_id="USD",
+            buying_transfer=34.123456, selling=Decimal("34.12345"),
+        )
+        assert rate.buying_transfer == Decimal("34.1235")
+        # Exact tie rounds half-even (banker's rounding), matching
+        # safe_to_decimal's Decimal-default rounding discipline.
+        assert rate.selling == Decimal("34.1234")
+
+    def test_empty_string_rate_becomes_none(self):
+        rate = BOTRateDetail(
+            period="2025-03-10", currency_id="USD", buying_transfer="",
+        )
+        assert rate.buying_transfer is None
+
+    def test_non_numeric_rate_raises_validation_error(self):
+        """Junk must still FAIL schema validation (surfaced upstream as the
+        generic BOTAPIError), never be silently coerced or dropped."""
+        with pytest.raises(ValidationError):
+            BOTRateDetail(
+                period="2025-03-10", currency_id="USD",
+                buying_transfer="not-a-number",
+            )
 
 
 class TestBOTHolidayDetail:
@@ -128,7 +176,39 @@ class TestBOTClient:
         ))
         assert len(rates) == 1
         assert rates[0].period == "2025-03-10"
-        assert rates[0].selling == 33.10
+        assert isinstance(rates[0].selling, Decimal)
+        assert rates[0].selling == Decimal("33.10")
+
+    def test_rates_parse_decimal_from_literal_json_token(
+        self, bot_client, mock_http_client,
+    ):
+        """Layer-1 exactness gate: _fetch_json must parse JSON numbers into
+        Decimal straight from the literal response token (parse_float=Decimal),
+        never via an intermediate binary float.
+
+        Discriminator: the literal token below quantizes to 34.1235 when
+        parsed exactly, but to 34.1234 (half-even on the float's shortest
+        repr "34.12345") if it ever passes through a float.
+        """
+        # Raw body string: the discriminator token must reach json.loads
+        # verbatim (building it via dumps() would collapse it to a float).
+        body = (
+            '{"result": {"data": {"data_detail": [{'
+            '"period": "2025-03-10", "currency_id": "USD", '
+            '"buying_transfer": 34.12345000000000001, "selling": 33.10'
+            '}]}}}'
+        )
+        # A response whose .json() honors kwargs like the real httpx Response.
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json = lambda **kw: jsonlib.loads(body, **kw)
+        mock_http_client.get = AsyncMock(return_value=mock_resp)
+
+        rates = asyncio.run(bot_client.get_exchange_rates(
+            date(2025, 3, 10), date(2025, 3, 10), "USD"
+        ))
+        assert rates[0].buying_transfer == Decimal("34.1235")
+        assert str(rates[0].selling) == "33.1000"
 
     def test_get_holidays_parses_response(self, bot_client, mock_http_client):
         mock_resp = MagicMock()
@@ -482,6 +562,46 @@ class TestPingToken:
         assert captured["headers"]["X-IBM-Client-Id"] == "RAWKEY123"
         assert captured["headers"]["Authorization"] == "Bearer RAWKEY123"
 
+    def test_default_product_probes_exchange_endpoint(self, monkeypatch):
+        """Backward-compatible default: the EXG-rate product is probed."""
+        from core import api_client
+
+        captured = {}
+
+        def _capture(url, *, headers, timeout):
+            captured["url"] = url
+            resp = MagicMock()
+            resp.status_code = 200
+            return resp
+
+        monkeypatch.setattr(api_client.httpx, "get", _capture)
+        api_client.ping_token("SOMEKEY1234")
+        assert api_client.EXG_RATE_PATH in captured["url"]
+
+    def test_hol_product_probes_holiday_endpoint(self, monkeypatch):
+        """product='hol' must hit the holiday endpoint the batch depends on.
+
+        The BOT gateway scopes each key to one API product (live-verified:
+        a valid HOL key 403s on the EXG endpoint and vice versa), so probing
+        the holiday key against the exchange-rate endpoint rejects correct
+        keys and passes wrong ones.
+        """
+        from core import api_client
+
+        captured = {}
+
+        def _capture(url, *, headers, timeout):
+            captured["url"] = url
+            resp = MagicMock()
+            resp.status_code = 200
+            return resp
+
+        monkeypatch.setattr(api_client.httpx, "get", _capture)
+        ok, _ = api_client.ping_token("HOLKEY12345", product="hol")
+        assert ok is True
+        assert api_client.HOLIDAY_PATH in captured["url"]
+        assert api_client.EXG_RATE_PATH not in captured["url"]
+
 
 # =========================================================================
 #  TOKEN REDACTION LOGGING FILTER (security)
@@ -588,6 +708,56 @@ class TestTokenRedactionFilter:
         # Two env keys probed exactly once across all five records (cached),
         # not 2x per record.
         assert calls["n"] == 2
+
+    def _make_exc_record(self, msg="boom"):
+        """Build a record carrying a live exc_info whose message embeds a token."""
+        try:
+            raise ValueError(
+                "connect failed: https://gateway/?client_id=tbsecret456"
+            )
+        except ValueError:
+            exc_info = sys.exc_info()
+        return logging.LogRecord(
+            name="test", level=logging.ERROR, pathname=__file__,
+            lineno=1, msg=msg, args=(), exc_info=exc_info,
+        )
+
+    def test_redacts_token_in_exception_traceback(self, monkeypatch):
+        """SECURITY (F24): a token embedded in the traceback is scrubbed."""
+        monkeypatch.setenv("BOT_TOKEN_EXG", "tbsecret456")
+        monkeypatch.delenv("BOT_TOKEN_HOL", raising=False)
+        f = TokenRedactionFilter()
+        rec = self._make_exc_record()
+        assert f.filter(rec) is True
+        formatted = logging.Formatter().format(rec)
+        assert "tbsecret456" not in formatted
+        assert "***" in formatted
+
+    def test_traceback_formatting_preserved_after_redaction(self, monkeypatch):
+        """The redacted record still formats as a full traceback block."""
+        monkeypatch.setenv("BOT_TOKEN_EXG", "tbsecret456")
+        monkeypatch.delenv("BOT_TOKEN_HOL", raising=False)
+        f = TokenRedactionFilter()
+        rec = self._make_exc_record()
+        assert f.filter(rec) is True
+        formatted = logging.Formatter().format(rec)
+        assert "Traceback (most recent call last)" in formatted
+        assert "ValueError" in formatted
+        # exc_info cleared so no handler can re-format the raw exception;
+        # the pre-redacted exc_text drives the output instead.
+        assert rec.exc_info is None
+        assert rec.exc_text is not None
+        assert not rec.exc_text.endswith("\n")
+
+    def test_exc_info_untouched_when_no_tokens(self, monkeypatch):
+        """Without known tokens the record's exc_info passes through as-is."""
+        monkeypatch.delenv("BOT_TOKEN_EXG", raising=False)
+        monkeypatch.delenv("BOT_TOKEN_HOL", raising=False)
+        monkeypatch.setattr("core.secure_tokens.get_token", lambda key: None)
+        f = TokenRedactionFilter()
+        rec = self._make_exc_record()
+        assert f.filter(rec) is True
+        assert rec.exc_info is not None
 
 
 # =========================================================================

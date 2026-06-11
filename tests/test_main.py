@@ -95,6 +95,62 @@ def test_sentry_scrubber_redacts_keychain_sourced_token(monkeypatch):
     assert "***" in scrubbed["message"]
 
 
+def test_sentry_scrubber_drops_event_when_scrubbing_fails(monkeypatch):
+    """SECURITY (F157): a scrubber failure DROPS the event (returns None)
+    instead of sending it unscrubbed to a third-party service."""
+    main = _import_main_with_fake_tk(monkeypatch)
+
+    def _boom():
+        raise RuntimeError("keychain exploded")
+
+    monkeypatch.setattr(main, "_scrubber_token_values", _boom)
+    event = {"message": "may contain a live token"}
+    assert main._sentry_token_scrubber(event, {}) is None
+
+
+def _make_args(main, **overrides):
+    """Build a parsed-args namespace with main.py's CLI defaults."""
+    import argparse
+    defaults = {
+        "headless": False, "input": None, "start_date": None,
+        "dry_run": False, "quiet": False, "verbose": False, "json": False,
+        "resume": False, "schedule": None, "purge_credentials": False,
+    }
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+def test_headless_only_flags_warn_in_gui_mode(monkeypatch, capsys):
+    """F158: headless-only flags without --headless/--schedule warn on stderr."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    args = _make_args(main, dry_run=True, json=True)
+    main._warn_ignored_headless_flags(args)
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "--dry-run" in err
+    assert "--json" in err
+    assert "ignored" in err
+
+
+def test_headless_only_flags_silent_with_headless(monkeypatch, capsys):
+    """No warning when --headless (or --schedule) makes the flags effective."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    main._warn_ignored_headless_flags(
+        _make_args(main, headless=True, dry_run=True)
+    )
+    main._warn_ignored_headless_flags(
+        _make_args(main, schedule="23:00", input="x")
+    )
+    assert capsys.readouterr().err == ""
+
+
+def test_no_warning_for_plain_gui_launch(monkeypatch, capsys):
+    """A bare GUI launch (no flags) prints nothing."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    main._warn_ignored_headless_flags(_make_args(main))
+    assert capsys.readouterr().err == ""
+
+
 def test_purge_credentials_deletes_both_tokens(monkeypatch, capsys):
     """--purge-credentials deletes both keychain tokens and reports a result."""
     main = _import_main_with_fake_tk(monkeypatch)
@@ -327,6 +383,30 @@ def test_headless_exit_nothing_to_do_on_empty_folder(monkeypatch, tmp_path):
     empty.mkdir()
     args = _headless_args(main, input=str(empty))
     assert main._run_headless(args) == main.EXIT_NOTHING
+
+
+def test_headless_json_emits_summary_even_with_zero_files(
+    monkeypatch, tmp_path, capsys,
+):
+    """--json always prints a summary object, even on the EXIT_NOTHING path,
+    so machine parsers never receive an empty stdout."""
+    import json as _json
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_tokens_present", lambda: True)
+    empty = tmp_path / "input"
+    empty.mkdir()
+    args = _headless_args(main, input=str(empty), json=True, dry_run=True)
+    assert main._run_headless(args) == main.EXIT_NOTHING
+    out = capsys.readouterr().out.strip()
+    payload = _json.loads(out)
+    assert payload == {
+        "succeeded": 0,
+        "failed": 0,
+        "total": 0,
+        "dry_run": True,
+        "audit_log": None,
+        "errors": [],
+    }
 
 
 # ── --resume flag (crash-recovery) ───────────────────────────────────────
@@ -720,3 +800,60 @@ def test_readme_documents_cli_flags_and_exit_codes():
     assert "Partial failure" in text
     assert "Nothing to do" in text
     assert "0 (success) or 1 (failures)" not in text
+
+
+# ── Headless unsupported-spreadsheet reporting (.xls et al.) ─────────────
+def test_headless_reports_unsupported_xls_in_folder(
+    monkeypatch, tmp_path, capsys,
+):
+    """A folder holding only legacy .xls files must NAME them with a remedy.
+
+    Repro: the generic 'No Excel files found to process.' hid the real
+    cause — the user's Crystal-Reports .xls export was present but
+    unsupported — making the failure read like an empty folder or an API
+    problem.
+    """
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_tokens_present", lambda: True)
+    d = tmp_path / "input"
+    d.mkdir()
+    (d / "Sale Report 2026.xls").write_text("x")
+    args = _headless_args(main, input=str(d))
+    assert main._run_headless(args) == main.EXIT_NOTHING
+    err = capsys.readouterr().err
+    assert "Sale Report 2026.xls" in err
+    assert ".xlsx" in err  # the save-as remedy must be stated
+
+
+def test_headless_reports_unsupported_xls_direct_file(
+    monkeypatch, tmp_path, capsys,
+):
+    """--input pointing AT a .xls file must say unsupported, not 'not found'."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_tokens_present", lambda: True)
+    f = tmp_path / "Sale Report 2026.xls"
+    f.write_text("x")
+    args = _headless_args(main, input=str(f))
+    assert main._run_headless(args) == main.EXIT_NOTHING
+    err = capsys.readouterr().err
+    assert "Sale Report 2026.xls" in err
+    assert ".xlsx" in err
+
+
+def test_headless_json_includes_unsupported_in_errors(
+    monkeypatch, tmp_path, capsys,
+):
+    """--json parsers must see the unsupported files, not a bare empty run."""
+    import json as _json
+
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_tokens_present", lambda: True)
+    d = tmp_path / "input"
+    d.mkdir()
+    (d / "old.xls").write_text("x")
+    args = _headless_args(main, input=str(d), json=True)
+    assert main._run_headless(args) == main.EXIT_NOTHING
+    out = capsys.readouterr().out.strip()
+    payload = _json.loads(out)
+    assert payload["total"] == 0
+    assert any("old.xls" in e for e in payload["errors"])

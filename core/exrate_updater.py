@@ -6,8 +6,8 @@ BOT Exchange Rate Processor — Workbook write pipeline + standalone updater
 ---------------------------------------------------------------------------
 Two extracted units that previously lived inline in core/engine.py:
 
-  - WorkbookWriter          → the process_ledger openpyxl write pipeline.
-  - StandaloneExRateUpdater → the update_exrate_standalone method body.
+  - WorkbookWriter          -> the process_ledger openpyxl write pipeline.
+  - StandaloneExRateUpdater -> the update_exrate_standalone method body.
 
 LIVE-BINDING CONTRACT (mandatory): both classes store ONLY the live engine
 object (``self._engine = engine``) and dereference every engine attribute
@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import openpyxl
+from openpyxl.utils import column_index_from_string
 
 from core.audit_logger import AuditCollector, AuditRecord
 from core.constants import BACKUP_MAX_AGE_DAYS, MIN_DISK_SPACE_MB, bot_today
@@ -34,16 +35,94 @@ from core.excel_io import (
     scan_sheet_headers,
     write_custom_exrate_data,
 )
-from core.exrate_sheet import update_master_exrate_sheet
+from core.exrate_sheet import exrate_fixed_index_keys, update_master_exrate_sheet
 from core.logic import (
     build_holiday_lookup,
     compute_year_start_date,
+    default_fetch_window_start,
     safe_to_decimal,
 )
 from core.workbook_io import atomic_save as _atomic_save
-from core.workbook_io import ensure_disk_space
+from core.workbook_io import build_cell_verifier, ensure_disk_space
 
 logger = logging.getLogger(__name__)
+
+
+def _snapshot_cells(
+    ws, cols, start_row: int = 2,
+) -> dict[int, dict[int, object]]:
+    """Snapshot the in-memory values of ``cols`` (1-based) for every data row.
+
+    The result feeds ``core.workbook_io.build_cell_verifier``: after the
+    save, the TEMP file is reopened and each snapshotted cell must round-trip
+    to exactly this value (Decimal-string equality for numbers, blank for
+    None) BEFORE the temp replaces the original — the Layer-1 exactness gate.
+    """
+    rows: dict[int, dict[int, object]] = {}
+    for row_idx in range(start_row, (ws.max_row or 0) + 1):
+        rows[row_idx] = {
+            col: ws.cell(row=row_idx, column=col).value for col in cols
+        }
+    return rows
+
+
+def _collect_ledger_expectations(
+    wb, sheet_maps: dict, exrate_col_map: dict[str, str] | None,
+) -> dict[str, dict[int, dict[int, object]]]:
+    """Expected post-save cell values for everything THIS RUN wrote.
+
+    - ExRate sheet: every rate cell (fixed B-E plus appended extra-currency
+      columns). update_master_exrate_sheet rebuilds ALL data rows in one
+      shot (delete_rows + rewrite), so the whole range is this run's output;
+      blank weekend/holiday cells are asserted blank.
+    - Monthly tabs: every EX Rate cell now holding a formula string — the
+      IFS formula injected (or confirmed identical) this run must round-trip
+      verbatim. ExRate is in SKIP_SHEET_NAMES, so sheet_maps never collides
+      with the ExRate entry above.
+    """
+    expected: dict[str, dict[int, dict[int, object]]] = {}
+    if "ExRate" in wb.sheetnames:
+        rate_cols = [2, 3, 4, 5] + [
+            column_index_from_string(letter)
+            for letter in (exrate_col_map or {}).values()
+        ]
+        expected["ExRate"] = _snapshot_cells(wb["ExRate"], rate_cols)
+    for sheet_name, mapping in sheet_maps.items():
+        out_idx = mapping["columns"].get("out_rate")
+        if out_idx is None:
+            continue
+        out_col = out_idx + 1
+        ws = wb[sheet_name]
+        rows = expected.setdefault(sheet_name, {})
+        for row_idx in range(mapping["header_row"] + 1, ws.max_row + 1):
+            value = ws.cell(row=row_idx, column=out_col).value
+            if isinstance(value, str) and value.startswith("="):
+                rows.setdefault(row_idx, {})[out_col] = value
+    return expected
+
+
+def _is_macro_workbook(filepath) -> bool:
+    """True for macro-enabled containers (.xlsm / .xltm).
+
+    Every load_workbook in this module must pass ``keep_vba=`` this value:
+    without it openpyxl silently drops xl/vbaProject.bin on save, and
+    atomic_save then replaces the original — destroying the user's macros.
+    """
+    return str(filepath).lower().endswith((".xlsm", ".xltm"))
+
+
+def _close_vba_archive(wb) -> None:
+    """Deterministically close the keep_vba ZipFile (wb.close() skips it).
+
+    openpyxl stores the preserved VBA container as an append-mode in-memory
+    ZipFile on ``wb.vba_archive``; left to GC teardown its ``__del__`` can
+    fire after the backing buffer is cleared and emit "Exception ignored"
+    noise. Closing it alongside wb keeps the handle-release discipline exact.
+    """
+    vba = getattr(wb, "vba_archive", None)
+    if vba is not None:
+        with contextlib.suppress(OSError, ValueError):
+            vba.close()
 
 
 class WorkbookWriter:
@@ -69,9 +148,14 @@ class WorkbookWriter:
         rate_type: str | None = None,
         extra_currency_rates: dict | None = None,
         unsupported_currencies: list[str] | None = None,
+        anomalous_rates: "set[tuple[str, object]] | None" = None,
         audit: AuditCollector | None = None,
     ) -> str:
-        wb = openpyxl.load_workbook(filepath)
+        # keep_vba preserves xl/vbaProject.bin for .xlsm/.xltm inputs (the
+        # in-place overwrite would otherwise strip the user's macros).
+        wb = openpyxl.load_workbook(
+            filepath, keep_vba=_is_macro_workbook(filepath)
+        )
 
         # rate_type is snapshotted by process_ledger at the start of this
         # file's run and threaded through here, so a Settings "Save" mid-batch
@@ -84,6 +168,10 @@ class WorkbookWriter:
             )
         extra_currency_rates = extra_currency_rates or {}
         unsupported_currencies = unsupported_currencies or []
+        # (currency, date) pairs flagged by the engine's anomaly check (F25).
+        # Audit-trail metadata ONLY — never consulted to block or alter a
+        # write (anomaly detection is alert-only by contract).
+        anomalous_rates = anomalous_rates or set()
 
         # try/finally guarantees the OS file handle is released and gc runs on
         # BOTH the success and error exits (the standalone paths do the same).
@@ -133,7 +221,8 @@ class WorkbookWriter:
 
             # ── STEP 4: Surface rows the formula cannot fill ─────────────
             # Blank EX Rate cells are otherwise silent. Count both
-            # unavailable-rate rows (date beyond the rollback / no API data)
+            # unavailable-rate rows (no BOT rate for that exact date in the
+            # ExRate sheet — weekend/holiday or outside the fetched range)
             # and unsupported-currency rows, and emit per-file warnings so the
             # accountant is told instead of filing empty rates.
             self._warn_unfilled_rows(
@@ -149,6 +238,7 @@ class WorkbookWriter:
                 self._collect_audit_records(
                     wb, sheet_maps, exrate_index, exrate_col_map, rate_type,
                     originals, Path(filepath).name, master_holidays_set, audit,
+                    anomalous=anomalous_rates,
                 )
 
             # ── Save ─────────────────────────────────────────────────────
@@ -160,13 +250,23 @@ class WorkbookWriter:
             else:
                 # ERR-03: Check disk space before saving
                 ensure_disk_space(Path(filepath).parent, MIN_DISK_SPACE_MB)
-                _atomic_save(wb, filepath)
+                # Layer-1 hard gate (F50/F63/F72): reopen the saved TEMP and
+                # prove every cell this run wrote round-trips exactly (rates
+                # as 4dp Decimals, formulas verbatim) BEFORE it replaces the
+                # original. A mismatch aborts the swap — file untouched.
+                expected = _collect_ledger_expectations(
+                    wb, sheet_maps, exrate_col_map
+                )
+                _atomic_save(
+                    wb, filepath, verify=build_cell_verifier(expected)
+                )
                 logger.info(
                     "Overwritten in-place: %s",
                     Path(filepath).name,
                 )
         finally:
             # Release the file handle + reclaim memory on EVERY exit.
+            _close_vba_archive(wb)
             try:
                 wb.close()
             except OSError:
@@ -199,11 +299,9 @@ class WorkbookWriter:
         Counts are reported but the file still saves: a visible warning beats a
         hard failure on what may be a single stray row in a large ledger.
         """
-        # USD/EUR fixed columns vary by rate type (B/D buying, C/E selling).
-        if rate_type == "selling":
-            fixed = {"USD": "usd_selling", "EUR": "eur_selling"}
-        else:
-            fixed = {"USD": "usd_buying", "EUR": "eur_buying"}
+        # USD/EUR fixed columns vary by rate type (B/D buying, C/E selling) —
+        # resolved from the single layout source (core/exrate_sheet.py).
+        fixed = exrate_fixed_index_keys(rate_type)
 
         no_rate = 0
         unsupported_seen: dict[str, int] = {}
@@ -240,9 +338,13 @@ class WorkbookWriter:
                     no_rate += 1
 
         if no_rate:
+            # The XLOOKUP is exact-match: no rollback exists on this path. A
+            # row stays blank when the ExRate sheet has no BOT rate for that
+            # exact date — a weekend/holiday date or one outside the range.
             self._engine._emit(
                 f"{fname}: {no_rate} row(s) had no rate available "
-                "(date beyond the 10-day rollback) — EX Rate left blank",
+                "(no BOT rate for that exact date in the ExRate sheet — "
+                "weekend/holiday or outside range) — EX Rate left blank",
                 etype="warning",
             )
         for ccy, count in sorted(unsupported_seen.items()):
@@ -286,20 +388,42 @@ class WorkbookWriter:
         fname: str,
         holidays_set,
         audit: "AuditCollector",
+        anomalous: "set[tuple[str, object]] | None" = None,
     ) -> None:
         """Append one ``AuditRecord`` per EX Rate cell that resolved to a rate.
 
-        Mirrors the IFS formula's resolution (THB→1, USD/EUR→fixed columns,
-        extra currencies→exrate_col_map) so ``new_value`` matches what Excel
+        Mirrors the IFS formula's resolution (THB->1, USD/EUR->fixed columns,
+        extra currencies->exrate_col_map) so ``new_value`` matches what Excel
         will display. ``original_value`` is the pre-injection cell snapshot.
         Rows that cannot resolve (no rate / unsupported currency) are skipped —
         those are surfaced separately by ``_warn_unfilled_rows`` and would only
         clutter the per-cell change trail with empty "after" values.
+
+        ``anomalous`` is the engine's flagged ``(currency, date)`` set (F25):
+        a record whose currency + row date match gets ``anomaly_flag=True``
+        so the audit CSV's Anomaly_Flag column reads "ANOMALY"; all other
+        records stay False. Metadata only — the value is written regardless.
+
+        Audit-field caveats (CSV schema frozen until a coordinated rename
+        across core/audit_logger.py HEADERS + downstream consumers):
+
+        - ``holiday_rollback`` is a misnomer on this path: no rollback exists
+          in the exact-match XLOOKUP pipeline (weekend/holiday rows stay
+          blank by design). The flag actually records "the row's date IS a
+          BOT holiday" — i.e. a holiday-dated row — nothing more.
+        - ``rate_source`` is the fixed label ``"Cache/API"``: by the time
+          records are collected here, the rates were already merged into the
+          ExRate sheet, and per-(currency, date) provenance (cache hit vs
+          API fetch vs existing-sheet fallback — the latter logged by
+          ``core.exrate_sheet._merge_rate_data``) is not threaded through to
+          this site. Propagating real provenance would require changing the
+          ``_merge_rate_data`` return shape and the writer call chain;
+          deferred — the label honestly states the two primary sources.
         """
-        if rate_type == "selling":
-            fixed = {"USD": "usd_selling", "EUR": "eur_selling"}
-        else:
-            fixed = {"USD": "usd_buying", "EUR": "eur_buying"}
+        anomalous = anomalous or set()
+        # USD/EUR fixed columns vary by rate type (B/D buying, C/E selling) —
+        # resolved from the single layout source (core/exrate_sheet.py).
+        fixed = exrate_fixed_index_keys(rate_type)
         holiday_dates = set(holidays_set or ())
 
         for sheet_name, mapping in sheet_maps.items():
@@ -340,6 +464,10 @@ class WorkbookWriter:
                     holiday_rollback=(
                         row_date is not None and row_date in holiday_dates
                     ),
+                    anomaly_flag=(
+                        row_date is not None
+                        and (ccy, row_date) in anomalous
+                    ),
                 ))
 
     @staticmethod
@@ -370,7 +498,7 @@ class WorkbookWriter:
 
     @staticmethod
     def _fmt_value(value) -> str:
-        """Render a cell value for the audit CSV (blank cells → empty string)."""
+        """Render a cell value for the audit CSV (blank cells -> empty string)."""
         if value is None:
             return ""
         return str(value)
@@ -454,9 +582,14 @@ class StandaloneExRateUpdater:
             )
 
         _status("Opening ExRate file...")
-        wb = openpyxl.load_workbook(filepath)
+        # keep_vba preserves xl/vbaProject.bin for .xlsm/.xltm inputs (the
+        # in-place overwrite would otherwise strip the user's macros).
+        wb = openpyxl.load_workbook(
+            filepath, keep_vba=_is_macro_workbook(filepath)
+        )
 
         if "ExRate" not in wb.sheetnames:
+            _close_vba_archive(wb)
             wb.close()
             del wb
             gc.collect()
@@ -508,8 +641,8 @@ class StandaloneExRateUpdater:
                 )
 
                 _status("Writing exchange rate data...")
-                # Manual range → honor the user's exact (dr_start, dr_end).
-                # No range → prior-year-December computed_start, end defaults
+                # Manual range -> honor the user's exact (dr_start, dr_end).
+                # No range -> prior-year-December computed_start, end defaults
                 # to today() inside update_master_exrate_sheet.
                 sheet_start = dr_start if dr_start is not None else computed_start
                 update_master_exrate_sheet(
@@ -519,10 +652,19 @@ class StandaloneExRateUpdater:
                 )
                 # ERR-03: Check disk space before saving
                 ensure_disk_space(Path(filepath).parent, MIN_DISK_SPACE_MB)
-                _atomic_save(wb, filepath)
-                _status(f"✓ ExRate updated: {Path(filepath).name}")
+                # Layer-1 hard gate: every rebuilt ExRate rate cell (B-E)
+                # must round-trip from the TEMP file before it replaces the
+                # original — a mismatch leaves the user's file untouched.
+                expected = {
+                    "ExRate": _snapshot_cells(wb["ExRate"], (2, 3, 4, 5))
+                }
+                _atomic_save(
+                    wb, filepath, verify=build_cell_verifier(expected)
+                )
+                _status(f"OK: ExRate updated: {Path(filepath).name}")
                 return filepath
             finally:
+                _close_vba_archive(wb)
                 try:
                     wb.close()
                 except OSError:
@@ -540,7 +682,7 @@ class StandaloneExRateUpdater:
                 start_dt, end_dt = date_range
             else:
                 target_year = bot_today().year
-                start_dt = date(target_year - 1, 12, 20)
+                start_dt = default_fetch_window_start(target_year)
                 end_dt = bot_today()
 
             # rate_data[currency][api_field][date] = value
@@ -614,10 +756,19 @@ class StandaloneExRateUpdater:
 
             # ERR-03: Check disk space before saving
             ensure_disk_space(Path(filepath).parent, MIN_DISK_SPACE_MB)
-            _atomic_save(wb, filepath)
-            _status(f"✓ ExRate created: {Path(filepath).name}")
+            # Layer-1 hard gate: every custom-layout rate cell written above
+            # (one column per (ccy, rate_type) spec) must round-trip from
+            # the TEMP file before it replaces the original.
+            expected = {
+                "ExRate": _snapshot_cells(
+                    ws, tuple(range(2, 2 + len(col_specs)))
+                )
+            }
+            _atomic_save(wb, filepath, verify=build_cell_verifier(expected))
+            _status(f"OK: ExRate created: {Path(filepath).name}")
             return filepath
         finally:
+            _close_vba_archive(wb)
             try:
                 wb.close()
             except OSError:

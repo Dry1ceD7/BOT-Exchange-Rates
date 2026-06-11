@@ -10,6 +10,7 @@ Uses mocked API client and temporary files.
 import asyncio
 import threading
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -810,6 +811,114 @@ class TestProcessLedgerEndToEnd:
 
 
 # =========================================================================
+#  MACRO WORKBOOK (.xlsm) — keep_vba PRESERVATION (F7)
+# =========================================================================
+
+class TestMacroWorkbookKeepVba:
+    """Regression for F7: .xlsm inputs must keep their VBA project.
+
+    Without ``keep_vba=True`` openpyxl silently drops xl/vbaProject.bin on
+    save, and atomic_save then replaces the original — destroying the user's
+    macros. Both load sites in core/exrate_updater.py (WorkbookWriter.write
+    and StandaloneExRateUpdater.run) must thread the flag.
+    """
+
+    def _build_engine(self, tmp_cache):
+        """Engine wired to a mocked API + injected tmp backup/cache."""
+
+        def _rate(period, currency, buying_transfer, selling):
+            return SimpleNamespace(
+                period=period, currency=currency,
+                buying_transfer=buying_transfer, buying_sight=None,
+                selling=selling, mid_rate=None,
+            )
+
+        async def _rates(start, end, currency):
+            base_b = 33.0 if currency == "USD" else 36.0
+            base_s = 33.5 if currency == "USD" else 36.5
+            out = []
+            d = start
+            from datetime import timedelta as _td
+            while d <= end:
+                out.append(_rate(
+                    d.strftime("%Y-%m-%d"), currency, base_b, base_s,
+                ))
+                d += _td(days=1)
+            return out
+
+        async def _holidays(year):
+            return []
+
+        api = MagicMock()
+        api.get_exchange_rates = _rates
+        api.get_holidays = _holidays
+        return LedgerEngine(api, backup=MagicMock(), cache=tmp_cache)
+
+    def test_process_ledger_preserves_vba_project(
+        self, ledger_xlsx, tmp_cache,
+    ):
+        import zipfile
+
+        path = ledger_xlsx(
+            {"Jan": [(date(2025, 1, 7), "USD")]},
+            filename="macro_ledger.xlsm",
+        )
+        # Graft a fake VBA project into the container. openpyxl never parses
+        # vbaProject.bin — it round-trips the raw bytes — so a sentinel blob
+        # is enough to prove preservation through the full write pipeline.
+        with zipfile.ZipFile(path, "a") as zf:
+            zf.writestr("xl/vbaProject.bin", b"FAKE-VBA-PROJECT")
+
+        engine = self._build_engine(tmp_cache)
+        result = asyncio.run(engine.process_ledger(path))
+        assert result == path
+
+        with zipfile.ZipFile(path) as zf:
+            assert "xl/vbaProject.bin" in zf.namelist()
+            assert zf.read("xl/vbaProject.bin") == b"FAKE-VBA-PROJECT"
+
+    @pytest.mark.parametrize("fname, expected", [
+        ("rates.xlsm", True),
+        ("rates.XLSM", True),   # extension check is case-insensitive
+        ("rates.xltm", True),   # macro-enabled template
+        ("rates.xlsx", False),  # plain workbook must NOT pay the keep_vba cost
+    ])
+    def test_standalone_load_threads_keep_vba(
+        self, tmp_path, monkeypatch, fname, expected,
+    ):
+        from core.exrate_updater import StandaloneExRateUpdater
+
+        target = tmp_path / fname
+        wb = openpyxl.Workbook()
+        wb.save(str(target))
+        wb.close()
+
+        seen = {}
+        real_load = openpyxl.load_workbook
+
+        def _spy(filepath, **kwargs):
+            seen["keep_vba"] = kwargs.get("keep_vba")
+            return real_load(filepath, **kwargs)
+
+        monkeypatch.setattr(openpyxl, "load_workbook", _spy)
+
+        engine = SimpleNamespace(
+            _check_memory_guardrail=lambda p: None,
+            backup=MagicMock(),
+            _emit=lambda *a, **k: None,
+        )
+        # The freshly created workbook has no ExRate sheet, so run() raises
+        # immediately AFTER load_workbook — only the load kwargs matter here.
+        with pytest.raises(ValueError, match="No ExRate sheet"):
+            asyncio.run(
+                StandaloneExRateUpdater(engine).run(
+                    str(target), None, None, None, None,
+                )
+            )
+        assert seen["keep_vba"] is expected
+
+
+# =========================================================================
 #  CACHE-FIRST INVARIANT (Core Rule 5)
 # =========================================================================
 
@@ -999,6 +1108,106 @@ class TestPreloadUsesBotToday:
         }
         assert end_args == {fixed_today}
 
+    def test_extend_to_today_false_bounds_window_to_caller_dates(
+        self, engine, monkeypatch,
+    ):
+        """F60: extend_to_today=False keeps bot_today out of the window.
+
+        The rate audit verifies archived workbooks whose dates may be years
+        old — the fetch window must stay bounded by the sheet's own span,
+        never stretching to the current BOT business date.
+        """
+        fixed_today = date(2025, 3, 14)
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: fixed_today)
+        target = date(2025, 3, 11)  # Tuesday, one day past force_start
+
+        asyncio.run(
+            engine._preload_api_data(
+                {target}, "2025-03-10", extend_to_today=False,
+            )
+        )
+
+        # The fetch's upper bound is the caller's max date, NOT bot_today.
+        assert engine.api.get_exchange_rates.await_count >= 1
+        end_args = {
+            call.args[1] for call in engine.api.get_exchange_rates.await_args_list
+        }
+        assert end_args == {target}
+
+
+# =========================================================================
+#  PER-COLUMN CACHE MISS — SELF-HEALING (F1 regression)
+# =========================================================================
+
+class TestCacheSelfHealsNulledColumns:
+    """F1: a cached row with NULL rate columns must count as a cache MISS.
+
+    A partial write from an older version (the pre-fix CSV-import wipe) could
+    leave a date cached with only one currency's columns. Per-DATE membership
+    treated that row as a HIT, so the NULL columns were never re-fetched and
+    trading-day cells went blank forever. The per-column check re-fetches the
+    date; the COALESCE upsert then fills only the NULL columns, preserving
+    the surviving currency's values.
+    """
+
+    _TODAY = date(2025, 3, 10)  # Monday — keeps the weekday window one day
+
+    def test_null_eur_columns_refetch_and_self_heal(
+        self, engine, mock_api, tmp_cache, monkeypatch,
+    ):
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: self._TODAY)
+        target = self._TODAY
+
+        # Simulate the wiped row: USD survived, EUR columns are NULL.
+        tmp_cache.insert_rate(target, usd_buying=34.0512, usd_selling=34.3209)
+
+        async def _rates(start, end, currency):
+            buy, sell = {
+                "USD": (34.0512, 34.3209),
+                "EUR": (37.1023, 37.5541),
+            }[currency]
+            return [SimpleNamespace(
+                period=target.strftime("%Y-%m-%d"), currency=currency,
+                buying_transfer=buy, buying_sight=None,
+                selling=sell, mid_rate=None,
+            )]
+
+        mock_api.get_exchange_rates = AsyncMock(side_effect=_rates)
+
+        (
+            _logic, usd_selling, eur_selling, usd_buying, eur_buying, _u, _e,
+        ) = asyncio.run(engine._preload_api_data({target}, "2025-03-10"))
+
+        # The NULL columns forced a re-fetch (once per currency)...
+        assert mock_api.get_exchange_rates.await_count == 2
+        # ...and the EUR rates are now available to the writer.
+        assert eur_buying[target] == Decimal("37.1023")
+        assert eur_selling[target] == Decimal("37.5541")
+        assert usd_buying[target] == Decimal("34.0512")
+        assert usd_selling[target] == Decimal("34.3209")
+
+        # The cache row self-healed: all four columns survived the upsert.
+        healed = tmp_cache.get_rate(target)
+        assert healed["usd_buying"] == Decimal("34.0512")
+        assert healed["usd_selling"] == Decimal("34.3209")
+        assert healed["eur_buying"] == Decimal("37.1023")
+        assert healed["eur_selling"] == Decimal("37.5541")
+
+    def test_fully_cached_row_still_serves_without_api(
+        self, engine, mock_api, tmp_cache, monkeypatch,
+    ):
+        """Guard: per-column checking must not over-fetch a complete row
+        (Core Rule 5 — full cache hit stays at zero rate API calls)."""
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: self._TODAY)
+        target = self._TODAY
+        tmp_cache.insert_rate(
+            target, usd_buying=34.0512, usd_selling=34.3209,
+            eur_buying=37.1023, eur_selling=37.5541,
+        )
+
+        asyncio.run(engine._preload_api_data({target}, "2025-03-10"))
+        mock_api.get_exchange_rates.assert_not_called()
+
 
 # =========================================================================
 #  LEDGER_PROCESSING — extracted near-pure helpers
@@ -1047,6 +1256,98 @@ class TestRunAnomalyCheck:
         assert len(emitted) == 2
         assert all(etype == "warning" for _msg, etype in emitted)
         assert "ANOMALY" in emitted[0][0]
+
+    def test_extra_currency_joins_bundle_under_rate_type_key(self):
+        """F42: extra (non-USD/EUR) series enter as '{CCY}_{rate_type}'."""
+        gbp_series = {date(2025, 3, 11): Decimal("50.0000")}
+        seen_bundles = []
+
+        class _Guard:
+            def check_rates_bulk(self, bundle):
+                seen_bundles.append(bundle)
+                return []
+
+        count = run_anomaly_check(
+            _Guard(),
+            lambda msg, etype: None,
+            {}, {}, {}, {},
+            extra_currency_rates={"GBP": gbp_series},
+            extra_rate_type="selling",
+        )
+        assert count == 0
+        bundle = seen_bundles[0]
+        # The four fixed series stay, the GBP series joins under its key.
+        assert set(bundle) == {
+            "USD_buying_transfer", "USD_selling",
+            "EUR_buying_transfer", "EUR_selling",
+            "GBP_selling",
+        }
+        assert bundle["GBP_selling"] is gbp_series
+
+    def test_extra_currency_anomaly_warns_and_fills_anomalous_out(self):
+        """F42/F25: a GBP anomaly warns AND lands in the (ccy, date) set.
+
+        Alert-only contract: run_anomaly_check has no channel to veto or
+        rewrite a rate — it only emits and reports the flagged pairs.
+        """
+        anomaly = SimpleNamespace(
+            currency="GBP", rate_type="buying_transfer",
+            check_date=date(2025, 3, 11),
+            pct_change=19.0, prev_value="42.0000", new_value="50.0000",
+        )
+
+        class _Guard:
+            def check_rates_bulk(self, bundle):
+                assert "GBP_buying_transfer" in bundle
+                return [anomaly]
+
+        emitted = []
+        flagged: set[tuple[str, date]] = set()
+        count = run_anomaly_check(
+            _Guard(),
+            lambda msg, etype: emitted.append((msg, etype)),
+            {}, {}, {}, {},
+            extra_currency_rates={
+                "GBP": {
+                    date(2025, 3, 10): Decimal("42.0000"),
+                    date(2025, 3, 11): Decimal("50.0000"),
+                },
+            },
+            anomalous_out=flagged,
+        )
+        assert count == 1
+        assert flagged == {("GBP", date(2025, 3, 11))}
+        assert len(emitted) == 1
+        assert emitted[0][1] == "warning"
+        assert "GBP" in emitted[0][0]
+        assert "ANOMALY" in emitted[0][0]
+
+
+class TestCacheSingletonDelegation:
+    """F36: core.engine._get_cache delegates to core.database.get_cache."""
+
+    def test_engine_get_cache_is_database_singleton(
+        self, tmp_path, monkeypatch,
+    ):
+        import core.database as database
+        from core.database import CacheDB as _RealCacheDB
+
+        tmp_db = str(tmp_path / "delegate_cache.db")
+        monkeypatch.setattr(
+            database, "CacheDB", lambda: _RealCacheDB(db_path=tmp_db)
+        )
+        monkeypatch.setattr(database, "_cache_singleton", None)
+        try:
+            first = engine_mod._get_cache()
+            # One CacheDB per process: the engine accessor, the canonical
+            # accessor, and a repeat call all hand back the SAME instance.
+            assert first is database.get_cache()
+            assert engine_mod._get_cache() is first
+        finally:
+            existing = database._cache_singleton
+            if existing is not None:
+                existing.close()
+                database._cache_singleton = None
 
 
 class TestPrescanTargetDates:
@@ -1405,7 +1706,9 @@ class TestSettingsSnapshotContract:
             )
 
         monkeypatch.setattr(eng, "_preload_api_data", _fake_preload)
-        monkeypatch.setattr(eng, "_run_anomaly_check", lambda *a, **k: 0)
+        monkeypatch.setattr(
+            eng, "_run_anomaly_check", lambda *a, **k: (0, set())
+        )
         monkeypatch.setattr(
             engine_mod, "build_holiday_lookup",
             lambda *a, **k: (set(), {}),
@@ -1599,3 +1902,116 @@ class TestProcessBatchManifestLifecycle:
             ["a.xlsx"], dry_run=True, manifest=m,
         ))
         assert not mpath.exists()
+
+
+# =========================================================================
+#  FLOAT-CONTAMINATION CACHE REGRESSION (Layer-1 exactness hard gate)
+# =========================================================================
+
+class TestCacheFloatContamination:
+    """A float-contaminated cache must still yield exact 4dp Excel writes.
+
+    Layer-1 invariant: every value written to Excel exactly matches the
+    parsed BOT source value — Decimal built from a string, quantized to 4dp.
+    Legacy builds cached raw API floats into REAL columns, so a cache HIT
+    could replay >4dp float junk straight into the workbook. The read
+    boundary (CacheDB.get_rate/get_rates_bulk) now quantizes via
+    safe_to_decimal, making the written value exact regardless of what the
+    cache holds.
+    """
+
+    _TODAY = date(2025, 1, 15)  # Wednesday — deterministic weekday window
+
+    # Seeded 6dp float contamination → the exact 4dp Decimals that MUST land
+    # in the ExRate master sheet columns B-E (half-even quantization).
+    _SEED = (34.123456, 34.567891, 37.123456, 37.654321)
+    _EXPECTED = {
+        2: Decimal("34.1235"),  # B: USD Buying TT
+        3: Decimal("34.5679"),  # C: USD Selling
+        4: Decimal("37.1235"),  # D: EUR Buying TT
+        5: Decimal("37.6543"),  # E: EUR Selling
+    }
+
+    def test_cache_hit_process_ledger_writes_exact_4dp_cells(
+        self, ledger_xlsx, tmp_cache, monkeypatch,
+    ):
+        from datetime import timedelta
+
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: self._TODAY)
+        target = date(2025, 1, 7)  # Tuesday
+        path = ledger_xlsx({"Jan": [(target, "USD")]})
+
+        # Seed EVERY weekday in the engine's window with the 6dp float so the
+        # run is a pure cache hit (zero API calls — Core Rule 5).
+        bulk = []
+        d = date(2024, 12, 20)
+        while d <= self._TODAY:
+            if d.weekday() < 5:
+                bulk.append((d.strftime("%Y-%m-%d"), *self._SEED))
+            d += timedelta(days=1)
+        tmp_cache.insert_rates_bulk(bulk)
+        for year in (2024, 2025):
+            tmp_cache.insert_holidays([(f"{year}-12-31", "Year-End Holiday")])
+
+        api = AsyncMock()
+        api.get_holidays = AsyncMock(return_value=[])
+        api.get_exchange_rates = AsyncMock(return_value=[])
+        engine = LedgerEngine(api, backup=MagicMock(), cache=tmp_cache)
+
+        result = asyncio.run(engine.process_ledger(path))
+        assert result == path
+        # Pure cache hit — the contaminated values came from SQLite, not API.
+        api.get_exchange_rates.assert_not_called()
+
+        wb = openpyxl.load_workbook(path)
+        try:
+            ws = wb["ExRate"]
+            checked = 0
+            for row in range(2, ws.max_row + 1):
+                for col, expected in self._EXPECTED.items():
+                    value = ws.cell(row=row, column=col).value
+                    if value is None:
+                        continue  # weekend/holiday rows carry no rate
+                    got = Decimal(str(value))
+                    assert got == expected, (
+                        f"row {row} col {col}: {got!r} != {expected!r}"
+                    )
+                    # Exactly 4dp — the 6dp float junk must never leak out.
+                    assert got != Decimal(str(self._SEED[col - 2]))
+                    checked += 1
+            # Every trading-day row was verified across all four columns.
+            assert checked >= 4
+        finally:
+            wb.close()
+
+    def test_api_writeback_caches_exact_4dp_text(
+        self, engine, mock_api, tmp_cache, monkeypatch,
+    ):
+        """The engine's API write-back persists quantized 4dp Decimal strings
+        (TEXT), never the raw API value — a later cache hit replays exactly
+        what the writer was given."""
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: date(2025, 3, 10))
+        target = date(2025, 3, 10)  # Monday — one-day weekday window
+
+        async def _rates(start, end, currency):
+            buy, sell = {
+                "USD": (Decimal("34.123456"), Decimal("34.567891")),
+                "EUR": (Decimal("37.123456"), Decimal("37.654321")),
+            }[currency]
+            return [SimpleNamespace(
+                period=target.strftime("%Y-%m-%d"), currency=currency,
+                buying_transfer=buy, buying_sight=None,
+                selling=sell, mid_rate=None,
+            )]
+
+        mock_api.get_exchange_rates = AsyncMock(side_effect=_rates)
+        asyncio.run(engine._preload_api_data({target}, "2025-03-10"))
+
+        raw = tmp_cache._conn().execute(
+            "SELECT usd_buying, typeof(usd_buying), "
+            "usd_selling, eur_buying, eur_selling "
+            "FROM rates WHERE date = '2025-03-10'"
+        ).fetchone()
+        assert raw == (
+            "34.1235", "text", "34.5679", "37.1235", "37.6543",
+        )

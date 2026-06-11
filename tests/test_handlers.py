@@ -21,9 +21,16 @@ class FakeApp:
 
     def __init__(self):
         self.after_calls = []
+        self.marshal_calls = []
 
     def after(self, ms, func, *args):
         self.after_calls.append((ms, func, args))
+
+    def _safe_marshal(self, func, *args):
+        # Spy mirroring BOTExrateApp._safe_marshal: record the routing, then
+        # dispatch via after(0, ...) exactly like the real helper.
+        self.marshal_calls.append((func, args))
+        self.after(0, func, *args)
 
     # Callback targets referenced by the handler (no-ops here).
     def _show_error(self, *a):
@@ -195,6 +202,127 @@ class TestAuditLogSurfacing:
         self._run(handler, monkeypatch, None)
         msgs = [e.get("msg", "") for e in bus.drain()]
         assert not any("Audit log:" in m for m in msgs), msgs
+
+
+class TestSafeMarshalRouting:
+    """F67: every worker-thread -> Tk callback must route through the app's
+    _safe_marshal helper (closing-flag check + RuntimeError AND TclError
+    suppression), never through a raw self.app.after guarded only by
+    'except RuntimeError'."""
+
+    def _marshalled(self, app):
+        return [func for func, _args in app.marshal_calls]
+
+    def test_progress_and_completion_route_through_safe_marshal(
+        self, monkeypatch,
+    ):
+        import gui.handlers as handlers_mod
+
+        app = FakeApp()
+        bus = EventBus()
+        handler = BatchHandler(app, event_bus=bus)
+
+        class FakeEngine:
+            def __init__(self, *a, **k):
+                self.last_audit_path = None
+
+            async def process_batch(self, file_queue, start_date=None,
+                                    progress_cb=None, dry_run=False,
+                                    stop_event=None):
+                progress_cb(1, 1, "a.xlsx", None)
+                return (1, 0, [])
+
+        monkeypatch.setattr(handlers_mod, "BOTClient", lambda c: object())
+        monkeypatch.setattr(handlers_mod, "LedgerEngine", FakeEngine)
+        asyncio.run(handler._run_batch(["a.xlsx"], "2025-01-01"))
+
+        marshalled = self._marshalled(app)
+        assert app._update_progress in marshalled
+        assert app._show_batch_complete in marshalled
+
+    def test_completion_payload_passed_intact(self, monkeypatch):
+        """The (success, fail, errors, dry_run) payload survives the marshal."""
+        import gui.handlers as handlers_mod
+
+        app = FakeApp()
+        handler = BatchHandler(app, event_bus=EventBus())
+        errors = [("a.xlsx", "boom")]
+
+        class FakeEngine:
+            def __init__(self, *a, **k):
+                self.last_audit_path = None
+
+            async def process_batch(self, *a, **k):
+                return (2, 1, errors)
+
+        monkeypatch.setattr(handlers_mod, "BOTClient", lambda c: object())
+        monkeypatch.setattr(handlers_mod, "LedgerEngine", FakeEngine)
+        asyncio.run(handler._run_batch(["a.xlsx"], "2025-01-01", dry_run=True))
+
+        payloads = [
+            args for func, args in app.marshal_calls
+            if func == app._show_batch_complete
+        ]
+        assert payloads == [(2, 1, errors, True)]
+
+    def test_batch_error_routes_through_safe_marshal(self):
+        app = FakeApp()
+        handler = BatchHandler(app, event_bus=EventBus())
+
+        async def boom(*a, **k):
+            raise ValueError("kaput")
+
+        handler._run_batch = boom
+        handler._batch_thread(["a.xlsx"], "2025-01-01")
+
+        assert app._show_error in self._marshalled(app)
+        assert any(
+            func == app._show_error and args == ("kaput",)
+            for func, args in app.marshal_calls
+        )
+
+    def test_revert_success_routes_through_safe_marshal(
+        self, tmp_path, monkeypatch,
+    ):
+        app = FakeApp()
+        handler = BatchHandler(app, event_bus=EventBus())
+
+        import core.backup_manager as bm
+
+        class FakeBackupMgr:
+            def restore_latest(self, filepath):
+                return str(tmp_path / "ledger_20250101_120000.xlsx")
+
+        monkeypatch.setattr(bm, "BackupManager", FakeBackupMgr)
+        handler._revert_thread(str(tmp_path / "ledger.xlsx"))
+        assert app._show_revert_success in self._marshalled(app)
+
+    def test_revert_error_routes_through_safe_marshal(
+        self, tmp_path, monkeypatch,
+    ):
+        app = FakeApp()
+        handler = BatchHandler(app, event_bus=EventBus())
+
+        import core.backup_manager as bm
+
+        class FakeBackupMgr:
+            def restore_latest(self, filepath):
+                raise bm.BackupError("no backup found")
+
+        monkeypatch.setattr(bm, "BackupManager", FakeBackupMgr)
+        handler._revert_thread(str(tmp_path / "ledger.xlsx"))
+        assert app._show_revert_error in self._marshalled(app)
+
+    def test_no_raw_after_guarded_only_by_runtimeerror(self):
+        """The module must not retain raw self.app.after(...) call sites —
+        the sweep replaced them all with self.app._safe_marshal(...)."""
+        import inspect
+
+        import gui.handlers as handlers_mod
+
+        source = inspect.getsource(handlers_mod)
+        assert "self.app.after(" not in source
+        assert "self.app._safe_marshal(" in source
 
 
 class TestRevertEvents:

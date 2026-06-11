@@ -25,6 +25,11 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import column_index_from_string, get_column_letter
 
 from core.constants import PREFORMAT_BUFFER_ROWS, SKIP_SHEET_NAMES
+from core.exrate_sheet import (
+    EXRATE_RATE_COLUMNS,
+    exrate_fixed_letters,
+    exrate_index_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,19 +92,13 @@ def build_exrate_index(
         elif isinstance(cell_val, date):
             row_date = cell_val
         if row_date:
+            # Fixed B-E columns from the single layout source
+            # (core/exrate_sheet.py EXRATE_RATE_COLUMNS).
             entry = {
-                "usd_buying": ws_exrate.cell(
-                    row=row_idx, column=2
-                ).value,
-                "usd_selling": ws_exrate.cell(
-                    row=row_idx, column=3
-                ).value,
-                "eur_buying": ws_exrate.cell(
-                    row=row_idx, column=4
-                ).value,
-                "eur_selling": ws_exrate.cell(
-                    row=row_idx, column=5
-                ).value,
+                exrate_index_key(ccy, rt): ws_exrate.cell(
+                    row=row_idx, column=col
+                ).value
+                for col, _label, ccy, rt in EXRATE_RATE_COLUMNS
             }
             for ccy, col_idx in extra_cols.items():
                 entry[f"extra:{ccy}"] = ws_exrate.cell(
@@ -108,6 +107,63 @@ def build_exrate_index(
             exrate_index[row_date] = entry
 
     return exrate_index
+
+
+def find_header_row(
+    ws,
+    labels: tuple[tuple[str, str | None], ...],
+    *,
+    scan_depth: int = 10,
+    sheet_name: str = "?",
+    warn_duplicates: bool = True,
+) -> tuple[int | None, dict[str, int]]:
+    """Locate a sheet's header row and map labelled columns (single owner).
+
+    Scans the first ``scan_depth`` rows for the ANCHOR label — ``labels[0]``
+    — and, on the first row containing it, maps every ``(key, label)`` pair
+    to its 0-based column index. Duplicate labelled columns are resolved
+    deterministically to the FIRST occurrence (never last-wins, which
+    silently depends on column order); with ``warn_duplicates`` the
+    collision is logged so the operator can fix the sheet. ``None`` labels
+    are skipped.
+
+    Canonical implementation behind :func:`scan_sheet_headers` (ledger write
+    path), ``core.ledger_processing.prescan_target_dates_and_currencies``,
+    and ``core.prescan._scan_xlsx``. Depth note: all header scans share the
+    10-row default; the standalone-ExRate PROBE
+    (``core.workbook_io.is_standalone_exrate_workbook``) keeps its separate
+    5-row window — it only recognises month tabs, it never maps columns.
+
+    Returns:
+        ``(header_row_idx, col_indices)`` — the 1-based header row index (or
+        None when the anchor label is absent) and ``{key: 0-based column}``.
+    """
+    anchor = labels[0][1]
+    header_row_idx: int | None = None
+    col_indices: dict[str, int] = {}
+    for row_idx, row in enumerate(
+        ws.iter_rows(min_row=1, max_row=scan_depth, values_only=True), 1
+    ):
+        row_strs = [
+            str(c).strip() if c is not None else "" for c in row
+        ]
+        if anchor in row_strs:
+            header_row_idx = row_idx
+            for ci, val in enumerate(row_strs):
+                for key, label in labels:
+                    if label is None or val != label:
+                        continue
+                    if key in col_indices:
+                        if warn_duplicates:
+                            logger.warning(
+                                "Sheet '%s': duplicate '%s' header column "
+                                "— using the first occurrence.",
+                                sheet_name, label,
+                            )
+                    else:
+                        col_indices[key] = ci
+            break
+    return header_row_idx, col_indices
 
 
 def scan_sheet_headers(
@@ -119,7 +175,8 @@ def scan_sheet_headers(
 
     Returns a dict mapping sheet_name → {header_row, columns}.
     Skips sheets in SKIP_SHEET_NAMES and sheets without the
-    source date column.
+    source date column. Header-row location and duplicate-column
+    resolution live in :func:`find_header_row` (single owner).
     """
     sheet_maps: dict[str, dict] = {}
 
@@ -127,36 +184,15 @@ def scan_sheet_headers(
         if sheet_name in SKIP_SHEET_NAMES:
             continue
         ws = wb[sheet_name]
-        header_row_idx = None
-        col_indices_local: dict[str, int] = {}
-        for row_idx, row in enumerate(
-            ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
-        ):
-            row_strs = [
-                str(c).strip() if c is not None else "" for c in row
-            ]
-            if target_cols["source_date"] in row_strs:
-                header_row_idx = row_idx
-                # Duplicate headers (e.g. two "EX Rate" columns) are resolved
-                # deterministically to the FIRST occurrence — never last-wins,
-                # which silently depends on column order. Warn so the operator
-                # can fix the sheet.
-                for ci, val in enumerate(row_strs):
-                    for key, label in (
-                        ("source", target_cols["source_date"]),
-                        ("currency", target_cols["currency"]),
-                        ("out_rate", target_cols["out_rate"]),
-                    ):
-                        if val == label:
-                            if key in col_indices_local:
-                                logger.warning(
-                                    "Sheet '%s': duplicate '%s' header column "
-                                    "— using the first occurrence.",
-                                    sheet_name, label,
-                                )
-                            else:
-                                col_indices_local[key] = ci
-                break
+        header_row_idx, col_indices_local = find_header_row(
+            ws,
+            (
+                ("source", target_cols["source_date"]),
+                ("currency", target_cols["currency"]),
+                ("out_rate", target_cols["out_rate"]),
+            ),
+            sheet_name=sheet_name,
+        )
 
         if header_row_idx is None or "source" not in col_indices_local:
             logger.info(
@@ -220,17 +256,31 @@ def inject_xlookup_formulas(
     N = exrate_last_row
 
     # ── Map rate_type → ExRate column letters for USD and EUR ─────
-    # ExRate layout: A=Date, B=USD Buying, C=USD Selling,
-    #                D=EUR Buying, E=EUR Selling, F=Holidays
-    if rate_type == "selling":
-        usd_col = "C"
-        eur_col = "E"
-    else:
-        # "buying_transfer" → USD/EUR Buying TT columns. The ledger rate_type
-        # is restricted to buying_transfer/selling and normalized upstream in
-        # engine, so no other value reaches here.
-        usd_col = "B"
-        eur_col = "D"
+    # Resolved from the single layout source (core/exrate_sheet.py):
+    # selling → C/E, buying_transfer → B/D. The ledger rate_type is
+    # restricted to buying_transfer/selling and normalized upstream in
+    # engine, so no other value reaches here.
+    fixed_letters = exrate_fixed_letters(rate_type)
+    usd_col = fixed_letters["USD"]
+    eur_col = fixed_letters["EUR"]
+
+    def _guarded_lookup(date_ref: str, rate_col: str) -> str:
+        """One IFS branch value: exact-match XLOOKUP, guarded twice.
+
+        The "" 4th arg covers NOT-FOUND only. Weekend/holiday rows EXIST
+        in the ExRate sheet with blank rate cells, so an unguarded lookup
+        returns a reference to an empty cell which Excel renders as
+        numeric 0 — accountants would see EX Rate = 0.0000 and dependent
+        THB amounts compute 0. The IF guard renders found-but-empty
+        results as blank "" instead. Exact-match semantics (match_mode 0)
+        are preserved: NO rollback, NO carry-forward.
+        """
+        lookup = (
+            f"_xlfn.XLOOKUP({date_ref},"
+            f"ExRate!$A$2:$A${N},"
+            f"ExRate!${rate_col}$2:${rate_col}${N},\"\",0)"
+        )
+        return f"IFERROR(IF({lookup}=\"\",\"\",{lookup}),\"\")"
 
     for sheet_name, mapping in sheet_maps.items():
         ws = wb[sheet_name]
@@ -282,13 +332,9 @@ def inject_xlookup_formulas(
             ifs_branches = (
                 f"{cur_ref}=\"THB\",1,"
                 f"{cur_ref}=\"USD\","
-                f"IFERROR(_xlfn.XLOOKUP({date_ref},"
-                f"ExRate!$A$2:$A${N},"
-                f"ExRate!${usd_col}$2:${usd_col}${N},\"\",0),\"\"),"
+                f"{_guarded_lookup(date_ref, usd_col)},"
                 f"{cur_ref}=\"EUR\","
-                f"IFERROR(_xlfn.XLOOKUP({date_ref},"
-                f"ExRate!$A$2:$A${N},"
-                f"ExRate!${eur_col}$2:${eur_col}${N},\"\",0),\"\")"
+                f"{_guarded_lookup(date_ref, eur_col)}"
             )
 
             # Additional currency branches from exrate_col_map
@@ -307,10 +353,7 @@ def inject_xlookup_formulas(
                         continue
                     ifs_branches += (
                         f",{cur_ref}=\"{ccy}\","
-                        f"IFERROR(_xlfn.XLOOKUP({date_ref},"
-                        f"ExRate!$A$2:$A${N},"
-                        f"ExRate!${col_letter}$2:${col_letter}${N},"
-                        f"\"\",0),\"\")"
+                        f"{_guarded_lookup(date_ref, col_letter)}"
                     )
 
             formula = (

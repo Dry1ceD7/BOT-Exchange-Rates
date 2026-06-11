@@ -160,7 +160,7 @@ def show_exrate_dialog(app) -> None:
 
     auto_label = ctk.CTkLabel(
         date_range_frame,
-        text=f"  Auto: {today.year}-01-01 → {today.strftime('%Y-%m-%d')}",
+        text=f"  Auto: {today.year}-01-01 -> {today.strftime('%Y-%m-%d')}",
         font=ctk.CTkFont(size=12),
         text_color=t["text_secondary"],
     )
@@ -189,7 +189,7 @@ def show_exrate_dialog(app) -> None:
         Uses calendar.monthrange so February shows 28/29 and 30-day months
         show 30 — no more offering 31 everywhere and failing only at Create
         time. The currently selected day is clamped down if it now exceeds the
-        month length (e.g. 31 → 30 when switching to April, or → 28/29 for Feb).
+        month length (e.g. 31 -> 30 when switching to April, or -> 28/29 for Feb).
         """
         try:
             yr = int(year_box.get())
@@ -363,7 +363,7 @@ def _build_exrate_summary(currencies, rate_types, date_range) -> str:
         currencies: List of currency codes.
         rate_types: Dict of {label: api_key} (only the labels are surfaced).
         date_range: Optional (start_date, end_date) tuple; None means auto
-            (current year, Jan 1 → today).
+            (current year, Jan 1 -> today).
 
     Returns:
         A human-readable summary string (no leading/trailing markers).
@@ -378,8 +378,50 @@ def _build_exrate_summary(currencies, rate_types, date_range) -> str:
     rate_list = ", ".join(rate_types.keys())
     return (
         f"{days} day{'s' if days != 1 else ''} "
-        f"({s_date:%Y-%m-%d} → {e_date:%Y-%m-%d}) · {ccy_list} · {rate_list}"
+        f"({s_date:%Y-%m-%d} -> {e_date:%Y-%m-%d}) · {ccy_list} · {rate_list}"
     )
+
+
+def _verify_exrate_dest(dest: str) -> None:
+    """Light structural read-back of the moved destination file (F50/F201).
+
+    The engine path already proved every written cell against the in-memory
+    expected values BEFORE its atomic save (core/workbook_io.atomic_save's
+    verify hook), so this only re-checks the file that actually landed at
+    ``dest`` after shutil.move: it must reopen as a workbook, carry an
+    "ExRate" sheet, and have a populated row 2. One cheap read-only pass.
+
+    Raises:
+        ValueError: On any structural failure (including an unreadable
+            file), so the worker's existing error path surfaces it.
+    """
+    import gc
+
+    from openpyxl import load_workbook
+
+    wb = None
+    try:
+        try:
+            wb = load_workbook(dest, read_only=True, data_only=False)
+            if "ExRate" not in wb.sheetnames:
+                raise ValueError("no ExRate sheet present")
+            ws = wb["ExRate"]
+            row2 = next(
+                ws.iter_rows(min_row=2, max_row=2, values_only=True), None,
+            )
+            if row2 is None or all(v in (None, "") for v in row2):
+                raise ValueError("ExRate sheet has no data in row 2")
+        except Exception as exc:
+            raise ValueError(
+                "Post-write verification failed for "
+                f"{Path(dest).name}: {exc}"
+            ) from exc
+    finally:
+        if wb is not None:
+            with contextlib.suppress(OSError):
+                wb.close()
+        del wb
+        gc.collect()
 
 
 def _create_exrate_file(app, currencies, rate_types, date_range=None):
@@ -387,8 +429,9 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
 
     Uses a callback interface to communicate with the parent window.
     The `app` parameter is only used for:
-      - app.after() (thread-safe scheduling)
+      - app._safe_marshal() (post-destroy-safe Tk scheduling)
       - app.event_bus (for LedgerEngine progress)
+      - app._register_worker()/app.thread_registry (worker accounting)
     All UI updates go through callbacks registered on `app` via the
     _get_ui_callbacks() helper.
 
@@ -499,9 +542,10 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
         # between currency/holiday network calls (#2).
         if cancel_event.is_set():
             raise _ExRateCancelled
-        # app destroyed during ExRate generation
-        with contextlib.suppress(RuntimeError):
-            app.after(0, _set_status, msg, t["text_secondary"])
+        # _safe_marshal no-ops once the app is closing and swallows both
+        # RuntimeError AND TclError (TclError is NOT a RuntimeError subclass),
+        # so an app destroyed mid-generation can never kill the worker thread.
+        app._safe_marshal(_set_status, msg, t["text_secondary"])
 
     def _done(success: bool, message: str, *, color: str | None = None):
         """Main-thread callback to restore UI state."""
@@ -534,6 +578,7 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
         from openpyxl import Workbook
 
         from core.api_client import CLIENT_TIMEOUT, BOTClient
+        from core.backup_manager import BackupError
         from core.engine import LedgerEngine
 
         # Build into a temp file in the destination directory and only move it
@@ -543,6 +588,10 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
         # to a sibling temp keeps the original intact until success; on failure
         # the temp is discarded and `dest` is never touched.
         tmp_path: str | None = None
+        # Captured from the engine inside _run so the success branch can back
+        # up an existing dest with the engine's OWN BackupManager (F10) — no
+        # second manager instance, same data/backups/ directory and naming.
+        backup_mgr = None
         try:
             dest_dir = Path(dest).parent
             fd, tmp_path = tempfile.mkstemp(
@@ -556,9 +605,11 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
             wb.close()
 
             async def _run():
+                nonlocal backup_mgr
                 async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT) as client:
                     api = BOTClient(client)
                     engine = LedgerEngine(api, event_bus=event_bus)
+                    backup_mgr = getattr(engine, "backup", None)
                     return await engine.update_exrate_standalone(
                         tmp_path,
                         progress_cb=_status_cb,
@@ -570,36 +621,63 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
             loop = asyncio.new_event_loop()
             try:
                 loop.run_until_complete(_run())
+                # Backup-first (F10): with confirmoverwrite the user may pick
+                # an EXISTING workbook as dest. The engine only backed up the
+                # blank TEMP (its run target), so without this step the real
+                # file would be replaced with NO backup — making Revert
+                # impossible. Back dest up BEFORE the move; if the backup
+                # fails, BackupError aborts the move below and dest is left
+                # intact (same fail-safe rule as the batch pipeline). The
+                # useless .exrate_tmp_* backup of the blank temp remains —
+                # suppressing it needs a flag on the updater's run() signature
+                # (owned elsewhere), so its cleanup is deferred to a later wave.
+                if backup_mgr is not None and Path(dest).exists():
+                    backup_mgr.create_backup(dest)
                 # Success: atomically move the fully-written temp over dest.
                 shutil.move(tmp_path, dest)
                 tmp_path = None
-                with contextlib.suppress(RuntimeError):
-                    app.after(0, _done, True,
-                              f"✓ ExRate created: {Path(dest).name} — {summary}")
+                # Structural read-back of what actually landed at dest — a
+                # botched move/unreadable file must fail loudly, not report
+                # success (the per-cell verification already ran inside the
+                # engine's atomic save against the temp).
+                _verify_exrate_dest(dest)
+                app._safe_marshal(
+                    _done, True,
+                    f"OK: ExRate created: {Path(dest).name} — {summary}",
+                )
             except _ExRateCancelled:
                 # User pressed Cancel — the temp is discarded in the outer
                 # finally and `dest` was never touched, so no data is lost (#2).
                 logger.info("ExRate standalone cancelled by user")
-                with contextlib.suppress(RuntimeError):
-                    app.after(0, lambda: _done(
-                        False, tr("exrate.cancelled"), color=t["warning"]))
+                app._safe_marshal(lambda: _done(
+                    False, tr("exrate.cancelled"), color=t["warning"]))
             except (httpx.RequestError, httpx.HTTPStatusError,
-                    OSError, ValueError) as e:
+                    OSError, ValueError, BackupError) as e:
                 logger.error("ExRate standalone failed: %s", e)
-                with contextlib.suppress(RuntimeError):
-                    app.after(0, _done, False, _fail_message(e))
+                app._safe_marshal(_done, False, _fail_message(e))
             finally:
                 loop.close()
         except (OSError, ValueError) as e:
             logger.error("ExRate file creation failed: %s", e)
-            with contextlib.suppress(RuntimeError):
-                app.after(0, _done, False, _fail_message(e))
+            app._safe_marshal(_done, False, _fail_message(e))
         finally:
             # Discard the temp file on any failure path so we never leave a
             # blank/partial sibling behind next to the user's real files.
             if tmp_path:
                 with contextlib.suppress(OSError):
                     Path(tmp_path).unlink()
+            # Mirror the RateAuditWorker: drop our registry entry so
+            # _on_app_close's shutdown_all() never waits on a finished worker.
+            if hasattr(app, "thread_registry"):
+                with contextlib.suppress(Exception):
+                    app.thread_registry.unregister("ExRateWorker")
 
-    threading.Thread(target=_worker, daemon=True, name="ExRateWorker").start()
+    worker = threading.Thread(target=_worker, daemon=True, name="ExRateWorker")
+    # Register BEFORE start() (mirrors rate_audit_dialog) so _on_app_close's
+    # registry shutdown can account for the thread before self.destroy().
+    # hasattr keeps headless/CLI embedders without the hook working unchanged.
+    if hasattr(app, "_register_worker"):
+        with contextlib.suppress(Exception):
+            app._register_worker(worker, "ExRateWorker")
+    worker.start()
 

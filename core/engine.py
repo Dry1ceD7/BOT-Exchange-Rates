@@ -5,9 +5,9 @@ core/engine.py
 BOT Exchange Rate Processor — Cache-First Orchestrator
 ---------------------------------------------------------------------------
 Slim orchestrator. Heavy logic extracted to:
-  - core/excel_io.py → Excel I/O operations (formulas, indexing, writing)
-  - core/exrate_sheet.py → Master ExRate sheet builder
-  - core/prescan.py → Smart date pre-scanner
+  - core/excel_io.py -> Excel I/O operations (formulas, indexing, writing)
+  - core/exrate_sheet.py -> Master ExRate sheet builder
+  - core/prescan.py -> Smart date pre-scanner
 """
 
 import asyncio
@@ -16,8 +16,9 @@ import logging
 import os
 import threading
 import traceback
+import zipfile
 from collections.abc import Callable
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -33,12 +34,11 @@ from core.constants import (
     BACKUP_MAX_AGE_DAYS,
     DEFAULT_ANOMALY_THRESHOLD_PCT,
     MAX_FILE_SIZE_MB,
-    SKIP_SHEET_NAMES,
     bot_today,
     humanize_save_error,
     parse_date,
 )
-from core.database import CacheDB
+from core.database import CacheDB, get_cache
 from core.exrate_updater import StandaloneExRateUpdater, WorkbookWriter
 from core.ledger_processing import (
     classify_currencies,
@@ -50,10 +50,13 @@ from core.logic import (
     BOTLogicEngine,
     build_holiday_lookup,
     compute_year_start_date,
+    default_fetch_window_start,
     safe_to_decimal,
+    weekdays_between,
 )
 from core.paths import get_project_root
 from core.prescan import prescan_oldest_date
+from core.workbook_io import atomic_write_text, is_standalone_exrate_workbook
 
 logger = logging.getLogger(__name__)
 
@@ -207,31 +210,20 @@ class BatchManifest:
     def _write(self, data: dict) -> None:
         """Atomically (over)write the manifest JSON.
 
-        Writes to a sibling temp file in the SAME directory then ``os.replace``
-        swaps it in, so the replace stays on one filesystem and a crash mid-
-        write leaves the previous good manifest untouched. Mirrors
-        ``core.workbook_io.atomic_save``: on any failure the partial temp file
-        is removed and never left behind.
+        Delegates to ``core.workbook_io.atomic_write_text`` (single owner of
+        the temp + replace idiom): a crash mid-write leaves the previous good
+        manifest untouched and the partial temp file is never left behind.
         """
-        import contextlib
-
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_name(f"{self.path.name}.tmp~")
-        try:
-            with tmp_path.open("w", encoding="utf-8") as fh:
-                json.dump(data, fh, ensure_ascii=False, indent=2)
-            tmp_path.replace(self.path)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                tmp_path.unlink()
-            raise
+        atomic_write_text(
+            self.path, json.dumps(data, ensure_ascii=False, indent=2)
+        )
 
 
 # -------------------------------------------------------------------------
 # MODULE-LEVEL SINGLETONS (persist across batch clicks)
 # -------------------------------------------------------------------------
 _backup_singleton = None
-_cache_singleton = None
 _singleton_lock = threading.Lock()
 
 
@@ -245,14 +237,14 @@ def _get_backup() -> BackupManager:
 
 
 def _get_cache() -> CacheDB:
-    global _cache_singleton
-    if _cache_singleton is None:
-        with _singleton_lock:
-            if _cache_singleton is None:  # double-check after lock
-                import atexit
-                _cache_singleton = CacheDB()
-                atexit.register(_cache_singleton.close)
-    return _cache_singleton
+    """Delegate to the canonical process-wide accessor (F36).
+
+    ``core.database.get_cache()`` owns the single ``CacheDB`` for the whole
+    process; the engine no longer keeps a second private singleton, so the
+    engine and any GUI callers share one instance (one WAL connection pool,
+    one atexit close — registered by ``CacheDB.__init__`` via weakref).
+    """
+    return get_cache()
 
 
 
@@ -428,7 +420,7 @@ class LedgerEngine:
         truncating any content, so it is safe to run before the real save. A
         file held open by Excel (Windows sharing violation / WinError 32) or
         without write permission (EACCES) raises and we report it as not
-        writable. Any unexpected error is treated as "probe inconclusive" →
+        writable. Any unexpected error is treated as "probe inconclusive" ->
         writable, so the real save path remains the authoritative guard.
         """
         try:
@@ -467,20 +459,27 @@ class LedgerEngine:
     #  CACHE-FIRST DATA LOADING (v2.6.1)
     # ================================================================== #
     async def _preload_api_data(
-        self, dates: set[date], start_date: str
+        self, dates: set[date], start_date: str,
+        *, extend_to_today: bool = True,
     ) -> tuple:
         """
-        Cache-First Architecture: SQLite → API fallback → cache store.
+        Cache-First Architecture: SQLite -> API fallback -> cache store.
         Returns (logic_engine, usd_selling, eur_selling,
                  usd_buying, eur_buying, usd_data, eur_data).
+
+        With ``extend_to_today=False`` the fetch window is bounded by the
+        caller's dates alone (plus ``start_date``) instead of stretching to
+        the current BOT business date — used by the rate audit so verifying
+        an old archived workbook does not pull years of unrelated rates.
         """
         try:
             force_start = datetime.strptime(start_date, "%Y-%m-%d").date()
         except (ValueError, TypeError):
             force_start = date(2025, 1, 1)
 
-        today = bot_today()
-        all_d = set(dates) | {force_start, today}
+        all_d = set(dates) | {force_start}
+        if extend_to_today:
+            all_d.add(bot_today())
         min_date, max_date = min(all_d), max(all_d)
         years = {d.year for d in all_d}
 
@@ -533,14 +532,23 @@ class LedgerEngine:
             if rate_dict["eur_selling"] is not None:
                 eur_selling[d] = rate_dict["eur_selling"]
 
-        all_needed = set()
-        check = min_date
-        while check <= max_date:
-            if check.weekday() < 5:
-                all_needed.add(check)
-            check += timedelta(days=1)
+        all_needed = weekdays_between(min_date, max_date)
 
-        missing_dates = all_needed - set(cached_rates.keys())
+        # Per-COLUMN cache miss: a cached row missing any of the four rate
+        # columns (e.g. nulled by a partial write from an older version) must
+        # count as missing so the API refetch self-heals it. Per-date
+        # membership alone would never refetch such a date and its trading-day
+        # cells stayed blank. The upsert in insert_rates_bulk fills only the
+        # NULL columns, so the surviving currency's values are kept.
+        _required_cols = (
+            "usd_buying", "usd_selling", "eur_buying", "eur_selling",
+        )
+        missing_dates = {
+            d for d in all_needed
+            if d not in cached_rates or any(
+                cached_rates[d][col] is None for col in _required_cols
+            )
+        }
         usd_data, eur_data = [], []
         if missing_dates:
             # ── Narrowed fetch range: only fetch the missing window ───
@@ -552,7 +560,7 @@ class LedgerEngine:
                 f"{fetch_end.strftime('%Y-%m-%d')}). Calling API",
             )
             logger.info(
-                "Cache miss: %d dates missing (%s → %s). Fetching from API...",
+                "Cache miss: %d dates missing (%s -> %s). Fetching from API...",
                 len(missing_dates),
                 fetch_start.strftime("%Y-%m-%d"),
                 fetch_end.strftime("%Y-%m-%d"),
@@ -565,25 +573,42 @@ class LedgerEngine:
                 self.api.get_exchange_rates(fetch_start, fetch_end, "EUR"),
             )
 
-            rate_cache = {}
+            # Exactness gate: cache the quantized 4dp Decimal as a string
+            # (the rates table has TEXT affinity) — NEVER the raw API value,
+            # so a cache hit replays exactly what the writer was given.
+            rate_cache: dict[str, list[str | None]] = {}
             for r in usd_data:
-                d = datetime.strptime(r.period, "%Y-%m-%d").date()
-                if r.buying_transfer is not None:
-                    usd_buying[d] = safe_to_decimal(r.buying_transfer)
-                if r.selling is not None:
-                    usd_selling[d] = safe_to_decimal(r.selling)
+                # Same skip-on-unparseable guard as the holiday ingest above:
+                # one malformed BOT period must not abort the whole preload.
+                try:
+                    d = datetime.strptime(r.period, "%Y-%m-%d").date()
+                except (ValueError, TypeError):
+                    logger.warning("Skipped unparseable USD rate period: %r", r.period)
+                    continue
+                buy = safe_to_decimal(r.buying_transfer)
+                sell = safe_to_decimal(r.selling)
+                if buy is not None:
+                    usd_buying[d] = buy
+                if sell is not None:
+                    usd_selling[d] = sell
                 rate_cache.setdefault(r.period, [None] * 4)
-                rate_cache[r.period][0] = r.buying_transfer
-                rate_cache[r.period][1] = r.selling
+                rate_cache[r.period][0] = None if buy is None else str(buy)
+                rate_cache[r.period][1] = None if sell is None else str(sell)
             for r in eur_data:
-                d = datetime.strptime(r.period, "%Y-%m-%d").date()
-                if r.buying_transfer is not None:
-                    eur_buying[d] = safe_to_decimal(r.buying_transfer)
-                if r.selling is not None:
-                    eur_selling[d] = safe_to_decimal(r.selling)
+                try:
+                    d = datetime.strptime(r.period, "%Y-%m-%d").date()
+                except (ValueError, TypeError):
+                    logger.warning("Skipped unparseable EUR rate period: %r", r.period)
+                    continue
+                buy = safe_to_decimal(r.buying_transfer)
+                sell = safe_to_decimal(r.selling)
+                if buy is not None:
+                    eur_buying[d] = buy
+                if sell is not None:
+                    eur_selling[d] = sell
                 rate_cache.setdefault(r.period, [None] * 4)
-                rate_cache[r.period][2] = r.buying_transfer
-                rate_cache[r.period][3] = r.selling
+                rate_cache[r.period][2] = None if buy is None else str(buy)
+                rate_cache[r.period][3] = None if sell is None else str(sell)
             bulk = [
                 (d_str, v[0], v[1], v[2], v[3])
                 for d_str, v in rate_cache.items()
@@ -613,17 +638,30 @@ class LedgerEngine:
         usd_selling: dict[date, Decimal],
         eur_buying: dict[date, Decimal],
         eur_selling: dict[date, Decimal],
-    ) -> int:
+        extra_currency_rates: dict[str, dict[date, Decimal]] | None = None,
+    ) -> tuple[int, set[tuple[str, date]]]:
         """Delegate to core.ledger_processing.run_anomaly_check (v3.1.0).
 
-        Injects this engine's anomaly guard and emit callback; returns the
-        number of anomalies found.
+        Injects this engine's anomaly guard and emit callback. The extra
+        (non-USD/EUR) ledger currencies join the check under the engine's
+        snapshotted rate type (F42). Alert-only: the result never blocks,
+        skips, or substitutes a write.
+
+        Returns:
+            ``(anomaly_count, anomalous)`` where ``anomalous`` is the set of
+            flagged ``(currency, date)`` pairs, threaded into the audit
+            trail so matching rows carry Anomaly_Flag (F25).
         """
-        return run_anomaly_check(
+        anomalous: set[tuple[str, date]] = set()
+        count = run_anomaly_check(
             self._anomaly_guard,
             lambda msg, etype="log": self._emit(msg, etype),
             usd_buying, usd_selling, eur_buying, eur_selling,
+            extra_currency_rates=extra_currency_rates,
+            extra_rate_type=self._rate_type,
+            anomalous_out=anomalous,
         )
+        return count, anomalous
 
     # ================================================================== #
     #  PRIVATE HELPERS — Extracted from process_ledger for readability
@@ -637,40 +675,25 @@ class LedgerEngine:
         Returns the result of update_exrate_standalone() if standalone,
         or None if the file should be processed normally. Also validates
         that the file format is supported (.xlsx or .xlsm).
-        """
-        if filepath.lower().endswith(".xlsx"):
-            try:
-                import openpyxl as _opx
-                _wb_check = _opx.load_workbook(filepath, read_only=True)
-                has_exrate = "ExRate" in _wb_check.sheetnames
-                has_month_tabs = False
-                for sn in _wb_check.sheetnames:
-                    if sn in SKIP_SHEET_NAMES:
-                        continue
-                    ws_check = _wb_check[sn]
-                    for row in ws_check.iter_rows(
-                        min_row=1, max_row=5, values_only=True,
-                    ):
-                        row_strs = [
-                            str(c).strip() if c is not None else ""
-                            for c in row
-                        ]
-                        if (
-                            self.target_cols["source_date"] in row_strs
-                            and self.target_cols["currency"] in row_strs
-                        ):
-                            has_month_tabs = True
-                            break
-                    if has_month_tabs:
-                        break
-                _wb_check.close()
 
-                if has_exrate and not has_month_tabs:
-                    self._emit("Standalone ExRate file detected — updating rates")
-                    return await self.update_exrate_standalone(filepath)
-            except (ValueError, TypeError, KeyError,
-                    openpyxl.utils.exceptions.InvalidFileException) as exc:
-                logger.debug("Standalone detection probe failed: %s", exc)
+        The read-only probe is the shared
+        ``core.workbook_io.is_standalone_exrate_workbook`` (single owner —
+        main.py's headless labeller uses the same helper); probe failures
+        return False inside it. The except below keeps the legacy contract
+        that a failure of these types INSIDE update_exrate_standalone falls
+        back to normal ledger processing rather than aborting the file.
+        """
+        try:
+            if is_standalone_exrate_workbook(
+                filepath,
+                date_header=self.target_cols["source_date"],
+                currency_header=self.target_cols["currency"],
+            ):
+                self._emit("Standalone ExRate file detected — updating rates")
+                return await self.update_exrate_standalone(filepath)
+        except (ValueError, TypeError, KeyError,
+                openpyxl.utils.exceptions.InvalidFileException) as exc:
+            logger.debug("Standalone detection probe failed: %s", exc)
 
         # Reject unsupported formats
         if not filepath.lower().endswith((".xlsx", ".xlsm")):
@@ -724,12 +747,7 @@ class LedgerEngine:
             )
 
             # ── Step 2: find weekday dates missing from cache ─────────
-            all_weekdays: set[date] = set()
-            check = start_dt
-            while check <= end_dt:
-                if check.weekday() < 5:
-                    all_weekdays.add(check)
-                check += timedelta(days=1)
+            all_weekdays: set[date] = weekdays_between(start_dt, end_dt)
             missing_dates = all_weekdays - set(by_date.keys())
 
             # ── Step 3: API fetch for misses only ─────────────────────
@@ -865,7 +883,7 @@ class LedgerEngine:
             else bot_today().year
         )
         if start_date is None:
-            start_date = f"{target_year - 1}-12-20"
+            start_date = default_fetch_window_start(target_year).isoformat()
 
         self._emit("Loading exchange rates and holidays")
         (
@@ -882,19 +900,23 @@ class LedgerEngine:
             try:
                 ec_start = datetime.strptime(start_date, "%Y-%m-%d").date()
             except (ValueError, TypeError):
-                ec_start = date(target_year - 1, 12, 20)
+                ec_start = default_fetch_window_start(target_year)
             extra_currency_rates = await self._fetch_extra_currency_rates(
                 extra_currencies, rate_type, ec_start, bot_today(),
             )
 
-        # v3.1.0: Anomaly detection — check for suspicious rate jumps
-        anomaly_count = self._run_anomaly_check(
+        # v3.1.0: Anomaly detection — check for suspicious rate jumps.
+        # Extra (non-USD/EUR) currencies are included (F42); the flagged
+        # (currency, date) set is threaded into the audit trail (F25).
+        # Alert-only: every rate still writes unchanged.
+        anomaly_count, anomalous_rates = self._run_anomaly_check(
             usd_buying, usd_selling, eur_buying, eur_selling,
+            extra_currency_rates=extra_currency_rates,
         )
         self._last_anomaly_count = anomaly_count
         if anomaly_count:
             self._emit(
-                f"⚠ {anomaly_count} anomalous rate(s) detected — check audit log",
+                f"WARNING: {anomaly_count} anomalous rate(s) detected — check audit log",
                 etype="warning",
             )
 
@@ -919,6 +941,7 @@ class LedgerEngine:
             rate_type=rate_type,
             extra_currency_rates=extra_currency_rates,
             unsupported_currencies=unsupported_currencies,
+            anomalous_rates=anomalous_rates,
             audit=None if dry_run else audit,
         )
 
@@ -1057,11 +1080,15 @@ class LedgerEngine:
                 if progress_cb:
                     progress_cb(idx + 1, total, fname, str(e))
             except (OSError, ValueError, KeyError,
+                    zipfile.BadZipFile,
                     openpyxl.utils.exceptions.InvalidFileException) as e:
                 # A file open in Excel surfaces as a raw WinError 32 / EACCES
                 # string a non-technical accountant cannot act on. Translate it
                 # into a clear "close it in Excel and retry" message; any other
-                # OS/value error keeps its original text.
+                # OS/value error keeps its original text. BadZipFile (non-zip
+                # bytes wearing .xlsx — typically a renamed legacy .xls) gets
+                # the save-as-.xlsx remedy from humanize_save_error and becomes
+                # a per-file skip instead of aborting the whole batch.
                 friendly = humanize_save_error(fname, e)
                 err_msg = friendly if friendly is not None else f"{fname}: {e!s}"
                 errors.append(err_msg)

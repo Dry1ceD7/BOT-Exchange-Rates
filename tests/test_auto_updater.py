@@ -20,6 +20,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
 from core.auto_updater import (
     _verify_file_sha256,
@@ -538,6 +539,42 @@ class TestDownloadUpdate:
         assert result["error"] is not None
         assert "host" in result["error"].lower()
 
+    @pytest.mark.parametrize("bad_name", [
+        "../../escape.exe",
+        "..\\..\\escape.exe",
+        "sub/dir.exe",
+        "sub\\dir.exe",
+        "..",
+        "C:evil.exe",
+        "",
+    ])
+    def test_refuses_traversal_filename(self, tmp_path, bad_name):
+        """SECURITY (F102): filenames with separators/'..' never reach a join."""
+        result = download_update(
+            url="https://github.com/dl/setup.exe",
+            dest_dir=str(tmp_path),
+            filename=bad_name,
+            expected_sha256="a" * 64,
+        )
+        assert result["path"] is None
+        assert result["error"] is not None
+        assert "filename" in result["error"].lower()
+        # Nothing may have been written anywhere under dest_dir.
+        assert list(tmp_path.iterdir()) == []
+
+    def test_refuses_traversal_filename_derived_from_url(self, tmp_path):
+        """SECURITY (F102): a URL-derived name is held to the same rule."""
+        result = download_update(
+            # rsplit('/', 1) keeps the encoded backslash payload intact.
+            url="https://github.com/dl/..\\..\\evil.exe",
+            dest_dir=str(tmp_path),
+            filename=None,
+            expected_sha256="a" * 64,
+        )
+        assert result["path"] is None
+        assert result["error"] is not None
+        assert "filename" in result["error"].lower()
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  _is_allowed_download_url (SSRF host allowlist)
@@ -604,6 +641,25 @@ class TestApplyUpdateSanitization:
             )
 
         # Should fail because the install dir has '&'
+        assert result["success"] is False
+        assert "Unsafe characters" in result["error"]
+
+    def test_rejects_double_quote_in_path(self, tmp_path):
+        """SECURITY (F26): a double quote breaks out of the .bat's "..."
+        quoting, so it must be in the rejected metacharacter set."""
+        from core.auto_updater import apply_update
+
+        installer = tmp_path / "BOT-ExRate-Setup.exe"
+        installer.write_bytes(b"setup")
+        good_hash = hashlib.sha256(b"setup").hexdigest()
+        quoted_dir = str(tmp_path) + '\\bad"dir'
+
+        with (
+            patch("core.auto_updater.get_install_dir", return_value=quoted_dir),
+            patch("sys.frozen", True, create=True),
+        ):
+            result = apply_update(str(installer), expected_sha256=good_hash)
+
         assert result["success"] is False
         assert "Unsafe characters" in result["error"]
 

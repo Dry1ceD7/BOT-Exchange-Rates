@@ -211,6 +211,36 @@ class TestLogRecords:
         audit.log_records([])
         assert audit.row_count == 0
 
+    def test_log_records_renders_anomaly_flag(self, tmp_path):
+        """F25: a collected record with anomaly_flag=True must surface as
+        "ANOMALY" in the CSV's Anomaly_Flag column; False stays blank."""
+        audit = AuditLogger(log_dir=str(tmp_path))
+        audit.log_records([
+            AuditRecord(
+                filename="ledger.xlsx", sheet="Jan", row=2,
+                cell_date="2025-01-07", currency="GBP",
+                original_value="", new_value="50.0000",
+                rate_source="Cache/API", anomaly_flag=True,
+            ),
+            AuditRecord(
+                filename="ledger.xlsx", sheet="Jan", row=3,
+                cell_date="2025-01-06", currency="GBP",
+                original_value="", new_value="42.0000",
+                rate_source="Cache/API", anomaly_flag=False,
+            ),
+        ])
+        path = audit.finalize()
+        with open(path, encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            next(reader)  # headers
+            rows = list(reader)
+        anomaly_col = AuditLogger.HEADERS.index("Anomaly_Flag")
+        assert rows[0][anomaly_col] == "ANOMALY"
+        assert rows[1][anomaly_col] == ""
+        # Alert-only: the anomalous value itself is logged unchanged.
+        new_value_col = AuditLogger.HEADERS.index("New_Value")
+        assert rows[0][new_value_col] == "50.0000"
+
 
 class TestAtexitUnregister:
     """finalize() and _atexit_cleanup() must unregister the atexit callback."""

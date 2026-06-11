@@ -21,7 +21,7 @@ from core.constants import (
     POLL_INTERVAL_SECONDS as _DEFAULT_POLL_INTERVAL,
 )
 from core.constants import (
-    SUPPORTED_EXCEL_EXTENSIONS,
+    collect_excel_files,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,27 +80,6 @@ class AutoScheduler:
         """Return True if the scheduler is actively polling."""
         return self._running
 
-    @property
-    def target_time(self) -> str:
-        """Return the configured target time (HH:MM)."""
-        return self._target_time
-
-    @property
-    def watch_paths(self) -> list[str]:
-        """Return the list of watched directories."""
-        return list(self._watch_paths)
-
-    @property
-    def next_run_info(self) -> str:
-        """Return a human-readable status string."""
-        if not self._running:
-            return "Scheduler is off"
-        n_paths = len(self._watch_paths)
-        return (
-            f"Next run: {self._target_time} — "
-            f"watching {n_paths} folder{'s' if n_paths != 1 else ''}"
-        )
-
     def start(
         self,
         time_str: str,
@@ -147,23 +126,6 @@ class AutoScheduler:
 
         logger.info("Scheduler stopped")
 
-    def update_config(
-        self,
-        time_str: str | None = None,
-        watch_paths: list[str] | None = None,
-    ) -> None:
-        """Update scheduler configuration without restart."""
-        with self._lock:
-            if time_str is not None:
-                self._target_time = time_str
-            if watch_paths is not None:
-                self._watch_paths = list(watch_paths)
-
-        logger.info(
-            "Scheduler config updated: time=%s, paths=%d",
-            self._target_time, len(self._watch_paths),
-        )
-
     def _schedule_next(self) -> None:
         """Schedule the next poll check.
 
@@ -185,7 +147,7 @@ class AutoScheduler:
         """Check if the day's run is due, and if so, fire the callback.
 
         Runs on the Timer thread. Snapshot every shared field under the lock
-        up front so start()/stop()/update_config() mutations on another thread
+        up front so start()/stop() mutations on another thread
         cannot cause torn reads or a double-fire. We operate on the locals,
         write _last_run_date back under the lock, and invoke the callback
         OUTSIDE the lock (it may be slow / re-enter the scheduler).
@@ -308,9 +270,10 @@ class AutoScheduler:
         Args:
             watch_paths: Snapshot of directories to scan. Passed in (rather
                 than read from self) so the caller can snapshot it under the
-                lock and avoid racing update_config().
+                lock and avoid racing a concurrent start().
         """
         files = []
+        rejected = []
         seen = set()
 
         for path in watch_paths:
@@ -318,20 +281,31 @@ class AutoScheduler:
                 logger.debug("Watch path not found: %s", path)
                 continue
 
-            # Keep os.listdir + sorted(bare names) + os.path.join here: the
-            # returned `full` strings are fed to the processing engine and the
-            # os.path.normpath-based dedup is the exact identity check. Path
-            # iterdir/sort would change ordering and the path-string form.
-            for fname in sorted(os.listdir(path)):  # noqa: PTH208
-                if fname.startswith("."):
-                    continue
-                if fname.lower().endswith(SUPPORTED_EXCEL_EXTENSIONS):
-                    full = os.path.join(path, fname)  # noqa: PTH118
-                    norm = os.path.normpath(full)
-                    if norm not in seen:
-                        seen.add(norm)
-                        files.append(full)
+            # Shared listing helper (core.constants.collect_excel_files):
+            # bare names sorted then joined — the exact prior full-path form
+            # the os.path.normpath dedup relies on. dedup=False because the
+            # identity check must run ACROSS watch paths, here.
+            found, path_rejected = collect_excel_files(
+                path, dedup=False, collect_rejected=True,
+            )
+            rejected.extend(path_rejected)
+            for full in found:
+                norm = os.path.normpath(full)
+                if norm not in seen:
+                    seen.add(norm)
+                    files.append(full)
 
+        if rejected:
+            # A watch folder fed by a legacy export (e.g. Crystal Reports
+            # .xls) would otherwise be skipped silently FOREVER — make the
+            # misconfiguration visible in the log/console each scan.
+            logger.warning(
+                "Scheduler: %d unsupported spreadsheet file(s) in watched "
+                "paths will never be processed (only .xlsx/.xlsm are "
+                "supported — open in Excel and save as .xlsx): %s",
+                len(rejected),
+                ", ".join(Path(r).name for r in rejected),
+            )
         logger.info(
             "Scheduler scan: %d files found across %d paths",
             len(files), len(watch_paths),
