@@ -34,6 +34,51 @@ class TestParseDateBuddhistEra:
     def test_be_iso_format(self):
         assert parse_date("2567-01-15") == date(2024, 1, 15)
 
+    def test_be_leap_day_slash_format(self):
+        """Feb 29 of a BE year parses (2567 BE == 2024 CE, a leap year).
+
+        Regression: strptime validated Feb-29 against the literal BE year
+        BEFORE normalization — and BE years of CE leap years are never
+        themselves leap years (543 % 4 == 3), so every real Thai leap-day
+        date silently returned None and the row rendered blank.
+        """
+        assert parse_date("29/02/2567") == date(2024, 2, 29)
+
+    def test_be_leap_day_iso_format(self):
+        assert parse_date("2567-02-29") == date(2024, 2, 29)
+
+    def test_ce_leap_day_still_parses(self):
+        assert parse_date("29/02/2024") == date(2024, 2, 29)
+
+    def test_invalid_leap_day_still_rejected(self):
+        # 2566 BE == 2023 CE — not a leap year in either calendar.
+        assert parse_date("29/02/2566") is None
+
+
+class TestIsSkipSheet:
+    """Skip-tab membership is case/whitespace tolerant."""
+
+    def test_canonical_names(self):
+        from core.constants import is_skip_sheet
+
+        for name in ("ExRate", "Exrate USD", "Exrate EUR"):
+            assert is_skip_sheet(name)
+
+    def test_case_and_whitespace_variants(self):
+        from core.constants import is_skip_sheet
+
+        # Production variants must not slip past into the ledger scan —
+        # a pre-existing 'EXRATE USD ' tab full of old dates would skew
+        # prescan windows and receive injected formulas.
+        for name in ("EXRATE USD", "exrate eur ", " ExRate", "EXRATE"):
+            assert is_skip_sheet(name)
+
+    def test_month_tabs_not_skipped(self):
+        from core.constants import is_skip_sheet
+
+        for name in ("JAN", "Jan2025", "PI", "ExRates"):
+            assert not is_skip_sheet(name)
+
     def test_be_dash_format(self):
         assert parse_date("15-01-2567") == date(2024, 1, 15)
 

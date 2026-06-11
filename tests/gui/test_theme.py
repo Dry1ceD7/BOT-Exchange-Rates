@@ -36,9 +36,11 @@ def test_light_mode_muted_tokens_are_legible_values(tk_root, _restore_mode):
     """In the live runtime, light-mode muted tokens are the darkened values."""
     ctk.set_appearance_mode("Light")
     theme = get_theme()
-    # The pre-fix illegible grays must be gone.
+    # The pre-fix illegible grays must be gone. The placeholder token is
+    # tuned for the navy header_bg it actually renders on (was the dead
+    # ticker_muted, which nothing consumed).
     assert theme["text_muted"] != "#A0AEC0"
-    assert theme["ticker_muted"] != "#94A3B8"
+    assert theme["ticker_placeholder"] == "#CBD5E1"
 
 
 def test_dark_mode_muted_tokens_are_legible_values(tk_root, _restore_mode):
@@ -46,7 +48,7 @@ def test_dark_mode_muted_tokens_are_legible_values(tk_root, _restore_mode):
     ctk.set_appearance_mode("Dark")
     theme = get_theme()
     assert theme["text_muted"] != "#64748B"
-    assert theme["ticker_muted"] != "#64748B"
+    assert theme["ticker_placeholder"] == "#CBD5E1"
 
 
 @pytest.mark.parametrize("mode", ["Light", "Dark"])

@@ -304,6 +304,7 @@ class WorkbookWriter:
         fixed = exrate_fixed_index_keys(rate_type)
 
         no_rate = 0
+        unparseable_dates = 0
         unsupported_seen: dict[str, int] = {}
         unsupported_set = set(unsupported_currencies)
 
@@ -331,12 +332,23 @@ class WorkbookWriter:
                     unsupported_seen[ccy] = unsupported_seen.get(ccy, 0) + 1
                     continue
                 if row_date is None:
+                    # Unreadable Date cell: the formula was still injected
+                    # and will render blank in Excel — count it so the
+                    # operator hears about it instead of discovering a
+                    # silent gap at month-end.
+                    unparseable_dates += 1
                     continue
                 if not self._rate_available(
                     ccy, row_date, exrate_index, exrate_col_map, fixed,
                 ):
                     no_rate += 1
 
+        if unparseable_dates:
+            self._engine._emit(
+                f"{fname}: {unparseable_dates} row(s) had an unreadable "
+                "Date — EX Rate left blank (fix the Date cell and re-run)",
+                etype="warning",
+            )
         if no_rate:
             # The XLOOKUP is exact-match: no rollback exists on this path. A
             # row stays blank when the ExRate sheet has no BOT rate for that

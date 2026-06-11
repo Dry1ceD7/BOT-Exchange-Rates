@@ -447,6 +447,13 @@ class SettingsModal(ctk.CTkToplevel):
             prefill_hol=get_token("BOT_TOKEN_HOL") or "",
         )
         self.wait_window(dialog)
+        # Tk grabs do NOT stack: the token dialog's grab_release dropped
+        # modality entirely instead of returning it to this modal — clicks
+        # then reached the main window behind an "open settings" window.
+        # Re-grab once the child is gone.
+        with contextlib.suppress(RuntimeError, tkinter.TclError):
+            if self.winfo_exists():
+                self.grab_set()
 
     def _on_export_settings(self):
         """Write this PC's settings (no secrets) to a chosen JSON file.

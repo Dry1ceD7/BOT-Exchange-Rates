@@ -57,6 +57,14 @@ def _parse_rate_4dp(raw) -> Decimal | None:
     quantized = safe_to_decimal(dec)
     if quantized is None:
         logger.debug("Skipped unquantizable rate value: %r", raw)
+        return None
+    # A non-positive exchange rate is impossible — a stray minus sign (or
+    # zero) reaching the cache would multiply ledger amounts by a negative
+    # number, and the anomaly guard is alert-only so nothing downstream
+    # would block it.
+    if quantized <= 0:
+        logger.debug("Skipped non-positive rate value: %r", raw)
+        return None
     return quantized
 
 
@@ -117,6 +125,20 @@ def import_bot_csv(csv_path: str, cache_db) -> int:
 
         if reader.fieldnames is None:
             raise ValueError("CSV file has no header row.")
+
+        # Reject ambiguous headers: csv.DictReader keeps the LAST duplicate
+        # column, so an Excel-exported CSV with a repeated 'Value'/'Date'
+        # header would silently cache the wrong column's rate (mirrors the
+        # Excel-side duplicate-'Date' fix — but a CSV has no EX Rate anchor
+        # to resolve against, so the only safe answer is an explicit error).
+        normalized = [h.strip().lower() for h in reader.fieldnames]
+        duplicates = sorted({h for h in normalized if normalized.count(h) > 1 and h})
+        if duplicates:
+            raise ValueError(
+                "CSV has duplicated header column(s): "
+                f"{', '.join(duplicates)} — remove the duplicate column(s) "
+                "and re-export."
+            )
 
         field_map = {h.strip().lower(): h for h in reader.fieldnames}
 

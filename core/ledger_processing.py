@@ -24,7 +24,7 @@ import openpyxl
 from core.constants import (
     LEDGER_HOME_CURRENCY,
     LEDGER_SUPPORTED_CURRENCIES,
-    SKIP_SHEET_NAMES,
+    is_skip_sheet,
     parse_date,
 )
 from core.excel_io import find_header_row
@@ -161,7 +161,7 @@ def prescan_target_dates_and_currencies(
             filepath, read_only=True, data_only=True,
         )
         for sheet_name in wb_scan.sheetnames:
-            if sheet_name in SKIP_SHEET_NAMES:
+            if is_skip_sheet(sheet_name):
                 continue
             ws = wb_scan[sheet_name]
             # Header location + duplicate resolution are owned by

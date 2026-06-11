@@ -68,7 +68,8 @@ def _theme(mode: str) -> dict:
 # Each pair reflects how the token is actually consumed in the GUI:
 #   text_muted  -> dz_sub on card_bg, dry-run hint on card/section, footer on
 #                  footer_bg, scheduler hints on sched_bg.
-#   ticker_muted -> placeholder "--.--" on card_bg.
+#   ticker_placeholder -> placeholder "--.----" on the NAVY header_bg (the
+#                  ticker lives in the header bar in BOTH appearance modes).
 #   modal_muted / text_secondary / header_sub -> dialog & header sub-labels.
 # We test each muted token against EVERY real background it can land on, so a
 # pass means it is legible everywhere, not just on the lightest surface.
@@ -81,7 +82,7 @@ _MUTED_PAIRS = [
     ("text_muted", "bg"),
     ("text_secondary", "card_bg"),
     ("text_secondary", "section_bg"),
-    ("ticker_muted", "card_bg"),
+    ("ticker_placeholder", "header_bg"),
     ("ticker_label", "card_bg"),
     ("modal_muted", "modal_bg"),
     ("header_sub", "header_bg"),

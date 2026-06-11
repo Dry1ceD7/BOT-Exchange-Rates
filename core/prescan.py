@@ -17,7 +17,7 @@ from pathlib import Path
 
 import openpyxl
 
-from core.constants import DATE_FORMATS, SKIP_SHEET_NAMES, bot_today
+from core.constants import DATE_FORMATS, bot_today, is_skip_sheet
 from core.constants import parse_date as _shared_parse_date
 from core.excel_io import find_header_row
 
@@ -88,7 +88,7 @@ def _scan_xlsx(
                 # the ExRate sheet carries a "Date" column going back to the
                 # year start, so scanning it would skew oldest-date detection
                 # toward dates no ledger row actually needs.
-                if ws.title in SKIP_SHEET_NAMES:
+                if is_skip_sheet(ws.title):
                     continue
                 # Header location is owned by core.excel_io.find_header_row;
                 # duplicates resolve to the first occurrence exactly like the

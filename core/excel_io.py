@@ -24,7 +24,7 @@ from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-from core.constants import PREFORMAT_BUFFER_ROWS, SKIP_SHEET_NAMES
+from core.constants import PREFORMAT_BUFFER_ROWS, is_skip_sheet
 from core.exrate_sheet import (
     EXRATE_RATE_COLUMNS,
     exrate_fixed_letters,
@@ -203,7 +203,7 @@ def scan_sheet_headers(
     sheet_maps: dict[str, dict] = {}
 
     for sheet_name in wb.sheetnames:
-        if sheet_name in SKIP_SHEET_NAMES:
+        if is_skip_sheet(sheet_name):
             continue
         ws = wb[sheet_name]
         header_row_idx, col_indices_local = find_header_row(

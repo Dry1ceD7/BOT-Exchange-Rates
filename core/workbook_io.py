@@ -26,7 +26,7 @@ from pathlib import Path
 import openpyxl
 from openpyxl.utils import get_column_letter
 
-from core.constants import MAX_FILE_SIZE_MB, SKIP_SHEET_NAMES
+from core.constants import MAX_FILE_SIZE_MB, is_skip_sheet
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,7 @@ def is_standalone_exrate_workbook(
         if "ExRate" not in wb.sheetnames:
             return False
         for sheet_name in wb.sheetnames:
-            if sheet_name in SKIP_SHEET_NAMES:
+            if is_skip_sheet(sheet_name):
                 continue
             ws = wb[sheet_name]
             header_row_idx, cols = find_header_row(

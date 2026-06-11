@@ -183,3 +183,47 @@ def test_partial_row_one_bad_one_good_counts_once(tmp_path, cache):
     assert cache.get_multi_rate(
         date(2025, 2, 3), "USD", "selling",
     ) == Decimal("34.8000")
+
+
+class TestNonPositiveRatesRejected:
+    """A negative or zero exchange rate must never reach the cache.
+
+    The anomaly guard is alert-only, so a stray minus sign that reached
+    rates_multi would be written into the ExRate master sheet and multiply
+    ledger amounts by a negative number.
+    """
+
+    def test_negative_rate_skipped(self):
+        from core.csv_import import _parse_rate_4dp
+
+        assert _parse_rate_4dp("-34.5678") is None
+
+    def test_zero_rate_skipped(self):
+        from core.csv_import import _parse_rate_4dp
+
+        assert _parse_rate_4dp("0") is None
+
+    def test_positive_rate_still_parses(self):
+        from core.csv_import import _parse_rate_4dp
+
+        assert _parse_rate_4dp("34.5678") == Decimal("34.5678")
+
+
+class TestDuplicateHeadersRejected:
+    """csv.DictReader keeps the LAST duplicate column — refuse ambiguity.
+
+    An Excel-exported CSV with a repeated 'Value' header silently cached
+    the wrong column's rate (the round-10 Excel-side duplicate-'Date' bug,
+    CSV edition — but a CSV has no EX Rate anchor to resolve against, so
+    the only safe answer is an explicit error).
+    """
+
+    def test_duplicate_value_header_raises(self, tmp_path, cache):
+        fp = tmp_path / "dup.csv"
+        fp.write_text(
+            "Period,Currency_ID,Rate_Type,Value,Value\n"
+            "2025-01-15,USD,buying_transfer,34.5678,99.9999\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="duplicated header"):
+            import_bot_csv(str(fp), cache)

@@ -114,9 +114,10 @@ def get_theme() -> dict:
             "ticker_up":          "#22C55E",
             "ticker_down":        "#EF4444",
             "ticker_neutral":     "#3B82F6",
-            # ticker placeholder text sits on card_bg #1E293B; #64748B was
-            # 3.07:1, #94A3B8 is 5.71:1.
-            "ticker_muted":       "#94A3B8",
+            # Placeholder "--.----" sits on the NAVY header_bg in both
+            # appearance modes (not card_bg): #CBD5E1 is 8.18:1 there.
+            # (Replaces the dead ticker_muted token nothing rendered.)
+            "ticker_placeholder": "#CBD5E1",
             "ticker_live_alt":    "#dc2626",
             # ── Update banner states ─────────────────────────
             "banner_warn":          "#F59E0B",
@@ -213,9 +214,10 @@ def get_theme() -> dict:
             "ticker_up":          "#16A34A",
             "ticker_down":        "#DC2626",
             "ticker_neutral":     "#2563EB",
-            # ticker placeholder text sits on card_bg #FFFFFF; #94A3B8 was
-            # 2.56:1, #5A6678 is 5.82:1.
-            "ticker_muted":       "#5A6678",
+            # Placeholder "--.----" sits on the NAVY header_bg in both
+            # appearance modes (not card_bg): #CBD5E1 is 5.96:1 there.
+            # (Replaces the dead ticker_muted token nothing rendered.)
+            "ticker_placeholder": "#CBD5E1",
             "ticker_live_alt":    "#B91C1C",
             # ── Update banner states ─────────────────────────
             "banner_warn":          "#F59E0B",

@@ -12,6 +12,7 @@ Override via environment variables where noted.
 
 import logging
 import os
+import re
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
@@ -108,7 +109,23 @@ def collect_excel_files(
 SKIP_SHEET_NAMES: frozenset = frozenset({"ExRate", "Exrate USD", "Exrate EUR"})
 """Sheets that are reference/master and should NOT be processed as ledgers.
 "Exrate USD" / "Exrate EUR" are pre-existing rate tabs in older workbooks;
-they lack the standard Date/Cur/EX Rate header and must be skipped."""
+they lack the standard Date/Cur/EX Rate header and must be skipped.
+Membership checks go through :func:`is_skip_sheet` (case/whitespace
+tolerant) — production variants like "EXRATE USD " must not slip past an
+exact-string match into the ledger scan."""
+
+_SKIP_SHEET_NAMES_FOLDED: frozenset = frozenset(
+    s.casefold() for s in SKIP_SHEET_NAMES
+)
+
+
+def is_skip_sheet(sheet_name) -> bool:
+    """Case/whitespace-tolerant test against ``SKIP_SHEET_NAMES``.
+
+    Single owner of the skip check used by the ledger header scan, the
+    date/currency prescans, and the standalone-ExRate probe.
+    """
+    return str(sheet_name).strip().casefold() in _SKIP_SHEET_NAMES_FOLDED
 
 # THB is the company's home currency — its ledger rows take a literal 1.0, so
 # it is "supported" without an API rate (the IFS formula handles it inline).
@@ -249,9 +266,43 @@ def parse_date(cell_val) -> date | None:
             try:
                 parsed = datetime.strptime(val, fmt).date()
             except ValueError:
+                # BE leap-day: Feb 29 of a Buddhist-Era year (2567 == 2024
+                # CE) fails strptime BEFORE _normalize_year can convert —
+                # BE years of CE leap years are never themselves leap years
+                # (543 % 4 == 3). Substitute year-543 and retry the same
+                # format once.
+                retried = _retry_be_leap_day(val, fmt)
+                if retried is not None:
+                    return retried
                 continue
             return _normalize_year(parsed)
     return None
+
+
+_BE_YEAR_TOKEN_RE = re.compile(r"(?<!\d)(2[4-7]\d{2})(?!\d)")
+
+
+def _retry_be_leap_day(val: str, fmt: str) -> date | None:
+    """Retry a failed strptime with the BE year converted to CE.
+
+    Only fires when the string carries a 4-digit year inside the BE
+    plausibility band; the substituted parse must still land in the
+    plausible CE window.
+    """
+    m = _BE_YEAR_TOKEN_RE.search(val)
+    if not m:
+        return None
+    be_year = int(m.group(1))
+    if not (_BE_YEAR_LOW <= be_year <= _BE_YEAR_HIGH):
+        return None
+    substituted = (
+        val[: m.start()] + str(be_year - _BE_CE_OFFSET) + val[m.end():]
+    )
+    try:
+        parsed = datetime.strptime(substituted, fmt).date()
+    except ValueError:
+        return None
+    return parsed if _plausible_year(parsed.year) else None
 
 
 def _normalize_year(parsed: date) -> date | None:
