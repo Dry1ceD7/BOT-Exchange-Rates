@@ -30,10 +30,16 @@ DATE_FORMATS = list(DATE_FORMATS)
 def prescan_oldest_date(
     filepaths: list[str],
     target_col_name: str = "Date",
+    rate_col_name: str = "EX Rate",
 ) -> tuple[date, bool]:
     """
     Pre-scans queued .xlsx files to find the absolute
     oldest date in the source column.
+
+    ``rate_col_name`` is the duplicate-resolution anchor: real ledgers
+    carry two 'Date' columns (invoice + export-entry), and the source
+    date must be the one the written formulas look up — the occurrence
+    nearest left of 'EX Rate'.
 
     Returns:
         Tuple of (oldest_date, was_detected).
@@ -44,7 +50,7 @@ def prescan_oldest_date(
         if not Path(fp).exists():
             continue
 
-        found = _scan_xlsx(fp, target_col_name)
+        found = _scan_xlsx(fp, target_col_name, rate_col_name)
 
         if found is not None and (oldest is None or found < oldest):
             oldest = found
@@ -68,7 +74,9 @@ def prescan_oldest_date(
 # ── Modern .xlsx scanning (openpyxl) ────────────────────────────────────
 
 
-def _scan_xlsx(filepath: str, target_col_name: str) -> date | None:
+def _scan_xlsx(
+    filepath: str, target_col_name: str, rate_col_name: str = "EX Rate",
+) -> date | None:
     """Scan a .xlsx file using openpyxl to find the oldest date."""
     oldest: date | None = None
     wb = None
@@ -89,8 +97,12 @@ def _scan_xlsx(filepath: str, target_col_name: str) -> date | None:
                 # carry the operator warning).
                 header_row_idx, cols = find_header_row(
                     ws,
-                    (("source", target_col_name),),
+                    (
+                        ("source", target_col_name),
+                        ("out_rate", rate_col_name),
+                    ),
                     warn_duplicates=False,
+                    resolve_left_of={"source": "out_rate"},
                 )
 
                 if header_row_idx is None or "source" not in cols:

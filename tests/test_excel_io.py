@@ -438,6 +438,95 @@ class TestFindHeaderRow:
         )
         wb.close()
 
+    def test_duplicate_date_resolves_left_of_ex_rate(self):
+        """With two 'Date' columns, the source binds NEXT TO 'EX Rate'.
+
+        Mirrors the real production ledgers: invoice Date in column B,
+        Cur, then 'Export Entry' + its Date immediately left of EX Rate.
+        The legacy in-file formulas resolve rates by the export-entry
+        date (XLOOKUP(Q...)), so first-occurrence resolution silently
+        switched the rate source to the invoice date — wrong values
+        whenever the two dates differ.
+        """
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(
+            ["NO", "Date", "Inv.No.", "Cur", "Export Entry", "Date",
+             "EX Rate"],
+        )
+        row_idx, cols = find_header_row(
+            ws,
+            (
+                ("source", "Date"),
+                ("currency", "Cur"),
+                ("out_rate", "EX Rate"),
+            ),
+            resolve_left_of={"source": "out_rate"},
+        )
+        assert row_idx == 1
+        assert cols["source"] == 5      # the export-entry Date, NOT col 1
+        assert cols["currency"] == 3
+        assert cols["out_rate"] == 6
+        wb.close()
+
+    def test_duplicate_date_without_anchor_falls_back_first(self):
+        """resolve_left_of degrades to first-occurrence when the anchor
+        column is absent from the sheet."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Date", "Cur", "Date"])  # no EX Rate column at all
+        row_idx, cols = find_header_row(
+            ws,
+            (("source", "Date"), ("out_rate", "EX Rate")),
+            resolve_left_of={"source": "out_rate"},
+        )
+        assert cols["source"] == 0
+        wb.close()
+
+    def test_duplicate_date_right_of_anchor_is_ignored(self):
+        """Only occurrences LEFT of the anchor are eligible."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Date", "EX Rate", "Date"])
+        row_idx, cols = find_header_row(
+            ws,
+            (("source", "Date"), ("out_rate", "EX Rate")),
+            resolve_left_of={"source": "out_rate"},
+        )
+        assert cols["source"] == 0
+        wb.close()
+
+    def test_single_date_column_unaffected(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Date", "Cur", "EX Rate"])
+        row_idx, cols = find_header_row(
+            ws,
+            (
+                ("source", "Date"),
+                ("currency", "Cur"),
+                ("out_rate", "EX Rate"),
+            ),
+            resolve_left_of={"source": "out_rate"},
+        )
+        assert cols["source"] == 0
+        wb.close()
+
+    def test_duplicate_resolution_is_logged(self, caplog):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Date", "Date", "EX Rate"])
+        with caplog.at_level("WARNING"):
+            find_header_row(
+                ws,
+                (("source", "Date"), ("out_rate", "EX Rate")),
+                resolve_left_of={"source": "out_rate"},
+            )
+        assert any(
+            "nearest left" in r.message.lower() for r in caplog.records
+        )
+        wb.close()
+
     def test_scan_depth_bounds_the_search(self):
         wb = openpyxl.Workbook()
         ws = wb.active

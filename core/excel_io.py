@@ -116,15 +116,24 @@ def find_header_row(
     scan_depth: int = 10,
     sheet_name: str = "?",
     warn_duplicates: bool = True,
+    resolve_left_of: dict[str, str] | None = None,
 ) -> tuple[int | None, dict[str, int]]:
     """Locate a sheet's header row and map labelled columns (single owner).
 
     Scans the first ``scan_depth`` rows for the ANCHOR label — ``labels[0]``
     — and, on the first row containing it, maps every ``(key, label)`` pair
-    to its 0-based column index. Duplicate labelled columns are resolved
+    to its 0-based column index. Duplicate labelled columns resolve
     deterministically to the FIRST occurrence (never last-wins, which
-    silently depends on column order); with ``warn_duplicates`` the
-    collision is logged so the operator can fix the sheet. ``None`` labels
+    silently depends on column order), EXCEPT keys listed in
+    ``resolve_left_of``: ``{key: ref_key}`` resolves a duplicated ``key``
+    to the occurrence nearest LEFT of ``ref_key``'s column. The real
+    production ledgers carry TWO ``Date`` columns per sheet — the invoice
+    date (column B) and the export-entry date immediately left of
+    ``EX Rate`` — and the legacy formula contract resolves rates by the
+    export-entry date, so the source-date column must bind to the
+    occurrence adjacent to ``EX Rate``, not the first one. With
+    ``warn_duplicates`` the collision and the applied resolution are
+    logged so the operator can see which column won. ``None`` labels
     are skipped.
 
     Canonical implementation behind :func:`scan_sheet_headers` (ledger write
@@ -149,19 +158,32 @@ def find_header_row(
         ]
         if anchor in row_strs:
             header_row_idx = row_idx
+            occurrences: dict[str, list[int]] = {}
+            label_by_key = {key: label for key, label in labels}
             for ci, val in enumerate(row_strs):
                 for key, label in labels:
-                    if label is None or val != label:
-                        continue
-                    if key in col_indices:
-                        if warn_duplicates:
-                            logger.warning(
-                                "Sheet '%s': duplicate '%s' header column "
-                                "— using the first occurrence.",
-                                sheet_name, label,
-                            )
-                    else:
-                        col_indices[key] = ci
+                    if label is not None and val == label:
+                        occurrences.setdefault(key, []).append(ci)
+            for key, occ in occurrences.items():
+                chosen = occ[0]
+                if len(occ) > 1:
+                    ref_key = (resolve_left_of or {}).get(key)
+                    ref_occ = occurrences.get(ref_key) if ref_key else None
+                    left = (
+                        [c for c in occ if c < ref_occ[0]] if ref_occ else []
+                    )
+                    if left:
+                        chosen = max(left)
+                    if warn_duplicates:
+                        logger.warning(
+                            "Sheet '%s': duplicate '%s' header column — "
+                            "using the %s.",
+                            sheet_name, label_by_key[key],
+                            "occurrence nearest left of "
+                            f"'{label_by_key.get(ref_key, ref_key)}'"
+                            if left else "first occurrence",
+                        )
+                col_indices[key] = chosen
             break
     return header_row_idx, col_indices
 
@@ -191,6 +213,10 @@ def scan_sheet_headers(
                 ("currency", target_cols["currency"]),
                 ("out_rate", target_cols["out_rate"]),
             ),
+            # Duplicate 'Date' headers resolve to the column nearest left
+            # of 'EX Rate' (the export-entry date the legacy formulas use),
+            # not the first occurrence (the invoice date).
+            resolve_left_of={"source": "out_rate"},
             sheet_name=sheet_name,
         )
 

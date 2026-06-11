@@ -52,11 +52,12 @@ class TestPrescanTargetDates:
         assert dates == {date(2025, 1, 7), date(2025, 1, 8)}
 
     def test_duplicate_date_header_uses_first_column(self, tmp_path, caplog):
-        """Two 'Date' columns → scan only the FIRST, deterministically.
+        """A duplicate 'Date' RIGHT of 'EX Rate' never wins.
 
-        Column A holds the real dates; the duplicate column D holds DIFFERENT
-        dates. First-wins means only column A's dates are returned, and the
-        collision is logged.
+        Column A holds the real dates; the duplicate column D (right of
+        EX Rate) holds DIFFERENT dates. Resolution considers only
+        occurrences LEFT of 'EX Rate', so column A's dates are returned
+        and the collision is logged.
         """
         path = _write_workbook(
             tmp_path,
@@ -78,6 +79,27 @@ class TestPrescanTargetDates:
             "duplicate" in r.message.lower() and "Date" in r.message
             for r in caplog.records
         )
+
+    def test_duplicate_date_header_uses_export_entry_column(self, tmp_path):
+        """Two 'Date' columns LEFT of 'EX Rate' → the nearer one wins.
+
+        Mirrors the real production ledgers: invoice Date in column A,
+        export-entry Date immediately left of EX Rate. The written
+        formulas resolve rates by the export-entry date, so the fetch
+        window must come from THAT column — first-occurrence resolution
+        would fetch a window for the invoice dates instead.
+        """
+        path = _write_workbook(
+            tmp_path,
+            rows=[
+                # A=invoice date, B=Cur, C=export-entry date, D=EX Rate.
+                [date(2025, 1, 7), "USD", date(2025, 2, 14), None],
+                [date(2025, 1, 8), "EUR", date(2025, 2, 17), None],
+            ],
+            header=["Date", "Cur", "Date", "EX Rate"],
+        )
+        dates = prescan_target_dates(path, TARGET_COLS)
+        assert dates == {date(2025, 2, 14), date(2025, 2, 17)}
 
 
 class TestPrescanCurrencies:

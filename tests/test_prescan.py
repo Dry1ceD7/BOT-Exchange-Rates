@@ -202,3 +202,26 @@ class TestPrescanOldestDate:
         oldest, detected = prescan_oldest_date([str(fake), str(good)])
         assert detected is True
         assert oldest == date(2025, 4, 4)
+
+    def test_duplicate_date_uses_export_entry_column(self, tmp_path):
+        """With two 'Date' columns, the window comes from the one the
+        formulas look up — the Date adjacent to 'EX Rate', not the
+        invoice Date in column A/B.
+
+        If the prescan kept first-occurrence resolution while the writer
+        targets the export-entry column, the fetch window could open too
+        late/early for exactly the dates the written XLOOKUPs need.
+        """
+        fp = tmp_path / "dup.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Date", "Cur", "Export Entry", "Date", "EX Rate"])
+        # Invoice date deliberately OLDER than the export-entry date: a
+        # first-occurrence regression would report 2025-01-01.
+        ws.append([date(2025, 1, 1), "USD", "x", date(2025, 3, 3), None])
+        wb.save(str(fp))
+        wb.close()
+
+        oldest, detected = prescan_oldest_date([str(fp)])
+        assert detected is True
+        assert oldest == date(2025, 3, 3)

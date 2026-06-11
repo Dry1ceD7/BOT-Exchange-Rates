@@ -164,13 +164,22 @@ def prescan_target_dates_and_currencies(
             if sheet_name in SKIP_SHEET_NAMES:
                 continue
             ws = wb_scan[sheet_name]
-            # Header location + first-occurrence duplicate resolution are
-            # owned by core.excel_io.find_header_row (shared with the ledger
-            # write path's scan_sheet_headers and core.prescan).
+            # Header location + duplicate resolution are owned by
+            # core.excel_io.find_header_row (shared with the ledger write
+            # path's scan_sheet_headers and core.prescan). The out_rate
+            # label is mapped purely as the duplicate-'Date' resolution
+            # anchor: the date window fetched here MUST be the same
+            # export-entry-date column the written formulas look up, or
+            # the master sheet misses exactly the dates the formulas need.
             header_row_idx, col_indices = find_header_row(
                 ws,
-                (("source", source_label), ("currency", currency_label)),
+                (
+                    ("source", source_label),
+                    ("currency", currency_label),
+                    ("out_rate", target_cols.get("out_rate")),
+                ),
                 sheet_name=sheet_name,
+                resolve_left_of={"source": "out_rate"},
             )
 
             if header_row_idx is None or "source" not in col_indices:
