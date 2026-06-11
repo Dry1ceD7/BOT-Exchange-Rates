@@ -292,10 +292,6 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "No Valid Files",
         "th": "ไม่พบไฟล์ที่ใช้ได้",
     },
-    "main.no_valid_files_unsupported": {
-        "en": "No supported Excel files found.",
-        "th": "ไม่พบไฟล์ Excel ที่รองรับ",
-    },
     "main.no_valid_files_empty": {
         "en": "No Excel files found in the dropped items.",
         "th": "ไม่พบไฟล์ Excel ในรายการที่ลากมาวาง",

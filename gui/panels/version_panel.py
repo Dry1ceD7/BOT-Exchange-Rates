@@ -37,12 +37,6 @@ _RELEASES_URL = (
 _RELEASES_PAGE_URL = (
     "https://github.com/Dry1ceD7/BOT-Exchange-Rates/releases"
 )
-_BOT_API_PING = (
-    "https://gateway.api.bot.or.th"
-    "/Stat-ExchangeRate/v2/DAILY_AVG_EXG_RATE/"
-    "?start_period=2025-01-01&end_period=2025-01-02&currency=USD"
-)
-
 # Longest release-notes blob we render inline (keep the panel featherweight
 # and avoid pasting a megabyte of changelog into a Tk textbox).
 _MAX_NOTES_CHARS = 1200
@@ -229,28 +223,52 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
         self.update_idletasks()
 
         def _worker():
+            # Busy-reset must always run (mirrors the token-dialog worker):
+            # ping_token swallows network errors itself, so any exception
+            # here is a programming error that would otherwise wedge the
+            # button forever.
             try:
-                token = get_token("BOT_TOKEN_EXG") or ""
-                headers = {"accept": "application/json"}
-                if token:
-                    clean_token = token.removeprefix("Bearer ").strip()
-                    headers["X-IBM-Client-Id"] = clean_token
-                    headers["Authorization"] = f"Bearer {clean_token}"
-                resp = httpx.get(_BOT_API_PING, headers=headers, timeout=8.0)
-                if resp.status_code == 200:
-                    self._safe_after(0, self._ping_done,
-                               "OK: API connected & authenticated",
-                               t["modal_success"])
-                elif resp.status_code == 401:
-                    msg = ("WARNING: API reachable but token is invalid" if token
-                           else "WARNING: API reachable — no token configured")
-                    self._safe_after(0, self._ping_done, msg, t["warning"])
+                from core.api_client import ping_token
+
+                # The BOT gateway scopes each key to ONE product (a valid
+                # EXG key 403s on the holiday endpoint and vice versa), so a
+                # green result must prove BOTH keys a real batch depends on:
+                # EXG for the rates and HOL for the mandatory holiday fetch.
+                # Probing only EXG produced the support-killing state of a
+                # green test alongside a batch whose holiday fetch fails.
+                results = []
+                for label, key_name, product in (
+                    ("Exchange-rate", "BOT_TOKEN_EXG", "exg"),
+                    ("Holiday", "BOT_TOKEN_HOL", "hol"),
+                ):
+                    token = get_token(key_name)
+                    if not token:
+                        results.append(
+                            (False, f"{label} key: not configured")
+                        )
+                        continue
+                    ok, msg = ping_token(token, product=product)
+                    results.append((ok, f"{label} key: {'OK' if ok else msg}"))
+
+                if all(ok for ok, _ in results):
+                    self._safe_after(
+                        0, self._ping_done,
+                        "OK: API connected & authenticated (both keys)",
+                        t["modal_success"],
+                    )
                 else:
-                    self._safe_after(0, self._ping_done,
-                               f"API returned HTTP {resp.status_code}",
-                               t["error_text"])
-            except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
-                self._safe_after(0, self._ping_done, f"FAILED: {e}", t["error_text"])
+                    self._safe_after(
+                        0, self._ping_done,
+                        " | ".join(msg for _, msg in results),
+                        t["error_text"],
+                    )
+            except Exception:  # noqa: BLE001 — busy-reset must always run
+                logger.exception("API ping worker failed unexpectedly")
+                self._safe_after(
+                    0, self._ping_done,
+                    "FAILED: API test failed unexpectedly — see app.log.",
+                    t["error_text"],
+                )
 
         threading.Thread(target=_worker, daemon=True, name="APIPing").start()
 

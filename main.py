@@ -426,19 +426,22 @@ def _set_console_log_level(level: int) -> None:
             handler.setLevel(level)
 
 
-def _collect_excel_files(input_path: str) -> list[str]:
-    """Return the sorted full-path Excel files at ``input_path``.
+def _collect_excel_files(input_path: str) -> tuple[list[str], list[str]]:
+    """Return ``(files, rejected)`` for the Excel files at ``input_path``.
 
     Thin wrapper over the shared ``core.constants.collect_excel_files``
     (single owner of the listing idiom, also used by the scheduler watch
     paths and the GUI drop resolver): a single file yields a one-element
     list (or empty if it is not Excel); a directory is scanned
     non-recursively with dotfiles skipped, returning the exact prior
-    full-path string form fed to the engine.
+    full-path string form fed to the engine. ``rejected`` lists
+    present-but-unsupported spreadsheet files (legacy .xls et al.) so the
+    headless run can NAME them instead of printing a misleading
+    'No Excel files found'.
     """
     from core.constants import collect_excel_files
 
-    return collect_excel_files(input_path)
+    return collect_excel_files(input_path, collect_rejected=True)
 
 
 def _resolve_input_path(args: argparse.Namespace) -> str:
@@ -543,15 +546,38 @@ def _run_headless(args: argparse.Namespace) -> int:
             print(f"ERROR: Input path not found: {input_path}", file=sys.stderr)
             return EXIT_CONFIG
 
-        files = _collect_excel_files(input_path)
+        files, rejected = _collect_excel_files(input_path)
+        if rejected:
+            # NAME unsupported spreadsheet files with the remedy: a folder of
+            # legacy .xls exports must never read like an empty folder (or an
+            # API failure) — that misdiagnosis is exactly what support sees.
+            names = ", ".join(Path(p).name for p in rejected)
+            print(
+                f"WARNING: Skipped {len(rejected)} unsupported spreadsheet "
+                f"file(s): {names} — only .xlsx/.xlsm are supported. "
+                "Open them in Excel and save as .xlsx, then re-run.",
+                file=sys.stderr,
+            )
         if not files:
             # 'Nothing to do' is its own code so a cron user notices a
             # misconfigured folder instead of a success-looking exit 0.
             # --json still gets a summary object so parsers always see JSON.
-            print("No Excel files found to process.", file=sys.stderr)
+            if rejected:
+                print(
+                    "No supported Excel files found to process "
+                    "(unsupported files were skipped — see warning above).",
+                    file=sys.stderr,
+                )
+            else:
+                print("No Excel files found to process.", file=sys.stderr)
             if args.json:
                 _print_json_summary(
-                    0, 0, 0, bool(args.dry_run), None, [],
+                    0, 0, 0, bool(args.dry_run), None,
+                    [
+                        "Unsupported file skipped (only .xlsx/.xlsm are "
+                        f"supported): {Path(p).name}"
+                        for p in rejected
+                    ],
                 )
             return EXIT_NOTHING
 

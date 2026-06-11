@@ -12,6 +12,7 @@ Override via environment variables where noted.
 
 import logging
 import os
+import zipfile
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from pathlib import Path
@@ -29,11 +30,24 @@ BOT_MAX_FILE_MB environment variable when needed.
 SUPPORTED_EXCEL_EXTENSIONS: tuple = (".xlsx", ".xlsm")
 """File extensions accepted for processing."""
 
+UNSUPPORTED_SPREADSHEET_EXTENSIONS: tuple = (".xls", ".xlsb", ".ods", ".csv")
+"""Spreadsheet-looking extensions we explicitly recognise as UNSUPPORTED.
+
+openpyxl cannot read legacy BIFF .xls (or .xlsb/.ods), and in-place
+overwrite of those formats is impossible with this stack — so they are
+rejected by design. They are listed here (single owner, shared by the GUI
+drop resolver, headless input, and the scheduler) so every entry point can
+NAME the files and tell the user the remedy (open in Excel, save as .xlsx)
+instead of silently skipping them — a folder of legacy exports must never
+read as an empty folder or an API failure."""
+
 PREFORMAT_BUFFER_ROWS: int = 50
 """Number of rows below data to pre-format with DD/MM/YYYY."""
 
 
-def collect_excel_files(path: str, *, dedup: bool = True) -> list[str]:
+def collect_excel_files(
+    path: str, *, dedup: bool = True, collect_rejected: bool = False,
+) -> list[str] | tuple[list[str], list[str]]:
     """Return the sorted full-path Excel files at ``path``.
 
     Single owner of the directory-listing idiom (main.py headless input, the
@@ -57,22 +71,31 @@ def collect_excel_files(path: str, *, dedup: bool = True) -> list[str]:
             scheduler's multiple watch paths, the GUI drop queue) pass
             ``dedup=False`` and run the same normpath dedup across the
             merged list themselves.
+        collect_rejected: When True, return ``(files, rejected)`` where
+            ``rejected`` lists present-but-unsupported spreadsheet files
+            (``UNSUPPORTED_SPREADSHEET_EXTENSIONS``, e.g. legacy .xls) so the
+            caller can tell the user WHY nothing was queued instead of
+            reporting a misleading empty listing. ``rejected`` is never
+            deduplicated (it is informational, per-call).
     """
+    rejected: list[str] = []
     if Path(path).is_file():
-        files = (
-            [path]
-            if path.lower().endswith(SUPPORTED_EXCEL_EXTENSIONS)
-            else []
-        )
+        lowered = path.lower()
+        files = [path] if lowered.endswith(SUPPORTED_EXCEL_EXTENSIONS) else []
+        if not files and lowered.endswith(UNSUPPORTED_SPREADSHEET_EXTENSIONS):
+            rejected.append(path)
     else:
-        files = [
-            os.path.join(path, f)  # noqa: PTH118
-            for f in sorted(os.listdir(path))  # noqa: PTH208
-            if f.lower().endswith(SUPPORTED_EXCEL_EXTENSIONS)
-            and not f.startswith(".")
-        ]
+        files = []
+        for f in sorted(os.listdir(path)):  # noqa: PTH208
+            if f.startswith("."):
+                continue
+            lowered = f.lower()
+            if lowered.endswith(SUPPORTED_EXCEL_EXTENSIONS):
+                files.append(os.path.join(path, f))  # noqa: PTH118
+            elif lowered.endswith(UNSUPPORTED_SPREADSHEET_EXTENSIONS):
+                rejected.append(os.path.join(path, f))  # noqa: PTH118
     if not dedup:
-        return files
+        return (files, rejected) if collect_rejected else files
     seen: set[str] = set()
     unique: list[str] = []
     for f in files:
@@ -80,7 +103,7 @@ def collect_excel_files(path: str, *, dedup: bool = True) -> list[str]:
         if norm not in seen:
             seen.add(norm)
             unique.append(f)
-    return unique
+    return (unique, rejected) if collect_rejected else unique
 
 SKIP_SHEET_NAMES: frozenset = frozenset({"ExRate", "Exrate USD", "Exrate EUR"})
 """Sheets that are reference/master and should NOT be processed as ledgers.
@@ -277,6 +300,16 @@ def humanize_save_error(filename: str, exc: BaseException) -> str | None:
     Centralized here so the engine, standalone, and scheduler paths reuse one
     translation instead of leaking raw WinError/errno strings to the user.
     """
+    # A non-zip file wearing an .xlsx extension (typically a legacy BIFF .xls
+    # renamed or re-saved with the wrong extension) raises zipfile.BadZipFile
+    # — neither OSError nor InvalidFileException. Translate it to the actual
+    # remedy instead of leaking "File is not a zip file" to an accountant.
+    if isinstance(exc, zipfile.BadZipFile):
+        return (
+            f"{filename}: Not a valid .xlsx workbook — it may be a legacy "
+            ".xls file renamed or saved with the wrong extension. Open it "
+            "in Excel and save as .xlsx, then process again."
+        )
     if not isinstance(exc, OSError):
         return None
     is_locked = isinstance(exc, PermissionError)

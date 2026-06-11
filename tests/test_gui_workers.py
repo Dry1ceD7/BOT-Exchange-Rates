@@ -163,3 +163,39 @@ class TestAppExtensionResolution:
         )
         assert [p.rsplit("/", 1)[-1] for p in accepted] == ["a.xlsx"]
         assert [p.rsplit("/", 1)[-1] for p in rejected] == ["old.xls"]
+
+    def test_resolve_collects_rejected_from_dropped_folder(self, tmp_path):
+        """A FOLDER drop must surface unsupported spreadsheets it contains.
+
+        Repro for the silent legacy-export case: a dropped folder holding
+        only .xls files previously produced ([], []) — indistinguishable
+        from an empty folder — so the user got a generic 'No Valid Files'
+        (or nothing) instead of the format warning naming the files.
+        """
+        from gui.app import resolve_excel_files
+
+        folder = tmp_path / "exports"
+        folder.mkdir()
+        (folder / "Sale Report 2026.xls").write_text("x")
+        (folder / "keep.xlsx").write_text("x")
+
+        accepted, rejected = resolve_excel_files(
+            [str(folder)], collect_rejected=True,
+        )
+        assert [p.rsplit("/", 1)[-1] for p in accepted] == ["keep.xlsx"]
+        assert [p.rsplit("/", 1)[-1] for p in rejected] == [
+            "Sale Report 2026.xls",
+        ]
+
+    def test_resolve_folder_with_only_unsupported_is_not_silent(self, tmp_path):
+        from gui.app import resolve_excel_files
+
+        folder = tmp_path / "exports"
+        folder.mkdir()
+        (folder / "only.xls").write_text("x")
+
+        accepted, rejected = resolve_excel_files(
+            [str(folder)], collect_rejected=True,
+        )
+        assert accepted == []
+        assert [p.rsplit("/", 1)[-1] for p in rejected] == ["only.xls"]

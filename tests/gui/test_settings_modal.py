@@ -259,12 +259,16 @@ class TestOnAppearanceChange:
                 patch.object(modal, "after") as mock_after,
             ):
                 modal._on_appearance_change("Light")
-            # Scheduled with the 150ms delay and the parent's bound callback
-            mock_after.assert_called_once()
-            delay, callback = mock_after.call_args[0]
-            assert delay == 150
-            callback()
+            # Two 150ms deferrals: the parent's bound callback AND the
+            # modal's own retheme (the modal holds the grab — it must not
+            # keep the stale palette while the main window flips).
+            assert mock_after.call_count == 2
+            calls = mock_after.call_args_list
+            assert [c.args[0] for c in calls] == [150, 150]
+            parent_cb = calls[0].args[1]
+            parent_cb()
             assert called == [True]
+            assert calls[1].args[1] == modal._retheme
         finally:
             del tk_root._apply_theme
         modal.destroy()
@@ -898,3 +902,56 @@ class TestKeyboardShortcuts:
         modal, _ = _make_modal(tk_root)
         modal.destroy()
         assert not modal.winfo_exists()
+
+
+# ---------------------------------------------------------------------------
+# Appearance-change retheme
+# ---------------------------------------------------------------------------
+
+class TestRetheme:
+    """Toggling appearance must refresh the modal's own palette.
+
+    The modal builds its widgets from mode-resolved get_theme() colors, so
+    after ctk.set_appearance_mode the modal kept the stale palette while
+    holding the input grab — a half-themed window the user reads as broken.
+    """
+
+    def test_retheme_rebuilds_with_fresh_palette(self, tk_root):
+        from gui.theme import get_theme
+
+        modal, _ = _make_modal(tk_root)
+        old_children = set(modal.winfo_children())
+        modal._retheme()
+        assert set(modal.winfo_children()) != old_children
+        assert modal._t == get_theme()
+        modal.destroy()
+
+    def test_retheme_preserves_unsaved_control_edits(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        modal._anomaly_threshold_var.set("7.5")
+        modal._rate_type_var.set("Selling")
+        modal._auto_update_var.set("off")
+        modal._retheme()
+        assert modal._anomaly_threshold_var.get() == "7.5"
+        assert modal._rate_type_var.get() == "Selling"
+        assert modal._auto_update_var.get() == "off"
+        modal.destroy()
+
+    def test_retheme_after_destroy_is_noop(self, tk_root):
+        modal, _ = _make_modal(tk_root)
+        modal.destroy()
+        modal._retheme()  # must not raise on a torn-down toplevel
+
+    def test_appearance_change_schedules_modal_retheme(self, tk_root):
+        """_on_appearance_change must schedule the modal's own retheme,
+        not just the parent window's _apply_theme."""
+        modal, _ = _make_modal(tk_root)
+        scheduled = []
+        with (
+            patch.object(modal, "after",
+                         side_effect=lambda _ms, fn=None, *a: scheduled.append(fn)),
+            patch("gui.panels.settings_modal.ctk.set_appearance_mode"),
+        ):
+            modal._on_appearance_change("Dark")
+        assert modal._retheme in scheduled
+        modal.destroy()

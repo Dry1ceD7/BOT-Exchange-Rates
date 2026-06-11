@@ -11,6 +11,7 @@ source column. Uses openpyxl for all modern Excel formats.
 
 import contextlib
 import logging
+import zipfile
 from datetime import date
 from pathlib import Path
 
@@ -106,11 +107,16 @@ def _scan_xlsx(filepath: str, target_col_name: str) -> date | None:
                         oldest = parsed
     except (
         OSError, ValueError, TypeError, KeyError,
+        zipfile.BadZipFile,
         openpyxl.utils.exceptions.InvalidFileException,
     ):
         # OSError covers a locked/permission-denied .xlsx (e.g. open in Excel
         # on the Windows target): skip that file rather than crash the whole
         # headless/scheduled prescan — other queued files still scan.
+        # BadZipFile covers non-zip bytes wearing an .xlsx extension (a legacy
+        # BIFF .xls renamed/mis-saved) — it is neither OSError nor
+        # InvalidFileException, so without it one masquerading file killed the
+        # entire prescan.
         pass
     finally:
         if wb is not None:

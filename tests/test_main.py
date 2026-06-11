@@ -800,3 +800,60 @@ def test_readme_documents_cli_flags_and_exit_codes():
     assert "Partial failure" in text
     assert "Nothing to do" in text
     assert "0 (success) or 1 (failures)" not in text
+
+
+# ── Headless unsupported-spreadsheet reporting (.xls et al.) ─────────────
+def test_headless_reports_unsupported_xls_in_folder(
+    monkeypatch, tmp_path, capsys,
+):
+    """A folder holding only legacy .xls files must NAME them with a remedy.
+
+    Repro: the generic 'No Excel files found to process.' hid the real
+    cause — the user's Crystal-Reports .xls export was present but
+    unsupported — making the failure read like an empty folder or an API
+    problem.
+    """
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_tokens_present", lambda: True)
+    d = tmp_path / "input"
+    d.mkdir()
+    (d / "Sale Report 2026.xls").write_text("x")
+    args = _headless_args(main, input=str(d))
+    assert main._run_headless(args) == main.EXIT_NOTHING
+    err = capsys.readouterr().err
+    assert "Sale Report 2026.xls" in err
+    assert ".xlsx" in err  # the save-as remedy must be stated
+
+
+def test_headless_reports_unsupported_xls_direct_file(
+    monkeypatch, tmp_path, capsys,
+):
+    """--input pointing AT a .xls file must say unsupported, not 'not found'."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_tokens_present", lambda: True)
+    f = tmp_path / "Sale Report 2026.xls"
+    f.write_text("x")
+    args = _headless_args(main, input=str(f))
+    assert main._run_headless(args) == main.EXIT_NOTHING
+    err = capsys.readouterr().err
+    assert "Sale Report 2026.xls" in err
+    assert ".xlsx" in err
+
+
+def test_headless_json_includes_unsupported_in_errors(
+    monkeypatch, tmp_path, capsys,
+):
+    """--json parsers must see the unsupported files, not a bare empty run."""
+    import json as _json
+
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_tokens_present", lambda: True)
+    d = tmp_path / "input"
+    d.mkdir()
+    (d / "old.xls").write_text("x")
+    args = _headless_args(main, input=str(d), json=True)
+    assert main._run_headless(args) == main.EXIT_NOTHING
+    out = capsys.readouterr().out.strip()
+    payload = _json.loads(out)
+    assert payload["total"] == 0
+    assert any("old.xls" in e for e in payload["errors"])

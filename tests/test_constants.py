@@ -233,3 +233,71 @@ class TestCollectExcelFiles:
     def test_missing_directory_raises_oserror(self, tmp_path):
         with pytest.raises(OSError):
             collect_excel_files(str(tmp_path / "nope"))
+
+
+class TestCollectExcelFilesRejected:
+    """collect_rejected surfaces present-but-unsupported spreadsheet files.
+
+    A folder of legacy .xls exports previously produced an empty listing
+    indistinguishable from an empty folder, so every caller (GUI folder
+    drop, headless --input, scheduler watch paths) reported a misleading
+    'no Excel files found' with no remedy.
+    """
+
+    def test_directory_lists_unsupported_spreadsheets(self, tmp_path):
+        (tmp_path / "a.xlsx").write_text("x")
+        (tmp_path / "Sale Report 2026.xls").write_text("x")
+        (tmp_path / "book.xlsb").write_text("x")
+        (tmp_path / "notes.txt").write_text("x")
+
+        files, rejected = collect_excel_files(
+            str(tmp_path), collect_rejected=True,
+        )
+        assert files == [os.path.join(str(tmp_path), "a.xlsx")]
+        assert sorted(os.path.basename(r) for r in rejected) == [
+            "Sale Report 2026.xls", "book.xlsb",
+        ]
+
+    def test_single_unsupported_file_is_rejected(self, tmp_path):
+        fp = tmp_path / "legacy.xls"
+        fp.write_text("x")
+        files, rejected = collect_excel_files(str(fp), collect_rejected=True)
+        assert files == []
+        assert rejected == [str(fp)]
+
+    def test_single_supported_file_yields_no_rejects(self, tmp_path):
+        fp = tmp_path / "ledger.xlsx"
+        fp.write_text("x")
+        files, rejected = collect_excel_files(str(fp), collect_rejected=True)
+        assert files == [str(fp)]
+        assert rejected == []
+
+    def test_default_signature_unchanged(self, tmp_path):
+        """Without collect_rejected the helper still returns a plain list."""
+        (tmp_path / "a.xlsx").write_text("x")
+        (tmp_path / "old.xls").write_text("x")
+        result = collect_excel_files(str(tmp_path))
+        assert result == [os.path.join(str(tmp_path), "a.xlsx")]
+
+
+class TestHumanizeBadZipFile:
+    """BadZipFile translates to an actionable save-as-.xlsx message."""
+
+    def test_badzipfile_gets_conversion_remedy(self):
+        import zipfile
+
+        from core.constants import humanize_save_error
+
+        msg = humanize_save_error(
+            "Sale Report 2026.xlsx", zipfile.BadZipFile("File is not a zip file"),
+        )
+        assert msg is not None
+        assert "Sale Report 2026.xlsx" in msg
+        assert ".xlsx" in msg
+        # Must mention the legacy-format cause so an accountant knows the fix.
+        assert ".xls" in msg
+
+    def test_other_non_oserror_still_returns_none(self):
+        from core.constants import humanize_save_error
+
+        assert humanize_save_error("f.xlsx", ValueError("boom")) is None

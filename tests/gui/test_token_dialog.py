@@ -536,6 +536,37 @@ class TestTestKeysButton:
         assert "rejected" in dialog._lbl_status.cget("text").lower()
         dialog.destroy()
 
+    def test_worker_probes_holiday_product_for_hol_key(self, tk_root, tmp_path):
+        """The HOL key must be probed against the HOLIDAY product.
+
+        The BOT gateway scopes each key to one API product, so testing the
+        holiday key against the exchange-rate endpoint (the old behavior)
+        rejects CORRECT holiday keys and passes an EXG key pasted into the
+        HOL field — inverting the validation it claims to perform.
+        """
+        dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")
+        dialog._entry_exg.insert(0, "VALIDEXGKEY999")
+        dialog._entry_hol.insert(0, "VALIDHOLKEY999")
+
+        calls = []
+
+        def _fake_ping(token, **kwargs):
+            calls.append((token, kwargs.get("product", "exg")))
+            return True, "OK: Key accepted — connection verified."
+
+        with (
+            patch("gui.panels.token_dialog.ping_token", side_effect=_fake_ping),
+            patch.object(dialog, "_safe_after"),
+        ):
+            with patch("gui.panels.token_dialog.threading.Thread") as mt:
+                dialog._on_test_keys()
+                worker = mt.call_args.kwargs["target"]
+            worker()
+
+        assert ("VALIDEXGKEY999", "exg") in calls
+        assert ("VALIDHOLKEY999", "hol") in calls
+        dialog.destroy()
+
     def test_worker_reports_exg_failure(self, tk_root, tmp_path):
         """Worker reports a bad exchange key without testing the holiday key."""
         dialog = _make_dialog(tk_root, tmp_env=tmp_path / ".env")

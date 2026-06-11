@@ -336,19 +336,35 @@ def build_bot_headers(token: str) -> dict[str, str]:
 # LIGHTWEIGHT CREDENTIAL PROBE (first-run "Test Keys")
 # -------------------------------------------------------------------------
 
-# Lightweight EXG-rate endpoint used purely to verify a key is accepted.
-_PING_URL = (
-    f"{BOT_GATEWAY_URL}{EXG_RATE_PATH}"
-    "?start_period=2025-01-01&end_period=2025-01-02&currency=USD"
-)
+# Lightweight per-product probe URLs used purely to verify a key is accepted.
+# The gateway scopes each key to ONE product (live-verified: a valid holiday
+# key 403s on the exchange-rate endpoint and vice versa), so a key MUST be
+# probed against its own product or the result is meaningless — a correct
+# holiday key would be rejected and an exchange key pasted into the holiday
+# field would pass. The data in the response is irrelevant; only the
+# authentication outcome matters, so both windows are fixed/cheap.
+_PING_URLS = {
+    "exg": (
+        f"{BOT_GATEWAY_URL}{EXG_RATE_PATH}"
+        "?start_period=2025-01-01&end_period=2025-01-02&currency=USD"
+    ),
+    "hol": f"{BOT_GATEWAY_URL}{HOLIDAY_PATH}?year=2025",
+}
 
 
-def ping_token(token: str | None, *, timeout: float = 8.0) -> tuple[bool, str]:
+def ping_token(
+    token: str | None, *, product: str = "exg", timeout: float = 8.0,
+) -> tuple[bool, str]:
     """Probe an *entered* (not yet stored) BOT API key against the gateway.
 
     Used by the first-run token registration dialog so a user can verify a key
     before committing it. A blocking httpx call — callers MUST run it off the
     Tk thread.
+
+    ``product`` selects which gateway product the key is checked against:
+    ``"exg"`` (exchange rates, BOT_TOKEN_EXG) or ``"hol"`` (financial-
+    institution holidays, BOT_TOKEN_HOL). Keys are product-scoped at the
+    gateway, so callers must pass the product the key is actually for.
 
     Returns a ``(ok, message)`` tuple where ``ok`` is True only on an
     authenticated 200. The message distinguishes the three states the audit
@@ -362,7 +378,7 @@ def ping_token(token: str | None, *, timeout: float = 8.0) -> tuple[bool, str]:
 
     headers = build_bot_headers(clean)
     try:
-        resp = httpx.get(_PING_URL, headers=headers, timeout=timeout)
+        resp = httpx.get(_PING_URLS[product], headers=headers, timeout=timeout)
     except (httpx.RequestError, OSError):
         # Network/DNS/TLS failure — do NOT surface the exception text, which
         # httpx builds from the request URL (token-free here, but the URL is

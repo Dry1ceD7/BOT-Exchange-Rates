@@ -273,6 +273,7 @@ class AutoScheduler:
                 lock and avoid racing a concurrent start().
         """
         files = []
+        rejected = []
         seen = set()
 
         for path in watch_paths:
@@ -284,12 +285,27 @@ class AutoScheduler:
             # bare names sorted then joined — the exact prior full-path form
             # the os.path.normpath dedup relies on. dedup=False because the
             # identity check must run ACROSS watch paths, here.
-            for full in collect_excel_files(path, dedup=False):
+            found, path_rejected = collect_excel_files(
+                path, dedup=False, collect_rejected=True,
+            )
+            rejected.extend(path_rejected)
+            for full in found:
                 norm = os.path.normpath(full)
                 if norm not in seen:
                     seen.add(norm)
                     files.append(full)
 
+        if rejected:
+            # A watch folder fed by a legacy export (e.g. Crystal Reports
+            # .xls) would otherwise be skipped silently FOREVER — make the
+            # misconfiguration visible in the log/console each scan.
+            logger.warning(
+                "Scheduler: %d unsupported spreadsheet file(s) in watched "
+                "paths will never be processed (only .xlsx/.xlsm are "
+                "supported — open in Excel and save as .xlsx): %s",
+                len(rejected),
+                ", ".join(Path(r).name for r in rejected),
+            )
         logger.info(
             "Scheduler scan: %d files found across %d paths",
             len(files), len(watch_paths),

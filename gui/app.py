@@ -36,6 +36,7 @@ from core.backup_manager import BackupManager
 from core.config_manager import SettingsManager
 from core.constants import (
     SUPPORTED_EXCEL_EXTENSIONS,
+    UNSUPPORTED_SPREADSHEET_EXTENSIONS,
     bot_today,
     collect_excel_files,
 )
@@ -96,12 +97,12 @@ def resolve_excel_files(paths: list[str], collect_rejected: bool = False):
     """Resolve individual files and directories into a flat list of Excel files.
 
     When ``collect_rejected`` is True, returns ``(accepted, rejected)`` where
-    ``rejected`` lists directly-dropped files with an unsupported spreadsheet
-    extension (e.g. .xlsb, .xls) so the caller can warn the user. Otherwise
+    ``rejected`` lists files with an unsupported spreadsheet extension
+    (e.g. .xlsb, .xls) — both directly-dropped files AND files found inside
+    dropped folders — so the caller can warn the user. A folder of legacy
+    .xls exports must never resolve to a silent empty queue. Otherwise
     returns just the accepted list (backward compatible).
     """
-    # Spreadsheet-looking extensions we explicitly recognise as unsupported.
-    UNSUPPORTED_EXTENSIONS = (".xlsb", ".xls", ".ods", ".csv")
     queue = []
     rejected = []
     for p in paths:
@@ -111,14 +112,18 @@ def resolve_excel_files(paths: list[str], collect_rejected: bool = False):
                 continue
             if p.lower().endswith(EXCEL_EXTENSIONS):
                 queue.append(p)
-            elif p.lower().endswith(UNSUPPORTED_EXTENSIONS):
+            elif p.lower().endswith(UNSUPPORTED_SPREADSHEET_EXTENSIONS):
                 rejected.append(p)
         elif Path(p).is_dir():
             # Shared listing helper (core.constants.collect_excel_files):
             # bare names sorted then joined — the exact prior full-path form
             # the os.path.normpath dedup below relies on. dedup=False because
             # the identity check runs over the merged queue below.
-            queue.extend(collect_excel_files(p, dedup=False))
+            found, dir_rejected = collect_excel_files(
+                p, dedup=False, collect_rejected=True,
+            )
+            queue.extend(found)
+            rejected.extend(dir_rejected)
     seen = set()
     unique = []
     for f in queue:
@@ -889,12 +894,11 @@ class BOTExrateApp(ctk.CTk):
             # APPEND to the existing queue (dedup) rather than REPLACE it, so the
             # operator can build a batch incrementally across several drops (#2).
             self._set_queue(self.file_queue + new_files)
-        elif rejected:
-            messagebox.showwarning(
-                tr("main.no_valid_files_title"),
-                tr("main.no_valid_files_unsupported"),
-            )
-        else:
+        elif not rejected:
+            # Nothing accepted AND nothing rejected — a genuinely empty drop.
+            # (When everything was rejected, the format warning above already
+            # named the files and the save-as-.xlsx remedy; a second generic
+            # dialog on top of it was pure noise.)
             messagebox.showwarning(
                 tr("main.no_valid_files_title"),
                 tr("main.no_valid_files_empty"),
@@ -939,11 +943,17 @@ class BOTExrateApp(ctk.CTk):
             ]
         )
         if paths:
-            # APPEND to the queue (dedup) so browse accumulates like drop (#2).
-            new_files = self._dedup_new(list(paths))
-            if new_files:
-                self._preflight_warn(new_files)
-            self._set_queue(self.file_queue + new_files)
+            # Route the picked files through the same resolver + terminal
+            # handler as a drop: the 'All files (*.*)' filter lets a legacy
+            # .xls into the selection, and _preflight_warn deliberately skips
+            # the unsupported-extension case on the assumption the resolver
+            # already warned — which was only true for drops. _finish_drop
+            # also APPENDS to the queue (dedup) so browse accumulates like
+            # drop (#2).
+            excel_files, rejected = resolve_excel_files(
+                list(paths), collect_rejected=True,
+            )
+            self._finish_drop(excel_files, rejected)
 
     def _preflight_warn(self, files: list[str]):
         """Selection-time pre-flight feedback for the engine seam.

@@ -562,6 +562,46 @@ class TestPingToken:
         assert captured["headers"]["X-IBM-Client-Id"] == "RAWKEY123"
         assert captured["headers"]["Authorization"] == "Bearer RAWKEY123"
 
+    def test_default_product_probes_exchange_endpoint(self, monkeypatch):
+        """Backward-compatible default: the EXG-rate product is probed."""
+        from core import api_client
+
+        captured = {}
+
+        def _capture(url, *, headers, timeout):
+            captured["url"] = url
+            resp = MagicMock()
+            resp.status_code = 200
+            return resp
+
+        monkeypatch.setattr(api_client.httpx, "get", _capture)
+        api_client.ping_token("SOMEKEY1234")
+        assert api_client.EXG_RATE_PATH in captured["url"]
+
+    def test_hol_product_probes_holiday_endpoint(self, monkeypatch):
+        """product='hol' must hit the holiday endpoint the batch depends on.
+
+        The BOT gateway scopes each key to one API product (live-verified:
+        a valid HOL key 403s on the EXG endpoint and vice versa), so probing
+        the holiday key against the exchange-rate endpoint rejects correct
+        keys and passes wrong ones.
+        """
+        from core import api_client
+
+        captured = {}
+
+        def _capture(url, *, headers, timeout):
+            captured["url"] = url
+            resp = MagicMock()
+            resp.status_code = 200
+            return resp
+
+        monkeypatch.setattr(api_client.httpx, "get", _capture)
+        ok, _ = api_client.ping_token("HOLKEY12345", product="hol")
+        assert ok is True
+        assert api_client.HOLIDAY_PATH in captured["url"]
+        assert api_client.EXG_RATE_PATH not in captured["url"]
+
 
 # =========================================================================
 #  TOKEN REDACTION LOGGING FILTER (security)

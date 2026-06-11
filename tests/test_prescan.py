@@ -176,3 +176,29 @@ class TestPrescanOldestDate:
         oldest, detected = prescan_oldest_date([str(bad), str(good)])
         assert detected is True
         assert oldest == date(2025, 3, 3)
+
+    def test_non_zip_xlsx_is_skipped_not_crashed(self, tmp_path):
+        """A non-zip file wearing an .xlsx extension is skipped, not fatal.
+
+        Repro for the masquerading-legacy-file case: a BIFF .xls (or any
+        non-zip bytes) renamed to .xlsx makes openpyxl raise
+        zipfile.BadZipFile, which is neither OSError nor
+        InvalidFileException — before the BadZipFile guard it escaped the
+        except tuple and killed the whole headless/scheduled prescan.
+        """
+        fake = tmp_path / "renamed_legacy.xlsx"
+        fake.write_bytes(b"\xd0\xcf\x11\xe0 not a zip, BIFF-style bytes")
+
+        good = tmp_path / "good.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Date", "Amount"])
+        ws.append([date(2025, 4, 4), 100])
+        wb.save(str(good))
+        wb.close()
+
+        # Fake file listed first so an un-caught BadZipFile would abort
+        # before the good file is ever scanned.
+        oldest, detected = prescan_oldest_date([str(fake), str(good)])
+        assert detected is True
+        assert oldest == date(2025, 4, 4)

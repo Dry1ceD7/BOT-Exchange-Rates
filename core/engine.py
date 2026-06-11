@@ -16,6 +16,7 @@ import logging
 import os
 import threading
 import traceback
+import zipfile
 from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
@@ -1079,11 +1080,15 @@ class LedgerEngine:
                 if progress_cb:
                     progress_cb(idx + 1, total, fname, str(e))
             except (OSError, ValueError, KeyError,
+                    zipfile.BadZipFile,
                     openpyxl.utils.exceptions.InvalidFileException) as e:
                 # A file open in Excel surfaces as a raw WinError 32 / EACCES
                 # string a non-technical accountant cannot act on. Translate it
                 # into a clear "close it in Excel and retry" message; any other
-                # OS/value error keeps its original text.
+                # OS/value error keeps its original text. BadZipFile (non-zip
+                # bytes wearing .xlsx — typically a renamed legacy .xls) gets
+                # the save-as-.xlsx remedy from humanize_save_error and becomes
+                # a per-file skip instead of aborting the whole batch.
                 friendly = humanize_save_error(fname, e)
                 err_msg = friendly if friendly is not None else f"{fname}: {e!s}"
                 errors.append(err_msg)

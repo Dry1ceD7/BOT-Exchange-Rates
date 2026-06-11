@@ -303,12 +303,16 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
             try:
                 # The exchange key is the one every batch run depends on;
                 # verify it first so a bad EXG key is reported even if HOL
-                # happens to pass.
-                exg_ok, exg_msg = ping_token(exg)
+                # happens to pass. Each key MUST be probed against its own
+                # gateway product: keys are product-scoped (live-verified),
+                # so testing the holiday key against the exchange-rate
+                # endpoint (the old behavior) rejected CORRECT holiday keys
+                # and passed an EXG key pasted into the HOL field.
+                exg_ok, exg_msg = ping_token(exg, product="exg")
                 if not exg_ok:
                     self._safe_after(0, self._test_done, False, exg_msg)
                     return
-                hol_ok, hol_msg = ping_token(hol)
+                hol_ok, hol_msg = ping_token(hol, product="hol")
                 if not hol_ok:
                     # Distinguish which key failed for an actionable message.
                     self._safe_after(
