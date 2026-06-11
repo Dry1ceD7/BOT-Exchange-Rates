@@ -398,8 +398,12 @@ class TestStandardPathManualRange:
         written.discard(None)
         wb.close()
 
-        # Exactly the manual 3-day window — dr_end honored, not today().
-        assert written == {dr_start, date(2025, 3, 11), dr_end}
+        # The manual 3-day window — dr_end honored, not today() — PLUS the
+        # fixture's pre-existing 1999 row: existing history outside the
+        # requested range is preserved, never silently trimmed.
+        assert written == {
+            date(1999, 1, 1), dr_start, date(2025, 3, 11), dr_end,
+        }
 
     def test_standalone_run_prunes_old_backups(
         self, exrate_file, temp_backup, tmp_cache,

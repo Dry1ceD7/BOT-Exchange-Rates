@@ -527,6 +527,40 @@ class TestFindHeaderRow:
         )
         wb.close()
 
+
+class TestInjectShiftedDualDateLayout:
+    """The INJECTED formula must reference the export-entry Date column.
+
+    Locks the production layout end-to-end at the write seam: invoice Date
+    in column B, Cur in D, export-entry Date in E, EX Rate in F. The
+    emitted formula's guard and XLOOKUPs must reference E (the resolved
+    source), never B — and the invoice column's cells must be untouched.
+    The find_header_row unit tests alone could not catch a regression in
+    how scan_sheet_headers' indices flow into the formula builder.
+    """
+
+    def test_formula_references_export_entry_column(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Jan"
+        ws.append(["NO", "Date", "Vendor", "Cur", "Date", "EX Rate"])
+        invoice = date(2025, 1, 7)
+        entry = date(2025, 2, 14)
+        ws.append([1, invoice, "ACME", "USD", entry, None])
+
+        _inject(wb)
+
+        formula = ws.cell(row=2, column=6).value
+        assert isinstance(formula, str)
+        # Guard + lookups bind to E (export-entry Date) and D (Cur)...
+        assert formula.startswith('=IF(OR(D2="",E2=""),"",')
+        assert "_xlfn.XLOOKUP(E2," in formula
+        # ...and NEVER to the invoice Date in column B.
+        assert "B2" not in formula
+        # The invoice Date cell itself is untouched by date normalization.
+        assert ws.cell(row=2, column=2).value == invoice
+        wb.close()
+
     def test_scan_depth_bounds_the_search(self):
         wb = openpyxl.Workbook()
         ws = wb.active

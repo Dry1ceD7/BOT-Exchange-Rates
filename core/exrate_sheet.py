@@ -314,7 +314,14 @@ def _build_date_range(
         all_dates.add(current)
         current += timedelta(days=1)
     all_dates |= set(existing.keys())
-    return {d for d in all_dates if d >= start}
+    # Existing rows BEFORE the requested start are KEPT — symmetric with
+    # after-end rows, which were always preserved. A manual Q1 refresh on a
+    # multi-year standalone ExRate book must never silently delete prior
+    # years' history (the old `d >= start` drop did exactly that, and the
+    # post-save read-back gate could not catch it). Range trimming, if ever
+    # wanted, must be an explicit user action — not a side effect of the
+    # chosen start date.
+    return all_dates
 
 
 def _merge_rate_data(

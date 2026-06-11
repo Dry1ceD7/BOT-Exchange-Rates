@@ -921,6 +921,13 @@ class LedgerEngine:
                 ec_start = datetime.strptime(start_date, "%Y-%m-%d").date()
             except (ValueError, TypeError):
                 ec_start = default_fetch_window_start(target_year)
+            # Cover ledger dates BEFORE the caller's start too (GUI manual
+            # mode / --start-date): mirrors _preload_api_data's window union
+            # — otherwise an extra-currency row dated before the window is
+            # never fetched and silently renders blank while the same-dated
+            # USD/EUR rows resolve.
+            if all_target_dates:
+                ec_start = min(ec_start, min(all_target_dates))
             extra_currency_rates = await self._fetch_extra_currency_rates(
                 extra_currencies, rate_type, ec_start, bot_today(),
             )

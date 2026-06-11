@@ -330,6 +330,15 @@ def show_exrate_dialog(app) -> None:
         else:
             date_range = None  # auto = current year
 
+        # Hold the busy seam CLOSED across the save picker: _poll_exrate_done
+        # infers completion from "no grab + button enabled", and on Windows
+        # after() timers fire while the native save dialog pumps messages —
+        # destroying the grab before the picker disabled the button let the
+        # poll release _exrate_running mid-flow (a batch could then start
+        # concurrently with the ExRate worker). Disable BEFORE the grab dies;
+        # every early return in _create_exrate_file re-enables.
+        if hasattr(app, "btn_export_exrate"):
+            app.btn_export_exrate.configure(state="disabled")
         dialog.destroy()
         _create_exrate_file(app, currencies, rate_types, date_range=date_range)
 
@@ -453,6 +462,9 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
                 text=tr("exrate.err_batch_running"),
                 text_color=t["warning"],
             )
+        # Release the seam _on_create closed before destroying the dialog.
+        if hasattr(app, "btn_export_exrate"):
+            app.btn_export_exrate.configure(state="normal")
         return
 
     dest = filedialog.asksaveasfilename(
@@ -464,6 +476,9 @@ def _create_exrate_file(app, currencies, rate_types, date_range=None):
         confirmoverwrite=True,
     )
     if not dest:
+        # Picker cancelled — release the seam _on_create closed.
+        if hasattr(app, "btn_export_exrate"):
+            app.btn_export_exrate.configure(state="normal")
         return
     # Remember the chosen directory so the next save reopens there (#2).
     _LAST_SAVE_DIR = str(Path(dest).parent) or _LAST_SAVE_DIR

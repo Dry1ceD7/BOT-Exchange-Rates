@@ -11,6 +11,7 @@ import contextlib
 import logging
 import sys
 import threading
+import tkinter
 
 import customtkinter as ctk
 
@@ -309,6 +310,30 @@ class UpdateManager(SafePanel):
         t = get_theme()
         from core.auto_updater import apply_update
 
+        # Never tear the process down under a live batch save — same hazard
+        # VersionPanel._do_restart refuses (a sys.exit mid-write risks a torn
+        # ledger; the read-back gate protects the file, but the run is lost
+        # and the operator gets no summary). The banner stays; the user
+        # retries after the batch finishes.
+        batch_handler = getattr(self.app, "batch_handler", None)
+        if (
+            getattr(self.app, "_batch_running", False)
+            or getattr(batch_handler, "_batch_active", False)
+        ):
+            if self._banner:
+                for w in self._banner.winfo_children():
+                    w.destroy()
+                ctk.CTkLabel(
+                    self._banner,
+                    text=(
+                        "  A batch is running — finish it, then click "
+                        "Install & Restart again."
+                    ),
+                    font=ctk.CTkFont(size=13, weight="bold"),
+                    text_color=t["banner_text_light"],
+                ).place(relx=0.5, rely=0.5, anchor="center")
+            return
+
         # Update the UI first so user knows it's working
         if self._banner:
             for w in self._banner.winfo_children():
@@ -345,8 +370,17 @@ class UpdateManager(SafePanel):
             )
 
     def _exit_for_restart(self) -> None:
-        """Clean exit for restart — destroy window and exit process."""
+        """Clean exit for restart — full app shutdown, then exit.
+
+        Routes through _on_app_close (ThreadRegistry.shutdown_all, tray/IPC
+        teardown) instead of a bare destroy() so workers are joined before
+        the installer overwrites the executable.
+        """
         import sys
-        with contextlib.suppress(RuntimeError):
-            self.app.destroy()
+        close = getattr(self.app, "_on_app_close", None)
+        with contextlib.suppress(RuntimeError, tkinter.TclError):
+            if callable(close):
+                close()
+            else:
+                self.app.destroy()
         sys.exit(0)

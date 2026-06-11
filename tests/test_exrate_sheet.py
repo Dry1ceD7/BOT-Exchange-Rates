@@ -116,12 +116,21 @@ class TestBuildDateRange:
         result = _build_date_range(start, end, existing)
         assert date(2025, 3, 11) in result
 
-    def test_filters_before_start(self):
+    def test_existing_rows_before_start_are_kept(self):
+        """History BEFORE the requested start is preserved, not trimmed.
+
+        Regression: the old `d >= start` drop silently deleted every
+        existing row older than the range start — a manual Q1 refresh on a
+        multi-year standalone ExRate book lost all prior years' history,
+        and the post-save read-back gate could not catch it (the snapshot
+        is taken after the rebuild). Rows after end were always kept; the
+        contract is now symmetric.
+        """
         start = date(2025, 3, 10)
         end = date(2025, 3, 10)
         existing = {date(2025, 3, 5): {"usd_buy": 33.0}}
         result = _build_date_range(start, end, existing)
-        assert date(2025, 3, 5) not in result
+        assert date(2025, 3, 5) in result
 
 
 class TestMergeRateData:
