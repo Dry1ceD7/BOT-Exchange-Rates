@@ -4,7 +4,7 @@
 
 **Enterprise Desktop Application for Bank of Thailand Exchange Rate Automation**
 
-Version 3.5.1  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
+Version 3.6.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
@@ -18,6 +18,18 @@ Version 3.5.1  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Rele
 The **BOT Exchange Rate Processor** is a standalone desktop application that automates the extraction, resolution, and embedding of official Bank of Thailand (BOT) exchange rates into financial accounting ledgers (`.xlsx`).
 
 It replaces a fragmented, error-prone multi-script workflow with a single, production-grade GUI application — built for **zero-downtime corporate environments**, legacy office hardware (4GB RAM, low-resolution monitors), and strict Thai accounting compliance.
+
+### What's New in V3.6.0 (Round-10 Audit: Exact Decimal Pipeline, Verified Saves, Field Fixes)
+
+| Feature | Description |
+|---------|-------------|
+| **Exact Decimal pipeline** | BOT rates never exist as binary floats: API responses parse straight to `Decimal`, the cache stores exact 4dp strings, and every save passes a post-save read-back gate — the written file is re-opened and every cell verified Decimal-exact **before** it replaces the original. |
+| **No fabricated values** | Ledger formulas are double-guarded so weekend/holiday/missing rows render **blank, never 0**; a partial cache insert can no longer wipe sibling currency columns; JPY is excluded until a per-100-yen convention is decided (visible warning instead of a 100x-inflated value). |
+| **Macro preservation** | `.xlsm` workbooks load with `keep_vba` — embedded VBA projects survive in-place saves. |
+| **Two-product API key test** | The BOT gateway scopes each key to one product. *Test API Connection* and the first-run *Test Keys* now probe **both** keys against their own endpoints and name the failing key — a green result finally proves a real batch can run (including the swapped-keys case the old test could not detect). |
+| **Legacy `.xls` clarity** | Legacy `.xls`/`.xlsb`/`.ods` files are named with a "save as `.xlsx` first" remedy at every entry point — file drop, folder drop, Browse, headless (stderr + `--json` errors), and the scheduler log. A `.xls` renamed to `.xlsx` becomes a per-file skip with the same remedy instead of killing the process. |
+| **Settings modal retheme** | Changing appearance re-themes the settings window itself (it holds the input grab) — no more half-themed "frozen-looking" modal. Unsaved edits survive the refresh. |
+| **Self-update repaired** | Releases now publish the `BOT-ExRate-Setup.exe.sha256` checksum asset the in-app updater **requires** for its mandatory integrity verification — the update channel works again, and the updater matches the checksum by exact asset name. A release-time gate asserts the git tag matches `core/version.py`. |
 
 ### What's New in V3.5.1 (Weekend/Holiday Correctness, Rate-Type Fix, Rate Audit)
 
@@ -400,7 +412,7 @@ redistribution is not permitted. See [LICENSE](LICENSE) for the full terms.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.5.1*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.6.0*
 
 Property of  
 Advanced ID Asia Engineering., Ltd

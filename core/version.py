@@ -7,5 +7,5 @@ All modules import from here — no more hardcoded version strings.
 ---------------------------------------------------------------------------
 """
 
-__version__ = "3.5.1"
+__version__ = "3.6.0"
 APP_VERSION = __version__
