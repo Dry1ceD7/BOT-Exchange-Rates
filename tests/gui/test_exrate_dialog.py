@@ -975,7 +975,8 @@ class TestExrateWorkerBackupFirst:
         assert _read_marker(dest) == "FILLED-EXRATE"
         # ...and a real backup of the ORIGINAL dest exists, taken BEFORE the
         # move (its bytes are the pre-overwrite content, not the new sheet).
-        backups = list(backup_dir.glob("ExRate__bak__*.xlsx"))
+        # Digest-aware glob: backup names are now {stem}__{digest}__bak__...
+        backups = list(backup_dir.glob("ExRate__*__bak__*.xlsx"))
         assert len(backups) == 1, f"Expected 1 dest backup, got {backups}"
         assert backups[0].read_bytes() == b"ORIGINAL-CONTENT", (
             "Backup must capture dest as it was before the overwrite"

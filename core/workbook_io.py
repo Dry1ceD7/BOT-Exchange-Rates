@@ -90,23 +90,26 @@ def is_standalone_exrate_workbook(
     *,
     date_header: str = "Date",
     currency_header: str = "Cur",
-    scan_depth: int = 5,
 ) -> bool:
     """Read-only probe: is ``filepath`` a standalone ExRate workbook?
 
-    A standalone ExRate workbook has an ``ExRate`` sheet and NO month-tab
-    sheet carrying the ledger date/currency headers (both in one row) within
-    its first ``scan_depth`` rows. Single owner of the probe shared by
+    A standalone ExRate workbook has an ``ExRate`` sheet and NO sheet the
+    ledger pipeline would process. "Would process" is decided by the SAME
+    primitive the ledger scan uses (``core.excel_io.find_header_row``, same
+    10-row depth, same anchor semantics: a mapped source-date column) — by
+    construction the probe can never disagree with ``scan_sheet_headers``.
+    The old 5-row 'Date'+'Cur'-in-one-row heuristic could: a ledger whose
+    headers sit in rows 6-10 (or whose Cur label is absent from the header
+    row) was misrouted onto the standalone path on every run AFTER the
+    first — the run that creates the ExRate sheet — freezing its ledger
+    formulas forever while the master kept growing.
+
+    Single owner of the probe shared by
     ``LedgerEngine._detect_standalone_exrate`` (which passes its
     ``target_cols`` labels) and main.py's headless labeller (which keeps the
     literal ``'Date'``/``'Cur'`` defaults — the engine's default target_cols
     are those same literals, so the two callers' match semantics were
     already identical).
-
-    Depth note: the header SCANS (``core.excel_io.find_header_row``) look at
-    rows 1-10; this probe deliberately keeps the shallower 5-row window both
-    inline copies always used — it only needs to recognise a month tab, it
-    never maps columns.
 
     Featherweight: read-only load, try/finally close + gc. ANY probe failure
     (including OSError on a locked/corrupt file) returns False — the probe
@@ -130,6 +133,10 @@ def is_standalone_exrate_workbook(
         return False
     wb = None
     try:
+        # Local import: workbook_io is imported by excel_io's save path, so
+        # a top-level import here would be circular.
+        from core.excel_io import find_header_row
+
         wb = openpyxl.load_workbook(filepath, read_only=True)
         if "ExRate" not in wb.sheetnames:
             return False
@@ -137,15 +144,19 @@ def is_standalone_exrate_workbook(
             if sheet_name in SKIP_SHEET_NAMES:
                 continue
             ws = wb[sheet_name]
-            for row in ws.iter_rows(
-                min_row=1, max_row=scan_depth, values_only=True,
-            ):
-                row_strs = [
-                    str(c).strip() if c is not None else "" for c in row
-                ]
-                if date_header in row_strs and currency_header in row_strs:
-                    # A month tab exists → normal ledger, not standalone.
-                    return False
+            header_row_idx, cols = find_header_row(
+                ws,
+                (
+                    ("source", date_header),
+                    ("currency", currency_header),
+                ),
+                warn_duplicates=False,
+            )
+            if header_row_idx is not None and "source" in cols:
+                # The ledger scan would process this sheet → normal
+                # ledger, not standalone. (Same condition as
+                # scan_sheet_headers' skip check.)
+                return False
         return True
     except Exception as exc:  # noqa: BLE001 — probe must never propagate
         logger.debug("Standalone detection probe failed: %s", exc)

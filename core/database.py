@@ -125,16 +125,25 @@ class CacheDB:
         """
         # quick_check on a fresh connection — best-effort; treat any failure
         # (including a second DatabaseError) as confirmation of corruption.
+        # The healthy-DB verdict is carried OUT of the suppress block: the
+        # old in-block `raise exc` was itself a sqlite3.DatabaseError, so the
+        # suppress swallowed it and a transient error (e.g. 'database is
+        # locked' from a concurrent instance) fell through to the unlink —
+        # destroying a healthy cache including the CSV-imported offline
+        # rates that cannot be re-fetched from the API.
+        confirmed_corrupt = True
         with contextlib.suppress(sqlite3.DatabaseError):
             probe = sqlite3.connect(self.db_path)
             try:
                 result = probe.execute("PRAGMA quick_check").fetchone()
                 if result is not None and result[0] == "ok":
-                    # quick_check disagrees — re-raise the original error rather
-                    # than silently discard a DB that might be salvageable.
-                    raise exc
+                    confirmed_corrupt = False
             finally:
                 probe.close()
+        if not confirmed_corrupt:
+            # quick_check disagrees — re-raise the original error rather
+            # than silently discard a DB that might be salvageable.
+            raise exc
 
         # Drop any handles we (or quick_check) may have opened on the bad file.
         with self._conn_lock:

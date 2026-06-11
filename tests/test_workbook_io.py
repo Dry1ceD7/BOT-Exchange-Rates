@@ -371,3 +371,37 @@ class TestIsStandaloneExrateWorkbook:
         assert is_standalone_exrate_workbook(
             fp, date_header="Datum", currency_header="Waehrung",
         ) is False
+
+    def test_header_in_rows_6_to_10_is_still_a_ledger(self, tmp_path):
+        """A ledger whose header sits below row 5 must NOT probe standalone.
+
+        The probe's old private 5-row window was shallower than the ledger
+        scan's 10 rows: run 1 processed the file (and created its ExRate
+        sheet), run 2+ then misrouted it onto the standalone path forever —
+        month tabs never re-scanned, formulas frozen against a stale master
+        range. The probe now reuses find_header_row, so its verdict can
+        never diverge from what the ledger scan would process.
+        """
+        def _build(wb):
+            ws = wb.active
+            ws.title = "Jan"
+            for _ in range(6):
+                ws.append(["title banner row"])
+            ws.append(["Date", "Cur", "EX Rate"])  # header at row 7
+            wb.create_sheet("ExRate").append(["Date"])
+
+        fp = self._save(tmp_path, "deep_header.xlsx", _build)
+        assert is_standalone_exrate_workbook(fp) is False
+
+    def test_month_tab_without_cur_header_is_still_a_ledger(self, tmp_path):
+        """The ledger scan needs only the mapped Date column to process a
+        sheet — the probe must use the same condition, not 'Date'+'Cur'
+        in one row."""
+        def _build(wb):
+            ws = wb.active
+            ws.title = "Jan"
+            ws.append(["Date", "Amount", "EX Rate"])  # no 'Cur' header
+            wb.create_sheet("ExRate").append(["Date"])
+
+        fp = self._save(tmp_path, "no_cur.xlsx", _build)
+        assert is_standalone_exrate_workbook(fp) is False

@@ -436,7 +436,8 @@ class TestStandardPathManualRange:
 
         # The stale backup is gone; a fresh backup of this run remains.
         assert not old_backup.exists()
-        fresh = list(backup_dir.glob("ExRate_standalone__bak__*.xlsx"))
+        # Digest-aware glob: backup names are now {stem}__{digest}__bak__...
+        fresh = list(backup_dir.glob("ExRate_standalone__*__bak__*.xlsx"))
         assert fresh, "expected a fresh backup from the standalone run"
 
 

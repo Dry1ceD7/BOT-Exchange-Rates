@@ -849,3 +849,34 @@ class TestFabricatedBuyingCleanup:
             assert row["eur_buying"] == Decimal("36.5000")
         finally:
             reopened.close()
+
+
+class TestRecoverFromCorruption:
+    """A transient DatabaseError must never destroy a HEALTHY cache.db."""
+
+    def test_transient_error_on_healthy_db_reraises_and_preserves(self, db):
+        """quick_check says 'ok' → re-raise, keep the file.
+
+        Regression: the old `raise exc` sat INSIDE a
+        contextlib.suppress(sqlite3.DatabaseError); exc is itself a
+        DatabaseError, so the suppress ate the re-raise and execution fell
+        through to the unlink — a transient 'database is locked' (e.g. a
+        concurrent GUI + scheduler instance) silently destroyed all cached
+        rates, including CSV-imported offline rates that cannot be
+        re-fetched from the API.
+        """
+        import sqlite3
+
+        d = date(2025, 3, 10)
+        db.insert_rate(d, usd_buying=33.4, usd_selling=33.5,
+                       eur_buying=36.1, eur_selling=36.2)
+
+        with pytest.raises(sqlite3.OperationalError):
+            db._recover_from_corruption(
+                sqlite3.OperationalError("database is locked"),
+            )
+
+        # The healthy DB survived with its data intact.
+        result = db.get_rate(d)
+        assert result is not None
+        assert result["usd_buying"] == Decimal("33.4")

@@ -175,11 +175,15 @@ class TestNoCollision:
         # list_backups for file_a should only return file_a's backup
         a_backups = mgr.list_backups(file_a)
         assert len(a_backups) == 1
-        assert "ledger__bak__" in os.path.basename(a_backups[0])
+        assert os.path.basename(a_backups[0]).startswith(
+            mgr._get_backup_key(file_a) + "__bak__"
+        )
 
         b_backups = mgr.list_backups(file_b)
         assert len(b_backups) == 1
-        assert "ledger_2025__bak__" in os.path.basename(b_backups[0])
+        assert os.path.basename(b_backups[0]).startswith(
+            mgr._get_backup_key(file_b) + "__bak__"
+        )
 
 
 # =========================================================================
@@ -312,7 +316,8 @@ class TestInspectBackups:
         assert len(records) == 1
         rec = records[0]
         assert set(rec) == {"path", "key", "timestamp", "size_bytes"}
-        assert rec["key"] == "ledger"
+        assert rec["key"] == mgr._get_backup_key(test_file)
+        assert mgr.display_stem(rec["key"]) == "ledger"
         assert isinstance(rec["timestamp"], datetime)
         # FAKE_XLSX_CONTENT_ORIGINAL is 26 bytes.
         assert rec["size_bytes"] == len(b"FAKE_XLSX_CONTENT_ORIGINAL")
@@ -364,9 +369,14 @@ class TestGroupedBackups:
         mgr.create_backup(file_b)
 
         grouped = mgr.list_grouped_backups()
-        assert set(grouped) == {"alpha", "beta"}
-        assert len(grouped["alpha"]) == 2
-        assert len(grouped["beta"]) == 1
+        key_a = mgr._get_backup_key(file_a)
+        key_b = mgr._get_backup_key(file_b)
+        assert set(grouped) == {key_a, key_b}
+        assert len(grouped[key_a]) == 2
+        assert len(grouped[key_b]) == 1
+        # The display helper strips the digest back to the human stem.
+        assert mgr.display_stem(key_a) == "alpha"
+        assert mgr.display_stem(key_b) == "beta"
 
     def test_keys_sorted(self, backup_env):
         mgr, _, _, tmpdir = backup_env
@@ -376,7 +386,9 @@ class TestGroupedBackups:
                 f.write(b"X")
             mgr.create_backup(p)
         grouped = mgr.list_grouped_backups()
-        assert list(grouped) == ["alpha", "mid", "zeta"]
+        assert [mgr.display_stem(k) for k in grouped] == [
+            "alpha", "mid", "zeta",
+        ]
 
     def test_empty_when_no_backups(self, backup_env):
         mgr, _, _, _ = backup_env
@@ -483,3 +495,93 @@ class TestRestoreSpecific:
         assert os.path.basename(used) == os.path.basename(backup)
         with open(test_file, "rb") as f:
             assert f.read() == b"FAKE_XLSX_CONTENT_ORIGINAL"
+
+
+# =========================================================================
+#  COLLISION-PROOF KEYS (source digest)
+# =========================================================================
+
+class TestCollisionProofKeys:
+    """Same stem, different directory or extension = separate backup pools.
+
+    Regression: the backup key was the bare filename stem, so
+    ``2025/ledger.xlsx`` and ``2026/ledger.xlsx`` shared one pool —
+    restore_latest could silently overwrite a ledger with a DIFFERENT
+    file's backup. Year-folder archives with identically named monthly
+    ledgers are exactly this layout.
+    """
+
+    def test_same_stem_different_dirs_restore_their_own_backup(
+        self, backup_env,
+    ):
+        mgr, _, _, tmpdir = backup_env
+        dir_a = os.path.join(tmpdir, "2025")
+        dir_b = os.path.join(tmpdir, "2026")
+        os.makedirs(dir_a)
+        os.makedirs(dir_b)
+        file_a = os.path.join(dir_a, "ledger.xlsx")
+        file_b = os.path.join(dir_b, "ledger.xlsx")
+        with open(file_a, "wb") as f:
+            f.write(b"CONTENT-A-2025")
+        with open(file_b, "wb") as f:
+            f.write(b"CONTENT-B-2026")
+
+        mgr.create_backup(file_a)
+        mgr.create_backup(file_b)
+
+        # Corrupt A, restore A — must get A's content, never B's.
+        with open(file_a, "wb") as f:
+            f.write(b"CORRUPTED")
+        mgr.restore_latest(file_a)
+        with open(file_a, "rb") as f:
+            assert f.read() == b"CONTENT-A-2025"
+
+    def test_xlsx_and_xlsm_pools_are_separate(self, backup_env):
+        mgr, _, _, tmpdir = backup_env
+        file_x = os.path.join(tmpdir, "book.xlsx")
+        file_m = os.path.join(tmpdir, "book.xlsm")
+        with open(file_x, "wb") as f:
+            f.write(b"PLAIN")
+        with open(file_m, "wb") as f:
+            f.write(b"MACRO")
+
+        mgr.create_backup(file_x)
+        mgr.create_backup(file_m)
+
+        with open(file_m, "wb") as f:
+            f.write(b"CORRUPTED")
+        mgr.restore_latest(file_m)
+        with open(file_m, "rb") as f:
+            assert f.read() == b"MACRO"
+
+    def test_restore_specific_refuses_other_files_backup(self, backup_env):
+        mgr, _, _, tmpdir = backup_env
+        dir_a = os.path.join(tmpdir, "2025")
+        dir_b = os.path.join(tmpdir, "2026")
+        os.makedirs(dir_a)
+        os.makedirs(dir_b)
+        file_a = os.path.join(dir_a, "ledger.xlsx")
+        file_b = os.path.join(dir_b, "ledger.xlsx")
+        with open(file_a, "wb") as f:
+            f.write(b"A")
+        with open(file_b, "wb") as f:
+            f.write(b"B")
+        mgr.create_backup(file_a)
+        b_backup = mgr.create_backup(file_b)
+
+        with pytest.raises(BackupError):
+            mgr.restore_specific(file_a, b_backup)
+
+    def test_legacy_bare_stem_backup_still_restores(self, backup_env):
+        """Pre-digest backups (bare-stem names) stay restorable."""
+        mgr, test_file, backup_dir, _ = backup_env
+        ts = datetime.now().strftime(mgr._TS_FORMAT)
+        legacy = os.path.join(backup_dir, f"ledger__bak__{ts}.xlsx")
+        with open(legacy, "wb") as f:
+            f.write(b"LEGACY_CONTENT")
+
+        with open(test_file, "wb") as f:
+            f.write(b"CORRUPTED")
+        mgr.restore_latest(test_file)
+        with open(test_file, "rb") as f:
+            assert f.read() == b"LEGACY_CONTENT"

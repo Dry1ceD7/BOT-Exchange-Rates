@@ -540,13 +540,21 @@ class LedgerEngine:
         # membership alone would never refetch such a date and its trading-day
         # cells stayed blank. The upsert in insert_rates_bulk fills only the
         # NULL columns, so the surviving currency's values are kept.
+        # Weekday HOLIDAYS are excluded: BOT publishes nothing for them, so
+        # counting them as misses made every file of every batch re-hit the
+        # API forever (~15+ Thai weekday holidays per year window) and broke
+        # the offline CSV path — the unavoidable holiday-date fetch raised on
+        # machines with no network even though every needed rate was cached.
         _required_cols = (
             "usd_buying", "usd_selling", "eur_buying", "eur_selling",
         )
+        holiday_set = set(holidays_list)
         missing_dates = {
             d for d in all_needed
-            if d not in cached_rates or any(
-                cached_rates[d][col] is None for col in _required_cols
+            if d not in holiday_set and (
+                d not in cached_rates or any(
+                    cached_rates[d][col] is None for col in _required_cols
+                )
             )
         }
         usd_data, eur_data = [], []
@@ -740,6 +748,18 @@ class LedgerEngine:
         currency fetch, no extra workbook loads.
         """
         out: dict[str, dict[date, Decimal]] = {}
+        # Known holidays are non-publishing days — exclude them from the
+        # miss set (same contract as the USD/EUR path) so cached extras
+        # don't trigger a perpetual API refetch over holiday gaps.
+        holiday_set: set[date] = set()
+        for yr in range(start_dt.year, end_dt.year + 1):
+            for date_str, _desc in self.cache.get_holidays(yr):
+                try:
+                    holiday_set.add(
+                        datetime.strptime(date_str, "%Y-%m-%d").date()
+                    )
+                except (ValueError, TypeError):
+                    continue
         for ccy in extra_currencies:
             # ── Step 1: seed from cache (rates_multi) ────────────────
             by_date: dict[date, Decimal] = self.cache.get_rates_multi(
@@ -748,7 +768,7 @@ class LedgerEngine:
 
             # ── Step 2: find weekday dates missing from cache ─────────
             all_weekdays: set[date] = weekdays_between(start_dt, end_dt)
-            missing_dates = all_weekdays - set(by_date.keys())
+            missing_dates = all_weekdays - set(by_date.keys()) - holiday_set
 
             # ── Step 3: API fetch for misses only ─────────────────────
             if missing_dates:

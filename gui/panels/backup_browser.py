@@ -169,9 +169,12 @@ class BackupBrowser(SafePanel, ctk.CTkToplevel):
         for key, records in grouped.items():
             header = ctk.CTkFrame(self._scroll, fg_color="transparent")
             header.pack(fill="x", padx=6, pady=(10, 0))
+            # Group label shows the human stem; the digest suffix in the key
+            # is an identity tag, not something an accountant should read.
+            display = self.backup_mgr.display_stem(key)
             ctk.CTkLabel(
                 header,
-                text=f"{key}.xlsx  ({len(records)} backup"
+                text=f"{display}.xlsx  ({len(records)} backup"
                      f"{'s' if len(records) != 1 else ''})",
                 font=ctk.CTkFont(size=13, weight="bold"),
                 text_color=t["modal_text"], anchor="w",
@@ -222,13 +225,20 @@ class BackupBrowser(SafePanel, ctk.CTkToplevel):
         if self._selected_target_key is None:
             return None
         last = getattr(self.app, "last_processed_path", None)
-        if last and Path(last).stem == self._selected_target_key:
+        # Auto-target only on the FULL backup key (stem + source digest) —
+        # a bare-stem match could aim the restore at a same-named but
+        # unrelated file from another folder. Legacy (pre-digest) keys
+        # never match here and fall through to the explicit chooser.
+        if last and self.backup_mgr._get_backup_key(
+            last,
+        ) == self._selected_target_key:
             return last
+        display = self.backup_mgr.display_stem(self._selected_target_key)
         from tkinter import filedialog
         chosen = filedialog.askopenfilename(
             parent=self,
-            title=f"Locate {self._selected_target_key}.xlsx to restore",
-            initialfile=f"{self._selected_target_key}.xlsx",
+            title=f"Locate {display}.xlsx to restore",
+            initialfile=f"{display}.xlsx",
             filetypes=[
                 ("Excel workbooks", "*.xlsx *.xlsm"),
                 ("All files", "*.*"),

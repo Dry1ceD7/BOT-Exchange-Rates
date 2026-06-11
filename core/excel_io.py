@@ -138,10 +138,10 @@ def find_header_row(
 
     Canonical implementation behind :func:`scan_sheet_headers` (ledger write
     path), ``core.ledger_processing.prescan_target_dates_and_currencies``,
-    and ``core.prescan._scan_xlsx``. Depth note: all header scans share the
-    10-row default; the standalone-ExRate PROBE
-    (``core.workbook_io.is_standalone_exrate_workbook``) keeps its separate
-    5-row window — it only recognises month tabs, it never maps columns.
+    ``core.prescan._scan_xlsx``, and the standalone-ExRate routing PROBE
+    (``core.workbook_io.is_standalone_exrate_workbook``) — the probe reuses
+    this primitive so its month-tab recognition can never diverge from what
+    the ledger scan would actually process.
 
     Returns:
         ``(header_row_idx, col_indices)`` — the 1-based header row index (or

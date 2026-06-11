@@ -2015,3 +2015,37 @@ class TestCacheFloatContamination:
         assert raw == (
             "34.1235", "text", "34.5679", "37.1235", "37.6543",
         )
+
+
+class TestHolidayNeverCacheMiss:
+    """Weekday holidays are non-publishing days — never API misses.
+
+    Regression: the miss set was built from ALL weekdays, but BOT publishes
+    no rate on holidays and nothing negative-caches them, so a fully-cached
+    window with one weekday holiday re-hit the rates API on every file of
+    every batch forever — and broke the offline CSV path, whose unavoidable
+    holiday-date fetch raised on machines with no network.
+    """
+
+    def test_cached_window_with_weekday_holiday_makes_no_rate_calls(
+        self, engine, monkeypatch,
+    ):
+        fixed_today = date(2025, 3, 14)  # Friday
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: fixed_today)
+
+        # Window: Mon 03-10 .. Fri 03-14; Wed 03-12 is a weekday holiday.
+        engine.cache.insert_holidays([("2025-03-12", "Test Holiday")])
+        for d in (
+            date(2025, 3, 10), date(2025, 3, 11),
+            date(2025, 3, 13), date(2025, 3, 14),
+        ):
+            engine.cache.insert_rate(
+                d, usd_buying=33.4, usd_selling=33.5,
+                eur_buying=36.1, eur_selling=36.2,
+            )
+
+        asyncio.run(engine._preload_api_data(set(), "2025-03-10"))
+
+        # Every published trading day is cached; the holiday must not count
+        # as a miss — zero rate-API calls.
+        assert engine.api.get_exchange_rates.await_count == 0

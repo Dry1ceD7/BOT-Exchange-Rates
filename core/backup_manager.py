@@ -9,9 +9,14 @@ Protects against file corruption during in-place editing with automatic
 garbage collection for legacy hardware.
 """
 
+import hashlib
+import logging
+import re
 import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class BackupError(Exception):
@@ -45,11 +50,31 @@ class BackupManager:
     # same-second collisions that would overwrite a pristine copy.
     _TS_FORMAT = "%Y%m%d_%H%M%S_%f"
 
+    def _source_digest(self, filepath: str) -> str:
+        """Short stable discriminator for a source file's identity.
+
+        The bare stem collided across directories (``2025/ledger.xlsx`` vs
+        ``2026/ledger.xlsx``) and across extensions (``.xlsx`` vs ``.xlsm``),
+        merging different files' backup pools — restore could then silently
+        overwrite a ledger with a DIFFERENT file's backup. The digest covers
+        the resolved parent directory plus the original extension, so each
+        source file owns its own pool. (sha1 is an identity tag here, not a
+        security boundary.)
+        """
+        p = Path(filepath)
+        try:
+            parent = str(p.resolve().parent)
+        except OSError:
+            parent = str(p.parent)
+        raw = f"{parent}|{p.suffix.lower()}"
+        return hashlib.sha1(  # noqa: S324 — non-crypto identity tag
+            raw.encode("utf-8"),
+        ).hexdigest()[:8]
+
     def _generate_backup_name(self, filepath: str) -> str:
         """Generates a timestamped backup filename with unique separator."""
-        basename = Path(filepath).stem
         timestamp = datetime.now().strftime(self._TS_FORMAT)
-        return f"{basename}__bak__{timestamp}.xlsx"
+        return f"{self._get_backup_key(filepath)}__bak__{timestamp}.xlsx"
 
     def _parse_backup_timestamp(self, fpath: str) -> datetime | None:
         """Extract the embedded timestamp from a backup filename.
@@ -69,8 +94,29 @@ class BackupManager:
             return None
 
     def _get_backup_key(self, filepath: str) -> str:
-        """Extracts the base name (without extension) used as a lookup key."""
+        """Collision-proof lookup key: ``{stem}__{source-digest}``.
+
+        See :meth:`_source_digest` — the bare stem alone merged backup pools
+        of identically named ledgers from different folders/extensions.
+        Legacy (pre-digest) backups named ``{stem}__bak__...`` remain
+        restorable via the fallbacks in :meth:`restore_latest` /
+        :meth:`restore_specific`.
+        """
+        return f"{Path(filepath).stem}__{self._source_digest(filepath)}"
+
+    def _legacy_backup_key(self, filepath: str) -> str:
+        """The pre-digest key (bare stem) for legacy backup fallback."""
         return Path(filepath).stem
+
+    @staticmethod
+    def display_stem(key: str) -> str:
+        """Human-readable stem for a backup key (digest stripped).
+
+        ``ledger__a8f487f3`` -> ``ledger``; legacy bare-stem keys pass
+        through unchanged. For UI labels only — never use the result to
+        match files (that is what the full key is for).
+        """
+        return re.sub(r"__[0-9a-f]{8}$", "", key)
 
     def create_backup(self, filepath: str) -> str:
         """
@@ -123,6 +169,28 @@ class BackupManager:
         )
 
         if not matches:
+            # Legacy fallback: backups created before the digest key carry
+            # only the bare stem. They cannot prove which directory or
+            # extension they came from, so log the ambiguity.
+            legacy = self._legacy_backup_key(filepath)
+            matches = sorted(
+                (
+                    str(p)
+                    for p in Path(self.backup_dir).glob(
+                        f"{legacy}__bak__*.xlsx",
+                    )
+                ),
+                reverse=True,
+            )
+            if matches:
+                logger.warning(
+                    "Restoring from a LEGACY (pre-digest) backup for %s — "
+                    "legacy backups cannot prove their source directory/"
+                    "extension; verify the restored content.",
+                    Path(filepath).name,
+                )
+
+        if not matches:
             raise BackupError(
                 f"No backup found for '{Path(filepath).name}'.\n"
                 f"The file must have been processed at least once to have a backup."
@@ -156,13 +224,22 @@ class BackupManager:
         """
         # Guard against restoring a backup that belongs to a DIFFERENT source
         # file (e.g. a caller passing the wrong path). The embedded key must
-        # match the target file's key.
+        # match the target file's key. Legacy (pre-digest) names match on the
+        # bare stem only — allowed for restorability of old backups, but
+        # logged because they cannot prove their source directory/extension.
         expected_key = self._get_backup_key(filepath)
         backup_name = Path(backup_path).name
         if not backup_name.startswith(f"{expected_key}__bak__"):
-            raise BackupError(
-                f"Backup '{backup_name}' does not belong to "
-                f"'{Path(filepath).name}'."
+            legacy_prefix = f"{self._legacy_backup_key(filepath)}__bak__"
+            if not backup_name.startswith(legacy_prefix):
+                raise BackupError(
+                    f"Backup '{backup_name}' does not belong to "
+                    f"'{Path(filepath).name}'."
+                )
+            logger.warning(
+                "Restoring LEGACY (pre-digest) backup '%s' over %s — "
+                "ownership matched on the bare filename only.",
+                backup_name, Path(filepath).name,
             )
 
         # Containment check: the chosen backup must resolve to a path INSIDE
@@ -262,10 +339,24 @@ class BackupManager:
 
         # Return str paths (newest first) to match the previous glob.glob
         # contract: callers display/compare these as strings.
-        return sorted(
+        matches = sorted(
             (str(p) for p in Path(self.backup_dir).glob(glob_pattern)),
             reverse=True,
         )
+        if filepath and not matches:
+            # Legacy (pre-digest) backups: bare-stem names. Kept listable so
+            # the GUI revert pre-check still finds them.
+            legacy = self._legacy_backup_key(filepath)
+            matches = sorted(
+                (
+                    str(p)
+                    for p in Path(self.backup_dir).glob(
+                        f"{legacy}__bak__*.xlsx",
+                    )
+                ),
+                reverse=True,
+            )
+        return matches
 
     def inspect_backups(self, filepath: str = None) -> list[dict]:
         """List backups with lightweight metadata (NO workbook loading).
