@@ -876,6 +876,10 @@ class TestKeyboardAccessibility:
         # then fire through Tk's event machinery on the realised root.
         dialog.deiconify()
         dialog.bind("<Return>", lambda e: dialog._on_activate())
+        # Key events are delivered to the FOCUS window. On a WM-less display
+        # (xvfb CI) mapping does not grant focus, so without focus_force the
+        # generated KeyPress is silently dropped.
+        dialog.focus_force()
         dialog.update()
         dialog.event_generate("<Return>", when="now")
         dialog.update()
@@ -888,6 +892,9 @@ class TestKeyboardAccessibility:
         dialog._on_close = lambda: called.append(True)
         dialog.deiconify()
         dialog.bind("<Escape>", lambda e: dialog._on_close())
+        # See test_return_invokes_activate: key events need the focus window
+        # on a WM-less display (xvfb CI).
+        dialog.focus_force()
         dialog.update()
         dialog.event_generate("<Escape>", when="now")
         dialog.update()

@@ -76,10 +76,15 @@ class TestSettingsModalConstruction:
 
     def test_geometry_width_is_420(self, tk_root):
         modal, _ = _make_modal(tk_root)
-        geo = modal.geometry()
         # geometry() returns "WxH+X+Y". The height is now screen-capped (so the
         # window always fits a small legacy screen and the content scrolls), but
         # the width stays fixed at 420 for a tidy single-column layout.
+        # On a WM-less display (xvfb CI) a withdrawn toplevel never realises
+        # its size request — geometry() reports "1x1..." until the window is
+        # mapped and the event loop runs. Map it and pump before reading.
+        modal.deiconify()
+        modal.update()
+        geo = modal.geometry()
         assert geo.startswith("420x"), f"unexpected geometry: {geo}"
         modal.destroy()
 
