@@ -198,6 +198,46 @@ class TestGetInstallerAssetUrl:
         assert result["size"] == 50000000
         assert result["error"] is None
 
+    def test_picks_installer_checksum_among_many(self):
+        """With several .sha256 assets, the installer's EXACT one is chosen.
+
+        The old endswith('.sha256') match took whichever checksum asset
+        iterated last — a release that also ships .dmg/.tar.gz checksums
+        would feed the mandatory verify the wrong platform's digest and
+        every update would fail. The match must be by exact asset name.
+        """
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "assets": [
+                {
+                    "name": "BOT-ExRate-Setup.exe",
+                    "browser_download_url": "https://dl/setup.exe",
+                    "size": 50000000,
+                },
+                {
+                    "name": "BOT-ExRate-Setup.exe.sha256",
+                    "browser_download_url": "https://dl/setup.exe.sha256",
+                    "size": 64,
+                },
+                {
+                    "name": "BOT-ExRate-macOS.dmg.sha256",
+                    "browser_download_url": "https://dl/macos.dmg.sha256",
+                    "size": 64,
+                },
+                {
+                    "name": "BOT-ExRate-Linux.tar.gz.sha256",
+                    "browser_download_url": "https://dl/linux.tar.gz.sha256",
+                    "size": 64,
+                },
+            ],
+        }
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch("core.auto_updater.httpx.get", return_value=mock_resp):
+            result = get_installer_asset_url("3.6.0")
+
+        assert result["sha256_url"] == "https://dl/setup.exe.sha256"
+
     def test_no_exe_in_assets(self):
         """Returns error when no .exe found in release assets."""
         mock_resp = MagicMock()

@@ -36,6 +36,30 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
+      # The packaging-version update comparison, the exe version resource,
+      # and the installer AppVersion must all agree — fail the release
+      # before building anything if the tag and core/version.py diverge.
+      - name: Tag/version consistency gate
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          uv run python - <<'EOF'
+          import os
+          import sys
+
+          from core.version import __version__
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          expected = f"v{__version__}"
+          if tag != expected:
+              sys.exit(
+                  f"Tag {tag!r} does not match core/version.py ({expected!r})."
+                  " Bump core/version.py or retag."
+              )
+          print(f"Tag matches core/version.py: {tag}")
+          EOF
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+
       - name: Lint with ruff
         run: uv run ruff check .
 
@@ -166,9 +190,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # Extract version from tag (e.g., v3.0.9 -> 3.0.9)
-          $version = "${{ github.ref_name }}".TrimStart("v")
-          if (-not $version) { $version = "0.0.0" }
+          # Single source of truth: core/version.py (the consistency gate
+          # already proved it matches the tag; workflow_dispatch runs get the
+          # real version too instead of the old '0.0.0' fallback).
+          $version = (uv run python -c "from core.version import __version__; print(__version__)") | Select-Object -Last 1
           Write-Host "Building installer for version: $version"
 
           # Inno Setup is pre-installed on windows-latest runners
@@ -225,12 +250,29 @@ jobs:
           cd dist
           tar -czf BOT-ExRate-Linux.tar.gz BOT-ExRate/
 
+      # ── Windows: checksum asset the self-updater REQUIRES ─────────────
+      # core/auto_updater.py refuses to download/apply any update without a
+      # "<installer>.sha256" release asset (mandatory integrity verify) —
+      # v3.5.1 shipped without one, so the in-app updater could not complete
+      # an update at all. Windows-only on purpose: the updater only ever
+      # downloads the .exe, and clients <= 3.5.1 match ANY *.sha256 asset
+      # (last one wins), so publishing dmg/tar.gz checksums too would feed
+      # them the wrong digest and fail the verify.
+      - name: Generate installer checksum (.sha256)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd dist
+          sha256sum BOT-ExRate-Setup.exe > BOT-ExRate-Setup.exe.sha256
+          cat BOT-ExRate-Setup.exe.sha256
+
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: |
             dist/BOT-ExRate-Setup.exe
+            dist/BOT-ExRate-Setup.exe.sha256
             dist/BOT-ExRate-macOS.dmg
             dist/BOT-ExRate-Linux.tar.gz
           retention-days: 30

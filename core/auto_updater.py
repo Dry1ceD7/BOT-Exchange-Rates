@@ -252,15 +252,25 @@ def get_installer_asset_url(tag: str) -> dict:
         resp.raise_for_status()
         data = resp.json()
 
-        # Look for .exe installer asset and optional .sha256 checksum
-        for asset in data.get("assets", []):
+        # Look for the .exe installer asset, then its checksum by EXACT
+        # name ("<installer>.sha256"). The old endswith(".sha256") match
+        # took whichever checksum asset iterated last — wrong as soon as a
+        # release also ships .dmg/.tar.gz checksums, which would make the
+        # mandatory verify fail against the wrong platform's digest.
+        assets = data.get("assets", [])
+        for asset in assets:
             name = asset.get("name", "")
             if name.lower().endswith(".exe"):
                 result["url"] = asset.get("browser_download_url")
                 result["filename"] = name
                 result["size"] = asset.get("size", 0)
-            elif name.lower().endswith(".sha256"):
-                result["sha256_url"] = asset.get("browser_download_url")
+                break
+        if result["filename"]:
+            wanted = f"{result['filename']}.sha256".lower()
+            for asset in assets:
+                if asset.get("name", "").lower() == wanted:
+                    result["sha256_url"] = asset.get("browser_download_url")
+                    break
 
         if result["url"] is None:
             result["error"] = "No .exe installer found in release assets"
