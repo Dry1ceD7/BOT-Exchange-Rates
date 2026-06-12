@@ -443,6 +443,123 @@ class TestQueueClearedAfterRun:
 
 
 # ---------------------------------------------------------------------------
+# round-11 — a scheduled completion must NOT repoint the Reveal button
+# ---------------------------------------------------------------------------
+
+class TestScheduledCompletionLeavesRevealAlone:
+    """A scheduler-fired run processes its own snapshot (handlers), not
+    self.file_queue — so _show_batch_complete must not resolve a reveal
+    target from the user's PENDING interactive queue, nor clear a reveal
+    state that pointed at a genuinely processed file."""
+
+    def test_scheduled_completion_does_not_repoint_reveal(self):
+        from gui.app import BOTExrateApp
+
+        # User has a pending (unprocessed) selection while the scheduler fires.
+        app = _make_app(batch_running=True, file_queue=["pending.xlsx"])
+        app._scheduled_run_active = True
+        app._render_failed_files = MagicMock()
+        app._announce_scheduled_run = MagicMock()
+
+        BOTExrateApp._show_batch_complete(app, success=1, fail=0, errors=[])
+
+        # Reveal must NOT be packed pointing at the never-processed file.
+        app.btn_reveal.pack.assert_not_called()
+        assert app.last_processed_path != "pending.xlsx"
+
+    def test_scheduled_completion_preserves_prior_reveal_state(self):
+        from gui.app import BOTExrateApp
+
+        # Empty interactive queue + a reveal target from an earlier manual
+        # run: the scheduled completion must leave both untouched (the old
+        # code cleared last_processed_path and pack_forget the button).
+        app = _make_app(batch_running=True, file_queue=[])
+        app._scheduled_run_active = True
+        app.last_processed_path = "/prev/jan.xlsx"
+        app._render_failed_files = MagicMock()
+        app._announce_scheduled_run = MagicMock()
+
+        BOTExrateApp._show_batch_complete(app, success=1, fail=0, errors=[])
+
+        assert app.last_processed_path == "/prev/jan.xlsx"
+        app.btn_reveal.pack_forget.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# round-11 — dialog construction failure must release the _exrate_running
+# lease (and restore Process/Revert) instead of wedging the UI forever
+# ---------------------------------------------------------------------------
+
+class TestDialogConstructionFailureReleasesLease:
+    """_on_export_exrate/_open_rate_audit set _exrate_running=True and
+    disable Process/Revert BEFORE constructing their dialog; a construction
+    failure (e.g. grab/transient TclError on X11) previously left the flag
+    stuck True with the buttons dead until restart."""
+
+    def test_exrate_dialog_failure_releases_lease(self, monkeypatch):
+        import tkinter
+
+        import gui.panels.exrate_dialog as dlg_mod
+        from gui.app import BOTExrateApp
+
+        app = _make_app(file_queue=["a.xlsx"])
+        app._poll_exrate_done = MagicMock()
+        monkeypatch.setattr(
+            dlg_mod, "show_exrate_dialog",
+            MagicMock(side_effect=tkinter.TclError("window not viewable")),
+        )
+
+        BOTExrateApp._on_export_exrate(app)
+
+        assert app._exrate_running is False
+        # Process restored according to the queue; Revert re-evaluated.
+        app.btn_process.configure.assert_any_call(state="normal")
+        # The poll loop must NOT start for a dialog that never opened.
+        app._poll_exrate_done.assert_not_called()
+
+    def test_exrate_dialog_failure_with_empty_queue_keeps_process_disabled(
+        self, monkeypatch,
+    ):
+        import tkinter
+
+        import gui.panels.exrate_dialog as dlg_mod
+        from gui.app import BOTExrateApp
+
+        app = _make_app(file_queue=[])
+        app._poll_exrate_done = MagicMock()
+        monkeypatch.setattr(
+            dlg_mod, "show_exrate_dialog",
+            MagicMock(side_effect=tkinter.TclError("boom")),
+        )
+
+        BOTExrateApp._on_export_exrate(app)
+
+        assert app._exrate_running is False
+        # Idle-state contract: no queue -> Process stays disabled.
+        last_state = app.btn_process.configure.call_args.kwargs["state"]
+        assert last_state == "disabled"
+
+    def test_rate_audit_dialog_failure_releases_lease(self, monkeypatch):
+        import tkinter
+
+        import gui.panels.rate_audit_dialog as ra_mod
+        from gui.app import BOTExrateApp
+
+        app = _make_app(file_queue=["a.xlsx"])
+        app._poll_rate_audit_done = MagicMock()
+        monkeypatch.setattr(
+            ra_mod, "show_rate_audit_dialog",
+            MagicMock(side_effect=tkinter.TclError("window not viewable")),
+        )
+
+        BOTExrateApp._open_rate_audit(app)
+
+        assert app._exrate_running is False
+        app.btn_process.configure.assert_any_call(state="normal")
+        app._poll_rate_audit_done.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # round-6 #4 — a dry run reports SIMULATION and never offers a reveal
 # ---------------------------------------------------------------------------
 
@@ -788,6 +905,8 @@ class TestFolderDropOffloaded:
         # guarded marshal-back and thread registration are exercised (#1).
         app._safe_marshal = BOTExrateApp._safe_marshal.__get__(app)
         app._register_worker = BOTExrateApp._register_worker.__get__(app)
+        # round-11: the worker's finally now unregisters by its unique key.
+        app._unregister_worker = BOTExrateApp._unregister_worker.__get__(app)
 
         # Fake Thread that captures the target instead of running it on a real
         # OS thread — keeps the test deterministic and leak-free.
@@ -825,6 +944,9 @@ class TestFolderDropOffloaded:
         # Run the captured worker target; it must marshal the result via after().
         captured["target"]()
         assert len(scheduled) == 1
+        # round-11: the finished transient unregistered itself (by unique
+        # key), so it no longer lingers in the registry.
+        assert "FolderResolveWorker" not in app.thread_registry.status()
         # Executing the marshalled callback delivers the resolved files.
         scheduled[0][1]()
         app._finish_drop.assert_called_once()

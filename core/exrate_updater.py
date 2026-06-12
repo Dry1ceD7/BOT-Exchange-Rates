@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import openpyxl
+from openpyxl.cell.cell import MergedCell
 from openpyxl.utils import column_index_from_string
 
 from core.audit_logger import AuditCollector, AuditRecord
@@ -145,6 +146,7 @@ class WorkbookWriter:
         master_holidays_set,
         holidays_names,
         computed_start,
+        end_date: date | None = None,
         rate_type: str | None = None,
         extra_currency_rates: dict | None = None,
         unsupported_currencies: list[str] | None = None,
@@ -184,9 +186,13 @@ class WorkbookWriter:
             # ── STEP 1: Build ExRate master sheet ────────────────────────
             # Returns {ccy: column_letter} for the appended extra currencies so
             # their columns can be wired into the ledger XLOOKUP formula.
+            # end_date=None keeps the default extend-to-today behavior;
+            # process_ledger passes the book's own newest date for archival
+            # (past-year) books so they stop growing to the current date.
             exrate_col_map = update_master_exrate_sheet(
                 wb, usd_buying, usd_selling, eur_buying, eur_selling,
                 list(master_holidays_set), holidays_names, computed_start,
+                end_date=end_date,
                 extra_currency_rates=extra_currency_rates,
             )
 
@@ -205,13 +211,11 @@ class WorkbookWriter:
             )
 
             # ── STEP 3: Inject XLOOKUP formulas into monthly tabs ────────
-            exrate_last_row = 2
-            if "ExRate" in wb.sheetnames:
-                ws_ex = wb["ExRate"]
-                exrate_last_row = max(ws_ex.max_row or 2, 2)
-
+            # The formulas use whole-column ExRate references ($A:$A), so
+            # the master's last row is no longer threaded through — a grown
+            # master can never strand stale row-pinned ranges again.
             inject_xlookup_formulas(
-                wb, sheet_maps, exrate_last_row,
+                wb, sheet_maps,
                 parse_date_fn=self._engine._parse_date,
                 emit_fn=self._engine._emit,
                 dry_run=dry_run,
@@ -311,12 +315,19 @@ class WorkbookWriter:
         for sheet_name, mapping in sheet_maps.items():
             cols = mapping["columns"]
             cur_idx = cols.get("currency")
+            out_idx = cols.get("out_rate")
             src_idx = cols["source"] + 1
             if cur_idx is None:
                 continue
             cur_col = cur_idx + 1
             ws = wb[sheet_name]
             for row_idx in range(mapping["header_row"] + 1, ws.max_row + 1):
+                # Mirror the injector's merged-cell skip: a non-anchor
+                # merged Date/EX Rate cell was never written, so it must
+                # not be counted as resolved/unfilled here — the injector
+                # already emits a dedicated merged-rows warning.
+                if self._row_has_merged_cells(ws, row_idx, src_idx, out_idx):
+                    continue
                 cur_val = ws.cell(row=row_idx, column=cur_col).value
                 if cur_val is None:
                     continue
@@ -448,6 +459,11 @@ class WorkbookWriter:
             cur_col = cur_idx + 1
             ws = wb[sheet_name]
             for row_idx in range(mapping["header_row"] + 1, ws.max_row + 1):
+                # Merged Date/EX Rate cells were never written by the
+                # injector — recording a new_value for them would fabricate
+                # an audit entry for an untouched cell.
+                if self._row_has_merged_cells(ws, row_idx, src_idx, out_idx):
+                    continue
                 cur_val = ws.cell(row=row_idx, column=cur_col).value
                 if cur_val is None:
                     continue
@@ -514,6 +530,23 @@ class WorkbookWriter:
         if value is None:
             return ""
         return str(value)
+
+    @staticmethod
+    def _row_has_merged_cells(ws, row_idx: int, src_col, out_col_idx) -> bool:
+        """True when the row's Date or EX Rate cell is a non-anchor MergedCell.
+
+        ``inject_xlookup_formulas`` skips such rows (merged cells are
+        read-only), so the warning/audit mirrors must skip them identically —
+        otherwise a merged row with an available rate is reported as resolved
+        and the audit CSV records a new_value for a cell that was never
+        written. ``out_col_idx`` is the 0-based column index (may be None
+        for sheets without an EX Rate column); ``src_col`` is 1-based.
+        """
+        if isinstance(ws.cell(row=row_idx, column=src_col), MergedCell):
+            return True
+        return out_col_idx is not None and isinstance(
+            ws.cell(row=row_idx, column=out_col_idx + 1), MergedCell
+        )
 
     @staticmethod
     def _rate_available(

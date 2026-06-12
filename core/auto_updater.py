@@ -709,13 +709,3 @@ def restart_app() -> None:
 
     sys.exit(0)
 
-
-# ---------------------------------------------------------------------------
-# BACK-COMPAT ALIASES
-# ---------------------------------------------------------------------------
-# These helpers were promoted from private (_name) to public (name) so other
-# modules (e.g. GUI panels) can import them across package boundaries. The old
-# underscore names are kept as thin module-level aliases so existing importers
-# keep working until they migrate to the public names. Remove after migration.
-_get_install_dir = get_install_dir
-_fetch_expected_checksum = fetch_expected_checksum

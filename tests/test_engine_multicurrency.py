@@ -547,7 +547,9 @@ class TestLedgerMultiCurrency:
             assert 'B3="GBP"' in gbp_formula
             from openpyxl.utils import get_column_letter
             col_letter = get_column_letter(gbp_col)
-            assert f"ExRate!${col_letter}$2" in gbp_formula
+            # round-11: whole-column master references ($F:$F) — see
+            # core/excel_io.py _guarded_lookup (stale-N elimination).
+            assert f"ExRate!${col_letter}:${col_letter}" in gbp_formula
         finally:
             wb.close()
 
@@ -958,7 +960,8 @@ class TestRateTypeSnapshot:
         try:
             formula = wb["Jan"].cell(row=2, column=3).value
             # Buying columns are B (USD) / D (EUR); selling would be C / E.
-            assert "ExRate!$B$2" in formula
-            assert "ExRate!$C$2" not in formula
+            # (round-11: whole-column master references, $B:$B.)
+            assert "ExRate!$B:$B" in formula
+            assert "ExRate!$C:$C" not in formula
         finally:
             wb.close()

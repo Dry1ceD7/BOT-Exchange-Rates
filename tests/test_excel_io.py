@@ -25,13 +25,17 @@ TARGET_COLS = {"source_date": "Date", "currency": "Cur", "out_rate": "EX Rate"}
 
 
 # Layout in fixtures: A=Date, B=Cur, C=EX Rate, D=Amount.
-def _expected_lookup(date_ref, col, n_marker="{N}"):
+def _expected_lookup(date_ref, col):
     """One guarded IFS branch value: the IF guard renders a found-but-empty
-    ExRate cell (weekend/holiday row) as "" instead of numeric 0 (F6)."""
+    ExRate cell (weekend/holiday row) as "" instead of numeric 0 (F6).
+
+    round-11: WHOLE-COLUMN ExRate references ($A:$A) — the row-pinned
+    $A$2:$A$N ranges went stale when the master grew without re-injection
+    (user-dragged copies, misrouted sheets, standalone-updater growth)."""
     lookup = (
         f'_xlfn.XLOOKUP({date_ref},'
-        f'ExRate!$A$2:$A${n_marker},'
-        f'ExRate!${col}$2:${col}${n_marker},"",0)'
+        f'ExRate!$A:$A,'
+        f'ExRate!${col}:${col},"",0)'
     )
     return f'IFERROR(IF({lookup}="","",{lookup}),"")'
 
@@ -63,11 +67,16 @@ def _expected_formula(row, usd_col="B", eur_col="D", extra=None):
 
 
 def _inject(wb, **kwargs):
-    """Run scan + inject in one shot with sensible defaults."""
+    """Run scan + inject in one shot with sensible defaults.
+
+    The legacy ``N=`` kwarg is accepted and DISCARDED: formulas now use
+    whole-column ExRate references, so the master's last row is no longer
+    a parameter of injection (and ``.format(N=...)`` on the expected
+    strings is a no-op — they carry no placeholder)."""
+    kwargs.pop("N", None)
     sheet_maps = scan_sheet_headers(wb, TARGET_COLS)
     inject_xlookup_formulas(
         wb, sheet_maps,
-        exrate_last_row=kwargs.pop("N", 30),
         parse_date_fn=parse_date,
         **kwargs,
     )
@@ -185,9 +194,9 @@ class TestExtraCurrencyBranch:
             "GBP": "F", "USD": "B", "EUR": "D", "THB": "Z",
         })
         formula = wb["Jan"].cell(row=2, column=3).value
-        # GBP branch appended referencing column F.
+        # GBP branch appended referencing column F (whole-column, round-11).
         assert 'B2="GBP",' in formula
-        assert "ExRate!$F$2:$F$30" in formula
+        assert "ExRate!$F:$F" in formula
         # USD/EUR/THB are NOT re-appended via the extra branch — they appear
         # exactly once (in the core branches).
         assert formula.count('B2="USD"') == 1
@@ -231,6 +240,135 @@ class TestMergedCells:
 
 
 # =========================================================================
+#  Merged rows are SURFACED, not silent (round-11)
+# =========================================================================
+
+class TestMergedRowsSurfaced:
+    """Rows whose Date or EX Rate cell is a non-anchor MergedCell are
+    skipped by injection (merged cells are read-only) — previously with
+    NO count and NO warning, and the updater mirrors even reported such
+    rows as resolved. They are now reported per sheet, and the
+    warning/audit mirrors skip them identically."""
+
+    def test_merged_out_rate_row_emits_warning_and_stays_blank(
+        self, ledger_xlsx,
+    ):
+        path = ledger_xlsx({"Jan": [
+            (date(2025, 1, 7), "USD"),
+            (date(2025, 1, 8), "USD"),
+            (date(2025, 1, 9), "USD"),
+        ]})
+        wb = openpyxl.load_workbook(path)
+        ws = wb["Jan"]
+        # EX Rate is column C; merge C3:C4 — C3 stays the writable anchor,
+        # C4 (row 4) becomes a read-only non-anchor MergedCell.
+        ws.merge_cells("C3:C4")
+        msgs = []
+        _inject(wb, emit_fn=msgs.append)
+        # Anchor rows got formulas; the non-anchor merged row stayed blank.
+        assert isinstance(ws.cell(row=2, column=3).value, str)
+        assert isinstance(ws.cell(row=3, column=3).value, str)
+        assert ws.cell(row=4, column=3).value is None
+        # The emitted warning counts the row and NAMES it.
+        merged_msgs = [m for m in msgs if "merged" in m]
+        assert merged_msgs, msgs
+        assert "Jan: 1 row(s)" in merged_msgs[0]
+        assert "rows 4" in merged_msgs[0]
+        assert "EX Rate left untouched" in merged_msgs[0]
+        wb.close()
+
+    def test_dry_run_merged_warning_carries_sim_prefix(self, ledger_xlsx):
+        path = ledger_xlsx({"Jan": [
+            (date(2025, 1, 7), "USD"),
+            (date(2025, 1, 8), "USD"),
+        ]})
+        wb = openpyxl.load_workbook(path)
+        ws = wb["Jan"]
+        ws.merge_cells("C2:C3")
+        msgs = []
+        _inject(wb, emit_fn=msgs.append, dry_run=True)
+        merged_msgs = [m for m in msgs if "merged" in m]
+        assert merged_msgs and merged_msgs[0].startswith("[SIM] "), msgs
+        wb.close()
+
+    def test_listed_rows_capped_at_ten(self, ledger_xlsx):
+        path = ledger_xlsx({"Jan": [
+            (date(2025, 1, 7), "USD") for _ in range(13)
+        ]})
+        wb = openpyxl.load_workbook(path)
+        ws = wb["Jan"]
+        # Rows 2..14 hold data; merge C2:C14 → rows 3..14 are non-anchor.
+        ws.merge_cells("C2:C14")
+        msgs = []
+        _inject(wb, emit_fn=msgs.append)
+        merged_msgs = [m for m in msgs if "merged" in m]
+        assert merged_msgs, msgs
+        assert "12 row(s)" in merged_msgs[0]
+        # 10 rows listed, ellipsis bounds the message on 4GB machines.
+        assert "…" in merged_msgs[0]
+        assert "12, …" in merged_msgs[0]  # rows 3..12 listed, 13/14 elided
+        wb.close()
+
+    def _merged_workbook(self, ledger_xlsx):
+        """Two USD data rows with the second EX Rate cell merged away."""
+        path = ledger_xlsx({"Jan": [
+            (date(2025, 1, 7), "USD"),
+            (date(2025, 1, 8), "USD"),
+        ]})
+        wb = openpyxl.load_workbook(path)
+        wb["Jan"].merge_cells("C2:C3")  # row 3 = non-anchor MergedCell
+        sheet_maps = scan_sheet_headers(wb, TARGET_COLS)
+        return wb, sheet_maps
+
+    def _writer(self):
+        from types import SimpleNamespace
+
+        from core.constants import parse_date as _pd
+        from core.exrate_updater import WorkbookWriter
+        emitted = []
+        engine = SimpleNamespace(
+            _parse_date=_pd,
+            _emit=lambda msg, etype="log": emitted.append(msg),
+        )
+        return WorkbookWriter(engine), emitted
+
+    def test_updater_audit_skips_merged_rows(self, ledger_xlsx):
+        """The audit CSV must not record a new_value for a cell that was
+        never written (the merged non-anchor EX Rate cell)."""
+        from core.audit_logger import AuditCollector
+
+        wb, sheet_maps = self._merged_workbook(ledger_xlsx)
+        writer, _ = self._writer()
+        index = {
+            date(2025, 1, 7): {"usd_buying": 33.5},
+            date(2025, 1, 8): {"usd_buying": 33.6},
+        }
+        audit = AuditCollector()
+        writer._collect_audit_records(
+            wb, sheet_maps, index, {}, "buying_transfer",
+            {}, "ledger.xlsx", set(), audit,
+        )
+        records = audit.drain()
+        # Row 2 (anchor, written) is audited; row 3 (merged) is NOT.
+        assert [r.row for r in records] == [2]
+        wb.close()
+
+    def test_updater_warning_mirror_skips_merged_rows(self, ledger_xlsx):
+        """A merged row whose date has no rate must not surface as a
+        'no rate available' warning — the row was never written at all
+        (it gets the dedicated merged-rows warning instead)."""
+        wb, sheet_maps = self._merged_workbook(ledger_xlsx)
+        writer, emitted = self._writer()
+        # Only row 2's date has a rate; row 3's (merged) does not.
+        index = {date(2025, 1, 7): {"usd_buying": 33.5}}
+        writer._warn_unfilled_rows(
+            wb, sheet_maps, index, {}, "buying_transfer", [], "ledger.xlsx",
+        )
+        assert not any("no rate available" in m for m in emitted), emitted
+        wb.close()
+
+
+# =========================================================================
 #  Idempotency
 # =========================================================================
 
@@ -246,7 +384,7 @@ class TestIdempotency:
         msgs = []
         sheet_maps = scan_sheet_headers(wb, TARGET_COLS)
         inject_xlookup_formulas(
-            wb, sheet_maps, exrate_last_row=30,
+            wb, sheet_maps,
             parse_date_fn=parse_date,
             emit_fn=msgs.append,
         )
@@ -254,6 +392,139 @@ class TestIdempotency:
         assert wb["Jan"].cell(row=2, column=3).value == first
         # The single row was skipped, not re-written.
         assert any("skipped" in m for m in msgs)
+        wb.close()
+
+
+# =========================================================================
+#  Bounded sheet growth (round-11: unbounded month-tab growth)
+# =========================================================================
+
+class TestNoUnboundedGrowth:
+    """Each run used to extend every tab by PREFORMAT_BUFFER_ROWS relative
+    to ws.max_row (which the previous run's styled buffer had inflated) and
+    from run 2 wrote IFS formulas into the empty buffer rows: max_row went
+    4 -> 54 -> 104 -> 154 under a daily scheduler. The injection loop and
+    the preformat base are now bounded by the LAST DATA row."""
+
+    def test_repeated_runs_are_idempotent_on_max_row_and_formulas(
+        self, ledger_xlsx,
+    ):
+        path = ledger_xlsx({"Jan": [
+            (date(2025, 1, 7), "USD"),
+            (date(2025, 1, 8), "EUR"),
+            (date(2025, 1, 9), "USD"),
+        ]})
+        data_rows = [2, 3, 4]
+        max_rows = []
+        for _ in range(3):
+            wb = openpyxl.load_workbook(path)
+            _inject(wb, N=30)
+            wb.save(path)
+            wb.close()
+
+            wb = openpyxl.load_workbook(path)
+            ws = wb["Jan"]
+            max_rows.append(ws.max_row)
+            formula_rows = [
+                r for r in range(2, (ws.max_row or 1) + 1)
+                if ws.cell(row=r, column=3).value is not None
+            ]
+            # Formulas confined to the 3 data rows — never the buffer.
+            assert formula_rows == data_rows
+            wb.close()
+
+        # Idempotent: last data row (4) + 50 buffer rows, run after run.
+        assert max_rows == [54, 54, 54]
+
+    def test_spacer_row_inside_data_gets_no_formula(self, ledger_xlsx):
+        """A row with neither date nor currency (even between data rows)
+        stays truly blank instead of accreting an always-"" formula."""
+        path = ledger_xlsx({"Jan": [
+            (date(2025, 1, 7), "USD"),
+            (None, None),               # spacer (Amount-only row)
+            (date(2025, 1, 9), "EUR"),
+        ]})
+        wb = openpyxl.load_workbook(path)
+        _inject(wb, N=30)
+        ws = wb["Jan"]
+        assert isinstance(ws.cell(row=2, column=3).value, str)
+        assert ws.cell(row=3, column=3).value is None
+        assert isinstance(ws.cell(row=4, column=3).value, str)
+        wb.close()
+
+
+# =========================================================================
+#  Date-column format preservation (round-11: preformat clobber)
+# =========================================================================
+
+class TestDateFormatPreservation:
+    """The trailing preformat loop used to clobber EVERY data row to
+    DD/MM/YYYY, making the normalization branch's format preservation dead
+    code. It now styles ONLY the buffer rows below the data."""
+
+    def test_data_row_format_survives_buffer_gets_manual_format(
+        self, ledger_xlsx,
+    ):
+        path = ledger_xlsx({"Jan": [
+            ("07/01/2025", "USD"),   # custom format pre-set below
+            ("08/01/2025", "EUR"),   # General -> normalized format
+        ]})
+        wb = openpyxl.load_workbook(path)
+        ws = wb["Jan"]
+        ws.cell(row=2, column=1).number_format = "yyyy-mm-dd;@"
+
+        _inject(wb, N=30)
+
+        # User's explicit format survives the run.
+        assert ws.cell(row=2, column=1).number_format == "yyyy-mm-dd;@"
+        # General-format text date normalizes to the readable default.
+        assert ws.cell(row=3, column=1).number_format == "dd mmm yyyy"
+        # First buffer row below the data gets the manual-entry preformat.
+        assert ws.cell(row=4, column=1).number_format == "DD/MM/YYYY"
+        wb.close()
+
+
+# =========================================================================
+#  Currency whitespace normalization (round-11: silent blank divergence)
+# =========================================================================
+
+class TestCurrencyWhitespaceNormalization:
+    """Excel's {cur_ref}="USD" comparison is whitespace-sensitive while the
+    Python warning/audit mirror strips — a " USD " row rendered blank in
+    Excel yet was recorded as filled. The Cur cell is now stripped in place
+    during injection so both resolve identically."""
+
+    def test_padded_currency_stripped_in_place(self, ledger_xlsx):
+        path = ledger_xlsx({"Jan": [(date(2025, 1, 7), " USD ")]})
+        wb = openpyxl.load_workbook(path)
+        _inject(wb, N=30)
+        ws = wb["Jan"]
+        # In-place strip: the saved cell now matches the formula's "USD".
+        assert ws.cell(row=2, column=2).value == "USD"
+        # The injected formula is the standard one for a resolvable row.
+        assert ws.cell(row=2, column=3).value == \
+            _expected_formula(2).format(N=30)
+        wb.close()
+
+    def test_whitespace_only_currency_blanked(self, ledger_xlsx):
+        path = ledger_xlsx({"Jan": [(date(2025, 1, 7), "   ")]})
+        wb = openpyxl.load_workbook(path)
+        _inject(wb, N=30)
+        ws = wb["Jan"]
+        # Whitespace-only Cur blanks the cell; the row still has a date so
+        # the formula is written and its cur="" guard renders blank — the
+        # same blank the mirror now reports.
+        assert ws.cell(row=2, column=2).value is None
+        assert isinstance(ws.cell(row=2, column=3).value, str)
+        wb.close()
+
+    def test_case_is_left_untouched(self, ledger_xlsx):
+        """Excel's "=" is case-insensitive, so only whitespace needs the
+        in-place rewrite — user casing is preserved (zero-touch)."""
+        path = ledger_xlsx({"Jan": [(date(2025, 1, 7), "usd")]})
+        wb = openpyxl.load_workbook(path)
+        _inject(wb, N=30)
+        assert wb["Jan"].cell(row=2, column=2).value == "usd"
         wb.close()
 
 

@@ -243,7 +243,11 @@ class BatchManifest:
         return float(thr)
 
     def has_pending(self) -> bool:
-        """True when a resumable manifest with unfinished files exists."""
+        """True when a resumable manifest with unfinished files exists.
+
+        Test seam: runtime code calls pending_files() directly; read by
+        tests/test_engine.py.
+        """
         return bool(self.pending_files())
 
     # ── Atomic write (round-7 temp + os.replace idiom) ───────────────
@@ -407,7 +411,12 @@ class LedgerEngine:
 
     @property
     def last_batch_anomaly_count(self) -> int:
-        """Return anomaly count from the most recent batch run."""
+        """Return anomaly count from the most recent batch run.
+
+        Test seam: the only observability point for batch anomaly
+        accumulation (alert-only contract); asserted by
+        tests/test_engine.py.
+        """
         return self._last_batch_anomaly_count
 
     def _check_memory_guardrail(self, filepath: str):
@@ -571,7 +580,17 @@ class LedgerEngine:
         try:
             force_start = datetime.strptime(start_date, "%Y-%m-%d").date()
         except (ValueError, TypeError):
-            force_start = date(2025, 1, 1)
+            # Dynamic fallback anchored on the caller's own dates (mirrors
+            # the target_year derivation in process_batch) — the old
+            # hardcoded date(2025, 1, 1) drifted stale each year: from 2026
+            # on, any unparseable start string silently pulled 1.5+ extra
+            # years of weekday cache-miss dates on the 4GB target.
+            fallback_year = min(dates).year if dates else bot_today().year
+            force_start = default_fetch_window_start(fallback_year)
+            logger.warning(
+                "Unparseable start_date %r ignored; using fetch-window "
+                "default %s", start_date, force_start.isoformat(),
+            )
 
         all_d = set(dates) | {force_start}
         if extend_to_today:
@@ -974,18 +993,33 @@ class LedgerEngine:
         )
 
         # ── Date hierarchy ───────────────────────────────────────────
+        today = bot_today()
         target_year = (
             min(all_target_dates).year if all_target_dates
-            else bot_today().year
+            else today.year
         )
         if start_date is None:
             start_date = default_fetch_window_start(target_year).isoformat()
+
+        # ── Archival-book bound ──────────────────────────────────────
+        # A book whose NEWEST ledger date is in a PAST year is an archive:
+        # its fetch window and master ExRate sheet stay bounded by the
+        # book's own dates instead of growing to the current BOT business
+        # date on every reprocess (a 2023 archive reopened in 2026 must
+        # not sprout three years of unrelated rate rows). Current-year /
+        # live books keep the documented extend-to-today behavior.
+        is_archival = (
+            bool(all_target_dates)
+            and max(all_target_dates).year < today.year
+        )
 
         self._emit("Loading exchange rates and holidays")
         (
             logic_engine, usd_selling, eur_selling,
             usd_buying, eur_buying, usd_data, eur_data,
-        ) = await self._preload_api_data(all_target_dates, start_date)
+        ) = await self._preload_api_data(
+            all_target_dates, start_date, extend_to_today=not is_archival,
+        )
 
         # ── Fetch any extra (non-USD/EUR) supported currencies ─────────
         # The master sheet gets one appended column per extra currency, filled
@@ -1004,8 +1038,11 @@ class LedgerEngine:
             # USD/EUR rows resolve.
             if all_target_dates:
                 ec_start = min(ec_start, min(all_target_dates))
+            # Archival books bound the extra-currency window to their own
+            # newest ledger date, mirroring the USD/EUR preload above.
+            ec_end = max(all_target_dates) if is_archival else today
             extra_currency_rates = await self._fetch_extra_currency_rates(
-                extra_currencies, rate_type, ec_start, bot_today(),
+                extra_currencies, rate_type, ec_start, ec_end,
             )
 
         # v3.1.0: Anomaly detection — check for suspicious rate jumps.
@@ -1041,6 +1078,9 @@ class LedgerEngine:
             filepath, dry_run,
             usd_buying, usd_selling, eur_buying, eur_selling,
             master_holidays_set, holidays_names, computed_start,
+            # Archival books cap the master ExRate sheet at their own
+            # newest ledger date; None keeps the default extend-to-today.
+            end_date=(max(all_target_dates) if is_archival else None),
             rate_type=rate_type,
             extra_currency_rates=extra_currency_rates,
             unsupported_currencies=unsupported_currencies,

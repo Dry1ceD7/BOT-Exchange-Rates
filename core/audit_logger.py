@@ -153,7 +153,11 @@ class AuditLogger:
 
     @property
     def row_count(self) -> int:
-        """Return the number of rows written so far."""
+        """Return the number of rows written so far.
+
+        Test seam: no runtime caller; read by tests/test_audit_logger.py
+        and tests/test_engine.py.
+        """
         return self._row_count
 
     def log_row_change(

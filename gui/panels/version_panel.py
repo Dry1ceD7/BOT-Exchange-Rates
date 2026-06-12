@@ -17,6 +17,7 @@ import contextlib
 import logging
 import sys
 import threading
+import tkinter
 import webbrowser
 from pathlib import Path
 
@@ -569,8 +570,13 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
         dialog.geometry("340x180")
         dialog.resizable(False, False)
         dialog.configure(fg_color=t["modal_bg"])
-        dialog.transient(self.winfo_toplevel())
-        dialog.grab_set()
+        # Cosmetic modality only — transient/grab_set on a not-yet-viewable
+        # Toplevel raise TclError on X11; a failed grab must not abort the
+        # restart confirmation (no busy-flag blast radius here).
+        with contextlib.suppress(RuntimeError, tkinter.TclError):
+            dialog.transient(self.winfo_toplevel())
+        with contextlib.suppress(RuntimeError, tkinter.TclError):
+            dialog.grab_set()
 
         dialog.update_idletasks()
         sx = (dialog.winfo_screenwidth() - 340) // 2

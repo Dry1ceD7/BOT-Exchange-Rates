@@ -72,3 +72,81 @@ class TestThreadRegistry:
         reg.register(t, name="gone")
         reg.unregister("gone")
         assert "gone" not in reg.status()
+
+
+class TestSameNameCollision:
+    """round-11: register() used to key the dict by bare name, so a second
+    same-name worker silently dropped tracking of the first live thread.
+    Collisions with a LIVE different thread now get a unique -<n> suffix."""
+
+    @staticmethod
+    def _waiting_thread(stop):
+        t = threading.Thread(target=stop.wait, args=(5,), daemon=True)
+        t.start()
+        return t
+
+    def test_two_live_same_name_threads_both_tracked(self):
+        reg = ThreadRegistry()
+        stop = threading.Event()
+        t1 = self._waiting_thread(stop)
+        t2 = self._waiting_thread(stop)
+        try:
+            k1 = reg.register(t1, name="FolderResolveWorker")
+            k2 = reg.register(t2, name="FolderResolveWorker")
+            assert k1 != k2
+            status = reg.status()
+            assert status.get(k1) is True and status.get(k2) is True
+        finally:
+            stop.set()
+        hung = reg.shutdown_all(timeout=5.0)
+        assert hung == []
+
+    def test_unregister_removes_only_own_key(self):
+        """A finished worker's finally-unregister (by its OWN unique key)
+        must not evict a newer same-name live thread — the reverse of the
+        original bug."""
+        reg = ThreadRegistry()
+        stop = threading.Event()
+        t1 = self._waiting_thread(stop)
+        t2 = self._waiting_thread(stop)
+        try:
+            k1 = reg.register(t1, name="Worker")
+            k2 = reg.register(t2, name="Worker")
+            reg.unregister(k1)
+            status = reg.status()
+            assert k1 not in status
+            assert status.get(k2) is True
+        finally:
+            stop.set()
+        reg.shutdown_all(timeout=5.0)
+
+    def test_reregistering_same_thread_keeps_key(self):
+        """Re-registering the SAME live thread object is idempotent — no
+        suffix churn."""
+        reg = ThreadRegistry()
+        stop = threading.Event()
+        t = self._waiting_thread(stop)
+        try:
+            k1 = reg.register(t, name="Ticker")
+            k2 = reg.register(t, name="Ticker")
+            assert k1 == k2 == "Ticker"
+        finally:
+            stop.set()
+        reg.shutdown_all(timeout=5.0)
+
+    def test_dead_thread_slot_is_reused_without_suffix(self):
+        """A finished (not unregistered) thread's name is reclaimed — only
+        LIVE threads force a suffix, so names don't grow unboundedly."""
+        reg = ThreadRegistry()
+        t1 = threading.Thread(target=lambda: None, daemon=True)
+        t1.start()
+        t1.join(5)
+        reg.register(t1, name="OneShot")
+        stop = threading.Event()
+        t2 = self._waiting_thread(stop)
+        try:
+            k2 = reg.register(t2, name="OneShot")
+            assert k2 == "OneShot"
+        finally:
+            stop.set()
+        reg.shutdown_all(timeout=5.0)

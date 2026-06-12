@@ -15,7 +15,6 @@ see the patch — module objects are singletons.
 """
 
 import contextlib
-import gc
 import logging
 import shutil
 from collections.abc import Callable
@@ -111,9 +110,12 @@ def is_standalone_exrate_workbook(
     are those same literals, so the two callers' match semantics were
     already identical).
 
-    Featherweight: read-only load, try/finally close + gc. ANY probe failure
+    Featherweight: read-only load, try/finally close. ANY probe failure
     (including OSError on a locked/corrupt file) returns False — the probe
-    must never mislabel a ledger or crash the caller.
+    must never mislabel a ledger or crash the caller. No gc.collect here:
+    the per-file-boundary collect is owned by the writer's finally
+    (core/exrate_updater.py) — one collect per file, not 3-4 (~1.1s/file
+    measured on a 13MB ledger).
     """
     if not filepath.lower().endswith(".xlsx"):
         return False
@@ -166,7 +168,6 @@ def is_standalone_exrate_workbook(
             with contextlib.suppress(OSError):
                 wb.close()
         del wb
-        gc.collect()
 
 
 def atomic_save(
@@ -220,7 +221,9 @@ def _run_verifier(tmp_path: Path, verify: Callable) -> None:
     ANY exception from the reopen or the verifier is wrapped in
     :class:`WorkbookVerifyError` with a clear message; ``atomic_save``'s
     outer handler then unlinks the temp so the original is never replaced.
-    The reopened handle is closed + gc'd on every exit (house style).
+    The reopened handle is closed on every exit (house style); the
+    per-file-boundary gc.collect is owned by each atomic_save caller's
+    finally, not here.
 
     The temp is opened as a BINARY HANDLE (not a path) because openpyxl's
     path-based loader rejects the ``.tmp~`` extension — same pattern as
@@ -248,7 +251,6 @@ def _run_verifier(tmp_path: Path, verify: Callable) -> None:
             with contextlib.suppress(OSError):
                 fh.close()
         del reopened
-        gc.collect()
 
 
 def build_cell_verifier(

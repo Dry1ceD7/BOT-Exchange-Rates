@@ -15,6 +15,7 @@ import os
 import shutil
 import tempfile
 import threading
+import tkinter
 from datetime import date
 from pathlib import Path
 from tkinter import filedialog
@@ -22,7 +23,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 import httpx
 
-from core.constants import humanize_save_error
+from core.constants import bot_today, humanize_save_error
 from core.i18n import tr
 from gui.theme import get_theme
 
@@ -72,7 +73,29 @@ def show_exrate_dialog(app) -> None:
     dialog.resizable(False, False)
     dialog.configure(fg_color=t["card_bg"])
     dialog.transient(app)
-    dialog.grab_set()
+    # Stash the dialog on the app so _poll_exrate_done can treat an
+    # existing-but-not-yet-grabbed dialog as busy (belt-and-braces for the
+    # retry below — the grab is what its busy detection is keyed on).
+    app._exrate_dialog = dialog
+
+    def _grab(attempts: int = 20) -> None:
+        """grab_set, retried until the Toplevel is viewable.
+
+        grab_set on a not-yet-mapped Toplevel raises TclError on X11 (and
+        intermittently elsewhere). Do NOT blanket-suppress instead: the
+        grab is load-bearing — gui/app.py:_poll_exrate_done keys its busy
+        detection on grab_current(), and a silently-failed grab would
+        release the Process/Revert lock while this dialog is open.
+        """
+        if not dialog.winfo_exists():
+            return
+        try:
+            dialog.grab_set()
+        except tkinter.TclError:
+            if attempts:
+                dialog.after(50, lambda: _grab(attempts - 1))
+
+    _grab()
 
     dialog.update_idletasks()
     sx = (dialog.winfo_screenwidth() - 440) // 2
@@ -156,7 +179,9 @@ def show_exrate_dialog(app) -> None:
     date_range_frame.pack(fill="x", padx=24, pady=(0, 16))
 
     date_mode_var = ctk.StringVar(value="auto")
-    today = date.today()
+    # BOT business date (Asia/Bangkok), not the machine-local date — the
+    # label must quote the same range end the fetch will actually use.
+    today = bot_today()
 
     auto_label = ctk.CTkLabel(
         date_range_frame,
@@ -380,7 +405,8 @@ def _build_exrate_summary(currencies, rate_types, date_range) -> str:
     if date_range:
         s_date, e_date = date_range
     else:
-        today = date.today()
+        # BOT business date (Asia/Bangkok) — matches the fetch's actual end.
+        today = bot_today()
         s_date, e_date = date(today.year, 1, 1), today
     days = (e_date - s_date).days + 1 if e_date >= s_date else 0
     ccy_list = ", ".join(currencies)

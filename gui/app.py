@@ -848,18 +848,27 @@ class BOTExrateApp(ctk.CTk):
             )
 
             def _resolve_in_worker():
+                # finally-unregister by the unique key so the finished
+                # transient doesn't accumulate in the registry (`key` is
+                # assigned before start(), so it is bound at call time).
                 try:
-                    result = resolve_excel_files(paths, collect_rejected=True)
-                except OSError as e:
-                    logger.debug("folder resolve failed: %s", e)
-                    result = ([], [])
-                # Hand the resolved lists back to the Tk thread. Guarded so the
-                # os.listdir walk finishing after the root is destroyed can't
-                # raise an unhandled RuntimeError/TclError in this daemon (#1).
-                self._safe_marshal(lambda: self._finish_drop(*result))
+                    try:
+                        result = resolve_excel_files(
+                            paths, collect_rejected=True
+                        )
+                    except OSError as e:
+                        logger.debug("folder resolve failed: %s", e)
+                        result = ([], [])
+                    # Hand the resolved lists back to the Tk thread. Guarded
+                    # so the os.listdir walk finishing after the root is
+                    # destroyed can't raise an unhandled RuntimeError/
+                    # TclError in this daemon (#1).
+                    self._safe_marshal(lambda: self._finish_drop(*result))
+                finally:
+                    self._unregister_worker(key)
 
             worker = threading.Thread(target=_resolve_in_worker, daemon=True)
-            self._register_worker(worker, "FolderResolveWorker")
+            key = self._register_worker(worker, "FolderResolveWorker")
             worker.start()
             return
         excel_files, rejected = resolve_excel_files(paths, collect_rejected=True)
@@ -1149,61 +1158,15 @@ class BOTExrateApp(ctk.CTk):
             )
             # Run prescan in background thread to prevent UI freeze
             def _prescan_and_batch():
+                # Outer try/finally: unregister by the unique key on EVERY
+                # terminal path (`key` is assigned before start()).
                 try:
-                    from core.engine import LedgerEngine
-                    oldest_date, was_detected = (
-                        LedgerEngine.prescan_oldest_date(queue_snapshot)
-                    )
-                    start_date_str = oldest_date.strftime("%Y-%m-%d")
-                except Exception as e:  # noqa: BLE001 — see _fail_prescan_batch
-                    # _lock_ui_for_batch already ran and _batch_running blocks
-                    # every retry, so an escaping exception here would
-                    # permanently brick batch processing until restart.
-                    logger.exception("Pre-scan failed — batch not started")
-                    self._safe_marshal(self._fail_prescan_batch, str(e))
-                    return
-
-                def _update_ui_and_start():
-                    # May land after the app started closing — bail before
-                    # touching any widget so we don't poke a torn-down root (#1).
-                    if getattr(self, "_closing", False):
-                        return
-                    if was_detected:
-                        # Range end shown is bot_today — the engine extends
-                        # its fetch window to the BOT business date, so the
-                        # hint must quote the same end the run will use.
-                        self.lbl_auto_hint.configure(
-                            text=f"Detected: {oldest_date.strftime('%d %b %Y')} -> {bot_today().strftime('%d %b %Y')}",
-                            text_color=_get_colors()["success"]
-                        )
-                        self.lbl_status.configure(
-                            text=(
-                                f"Connecting to BOT API...  range: "
-                                f"{oldest_date.strftime('%d %b %Y')} -> today  (0 of {total})"
-                            ),
-                            text_color=_get_colors()["process_text"]
-                        )
-                    else:
-                        self.lbl_auto_hint.configure(
-                            text=f"No dates found — using fallback: {oldest_date.strftime('%d %b %Y')}",
-                            text_color=_get_colors()["warning"]
-                        )
-                        self.lbl_status.configure(
-                            text=f"Connecting to BOT API...  fallback range  (0 of {total})",
-                            text_color=_get_colors()["warning"]
-                        )
-                    dry_run = self._dry_run_var.get() == "on"
-                    self.batch_handler.start_batch(
-                        queue_snapshot, start_date_str, dry_run=dry_run,
-                    )
-
-                # Guarded marshal-back: the prescan can finish after the root is
-                # destroyed; a raw self.after() would then raise an unhandled
-                # RuntimeError/TclError in this daemon thread (#1).
-                self._safe_marshal(_update_ui_and_start)
+                    self._prescan_and_batch_body(queue_snapshot, total)
+                finally:
+                    self._unregister_worker(key)
 
             worker = threading.Thread(target=_prescan_and_batch, daemon=True)
-            self._register_worker(worker, "PrescanBatchWorker")
+            key = self._register_worker(worker, "PrescanBatchWorker")
             worker.start()
         else:
             # ── Manual mode ──────────────────────────────────────────
@@ -1219,6 +1182,64 @@ class BOTExrateApp(ctk.CTk):
             self.batch_handler.start_batch(
                 queue_snapshot, start_date_str, dry_run=dry_run,
             )
+
+    def _prescan_and_batch_body(self, queue_snapshot, total):
+        """Smart-Date prescan worker body (runs OFF the Tk thread).
+
+        Extracted from the _on_process_click closure so the worker wrapper
+        can guarantee registry unregistration in a flat try/finally."""
+        try:
+            from core.engine import LedgerEngine
+            oldest_date, was_detected = (
+                LedgerEngine.prescan_oldest_date(queue_snapshot)
+            )
+            start_date_str = oldest_date.strftime("%Y-%m-%d")
+        except Exception as e:  # noqa: BLE001 — see _fail_prescan_batch
+            # _lock_ui_for_batch already ran and _batch_running blocks
+            # every retry, so an escaping exception here would
+            # permanently brick batch processing until restart.
+            logger.exception("Pre-scan failed — batch not started")
+            self._safe_marshal(self._fail_prescan_batch, str(e))
+            return
+
+        def _update_ui_and_start():
+            # May land after the app started closing — bail before
+            # touching any widget so we don't poke a torn-down root (#1).
+            if getattr(self, "_closing", False):
+                return
+            if was_detected:
+                # Range end shown is bot_today — the engine extends
+                # its fetch window to the BOT business date, so the
+                # hint must quote the same end the run will use.
+                self.lbl_auto_hint.configure(
+                    text=f"Detected: {oldest_date.strftime('%d %b %Y')} -> {bot_today().strftime('%d %b %Y')}",
+                    text_color=_get_colors()["success"]
+                )
+                self.lbl_status.configure(
+                    text=(
+                        f"Connecting to BOT API...  range: "
+                        f"{oldest_date.strftime('%d %b %Y')} -> today  (0 of {total})"
+                    ),
+                    text_color=_get_colors()["process_text"]
+                )
+            else:
+                self.lbl_auto_hint.configure(
+                    text=f"No dates found — using fallback: {oldest_date.strftime('%d %b %Y')}",
+                    text_color=_get_colors()["warning"]
+                )
+                self.lbl_status.configure(
+                    text=f"Connecting to BOT API...  fallback range  (0 of {total})",
+                    text_color=_get_colors()["warning"]
+                )
+            dry_run = self._dry_run_var.get() == "on"
+            self.batch_handler.start_batch(
+                queue_snapshot, start_date_str, dry_run=dry_run,
+            )
+
+        # Guarded marshal-back: the prescan can finish after the root is
+        # destroyed; a raw self.after() would then raise an unhandled
+        # RuntimeError/TclError in this daemon thread (#1).
+        self._safe_marshal(_update_ui_and_start)
 
     def _fail_prescan_batch(self, err: str):
         """Tk-thread failure handler for a crashed Smart-Date prescan.
@@ -1489,13 +1510,19 @@ class BOTExrateApp(ctk.CTk):
         # Only reveal a file that was ACTUALLY written. The reveal must never
         # point at the last queued file when that file failed/was skipped (#2),
         # so resolve the last SUCCEEDING path from the queue minus the failures.
-        revealable = self._last_succeeded_path(errors)
-        if revealable is not None:
-            self.last_processed_path = revealable
-            self.btn_reveal.pack(pady=(12, 14))
-        else:
-            self.last_processed_path = None
-            self.btn_reveal.pack_forget()
+        # Manual runs only: a scheduler-fired run processes its own snapshot
+        # (not self.file_queue, see handlers), so repointing Reveal here would
+        # target a pending file the user never processed. The scheduled outcome
+        # is surfaced via _announce_scheduled_run below; the prior reveal state
+        # is left untouched.
+        if not was_scheduled:
+            revealable = self._last_succeeded_path(errors)
+            if revealable is not None:
+                self.last_processed_path = revealable
+                self.btn_reveal.pack(pady=(12, 14))
+            else:
+                self.last_processed_path = None
+                self.btn_reveal.pack_forget()
         # Clear the processed queue so a stray second click can't silently
         # reprocess the same files (fresh backups + re-injected formulas). The
         # operator must make a new selection before Process Batch re-enables (#3).
@@ -1653,7 +1680,10 @@ class BOTExrateApp(ctk.CTk):
     def _show_error(self, msg: str):
         # Settle the pulse (#7) before showing the error at a dead-zero bar.
         self._settle_progressbar(0)
-        self.lbl_status.configure(text=f"Error:  {msg}", text_color=_get_colors()["error_text"])
+        self.lbl_status.configure(
+            text=tr("main.status_error", msg=msg),
+            text_color=_get_colors()["error_text"],
+        )
         # A scheduler-fired run that errored out (e.g. network down overnight)
         # must still surface — otherwise the failure is invisible (#1).
         was_scheduled = self._scheduled_run_active
@@ -1686,7 +1716,8 @@ class BOTExrateApp(ctk.CTk):
         messagebox.showerror("Update Failed", msg)
         if hasattr(self, "lbl_status"):
             self.lbl_status.configure(
-                text=f"Error:  {msg}", text_color=_get_colors()["error_text"]
+                text=tr("main.status_error", msg=msg),
+                text_color=_get_colors()["error_text"],
             )
 
     # ================================================================== #
@@ -1707,7 +1738,18 @@ class BOTExrateApp(ctk.CTk):
         self.btn_process.configure(state="disabled")
         self.btn_revert.configure(state="disabled")
         from gui.panels.exrate_dialog import show_exrate_dialog
-        show_exrate_dialog(self)
+        try:
+            show_exrate_dialog(self)
+        except Exception:  # noqa: BLE001 — ANY construction failure must release the lease
+            # A dialog that failed to construct would otherwise leave
+            # _exrate_running stuck True with Process/Revert dead forever.
+            logger.exception("ExRate dialog failed to open")
+            self._exrate_running = False
+            self.btn_process.configure(
+                state="normal" if self.file_queue else "disabled"
+            )
+            self._refresh_revert_state()
+            return
         # The dialog may be cancelled at the file picker (no worker spawned), in
         # which case btn_export_exrate is never disabled — poll handles both: it
         # releases the lock as soon as the export button is back to "normal".
@@ -1731,6 +1773,15 @@ class BOTExrateApp(ctk.CTk):
             dialog_open = self.grab_current() not in (None, self)
         except (RuntimeError, tkinter.TclError):
             dialog_open = False
+        # Belt-and-braces: the dialog's grab_set may still be retrying (it
+        # raises TclError until the Toplevel is viewable on X11), so an
+        # existing-but-not-yet-grabbed dialog must also count as busy.
+        if not dialog_open:
+            dlg = getattr(self, "_exrate_dialog", None)
+            try:
+                dialog_open = dlg is not None and bool(dlg.winfo_exists())
+            except (RuntimeError, tkinter.TclError):
+                dialog_open = False
         try:
             worker_busy = str(self.btn_export_exrate.cget("state")) == "disabled"
         except (RuntimeError, tkinter.TclError):
@@ -1764,7 +1815,18 @@ class BOTExrateApp(ctk.CTk):
         self.btn_process.configure(state="disabled")
         self.btn_revert.configure(state="disabled")
         from gui.panels.rate_audit_dialog import show_rate_audit_dialog
-        show_rate_audit_dialog(self)
+        try:
+            show_rate_audit_dialog(self)
+        except Exception:  # noqa: BLE001 — ANY construction failure must release the lease
+            # Mirrors _on_export_exrate: a construction failure must never
+            # wedge the shared _exrate_running lease.
+            logger.exception("Rate-audit dialog failed to open")
+            self._exrate_running = False
+            self.btn_process.configure(
+                state="normal" if self.file_queue else "disabled"
+            )
+            self._refresh_revert_state()
+            return
         self._poll_rate_audit_done()
 
     def _poll_rate_audit_done(self):
@@ -1909,7 +1971,10 @@ class BOTExrateApp(ctk.CTk):
         self.progressbar.stop()
         self.progressbar.configure(mode="determinate")
         self.progressbar.set(0)
-        self.lbl_status.configure(text=f"Error:  {msg}", text_color=_get_colors()["error_text"])
+        self.lbl_status.configure(
+            text=tr("main.status_error", msg=msg),
+            text_color=_get_colors()["error_text"],
+        )
         # Idle-state contract (#3): same conditional as _show_revert_success.
         self.btn_process.configure(
             state="normal" if self.file_queue else "disabled"
@@ -1982,7 +2047,10 @@ class BOTExrateApp(ctk.CTk):
         """Launch the settings modal window. Re-apply theme when closed."""
         from gui.panels.settings_modal import SettingsModal
         modal = SettingsModal(self)
-        modal.grab_set()
+        # Cosmetic modality only — grab_set on a not-yet-viewable Toplevel
+        # raises TclError on X11; a failed grab must not abort the modal.
+        with contextlib.suppress(RuntimeError, tkinter.TclError):
+            modal.grab_set()
         self.wait_window(modal)
         self._apply_theme()
 
@@ -1997,23 +2065,16 @@ class BOTExrateApp(ctk.CTk):
     def _open_folder(self, folder: str):
         """Open ``folder`` in the OS file manager (#9).
 
-        Reuses the same platform-safe, fixed-argv launchers as _reveal_file. The
-        folder is realpath-resolved and is_dir()-checked before launch so a
-        non-existent/odd path is never handed to a subprocess."""
+        Create-if-missing (data/logs may not exist until the first run wrote
+        a log), then delegate the platform-safe, fixed-argv launch to the
+        shared canonical helper (gui.os_open.open_folder — resolve()-d and
+        is_dir()-checked there)."""
+        from gui.os_open import open_folder
         try:
-            real = os.path.realpath(folder)
-            if not Path(real).is_dir():
-                # data/logs may not exist until the first run wrote a log.
-                Path(real).mkdir(parents=True, exist_ok=True)
-            system = platform.system()
-            if system == "Darwin":
-                subprocess.Popen(["open", real])  # noqa: S603, S607
-            elif system == "Windows":
-                subprocess.Popen(["explorer", os.path.normpath(real)])  # noqa: S603, S607
-            else:
-                subprocess.Popen(["xdg-open", real])  # noqa: S603, S607
+            Path(folder).mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            logger.debug("open folder failed: %s", e)
+            logger.debug("open folder mkdir failed: %s", e)
+        open_folder(folder)
 
     def _open_help(self):
         """Show a small Help / About dialog (#9, #13).
@@ -2243,10 +2304,30 @@ class BOTExrateApp(ctk.CTk):
         thread before step 7 self.destroy(), mirroring the rate_ticker worker
         registration. Tolerant of a missing/None registry (getattr) so it never
         breaks a drop or batch start if the registry was not wired up.
+
+        Returns the UNIQUE registry key (register() suffixes a counter on a
+        same-name collision with a live thread), or None when no registry is
+        wired up — pass it to :meth:`_unregister_worker` from the worker's
+        terminal path so finished transients don't accumulate in the registry.
         """
         registry = getattr(self, "thread_registry", None)
+        if registry is None:
+            return None
+        return registry.register(worker, name=name)
+
+    def _unregister_worker(self, key):
+        """Drop a finished transient worker by its unique registry key.
+
+        Unregistering by the RETURNED key (never by the fixed name) is
+        load-bearing: a fixed-name unregister from an old worker's finally
+        block would evict a newer same-name live thread from tracking.
+        No-ops on None (no registry at registration time).
+        """
+        if key is None:
+            return
+        registry = getattr(self, "thread_registry", None)
         if registry is not None:
-            registry.register(worker, name=name)
+            registry.unregister(key)
 
     # ================================================================== #
     #  V3.2.x: CLEAN SHUTDOWN

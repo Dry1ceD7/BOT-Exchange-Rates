@@ -16,14 +16,11 @@ from pathlib import Path
 
 import openpyxl
 
-from core.constants import DATE_FORMATS, bot_today
+from core.constants import bot_today
 from core.constants import parse_date as _shared_parse_date
 from core.ledger_processing import prescan_target_dates_and_currencies
 
 logger = logging.getLogger(__name__)
-
-# Re-export for backward compatibility; canonical source is core.constants.
-DATE_FORMATS = list(DATE_FORMATS)
 
 
 def prescan_oldest_date(
@@ -119,10 +116,10 @@ def _scan_xlsx(
 # ── Shared date parsing ─────────────────────────────────────────────────
 
 
-def _parse_scan_date(cell_val, formats: list[str]) -> date | None:
-    """Parse a date from a cell value (shared parser).
+def _parse_scan_date(cell_val) -> date | None:
+    """Parse a date from a cell value.
 
-    The ``formats`` arg is retained for backward-compatible call sites; the
-    canonical format list lives in core.constants.DATE_FORMATS.
+    Thin delegate to the canonical parser, core.constants.parse_date
+    (which owns DATE_FORMATS and the Buddhist-Era normalization).
     """
     return _shared_parse_date(cell_val)

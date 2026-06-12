@@ -11,42 +11,42 @@ from datetime import date
 import openpyxl
 import pytest
 
-from core.prescan import DATE_FORMATS, _parse_scan_date, prescan_oldest_date
+from core.prescan import _parse_scan_date, prescan_oldest_date
 
 # =========================================================================
 #  HELPERS
 # =========================================================================
 
 class TestParseScanDate:
-    """Tests for _parse_scan_date helper."""
+    """Tests for _parse_scan_date helper.
 
-    FORMATS = DATE_FORMATS
+    round-11: the vestigial ``formats`` parameter (accepted but ignored
+    since the parse moved to core.constants.parse_date) and the
+    test-only ``core.prescan.DATE_FORMATS`` re-export were removed."""
 
     def test_iso_string(self):
-        assert _parse_scan_date("2025-03-10", self.FORMATS) == date(2025, 3, 10)
+        assert _parse_scan_date("2025-03-10") == date(2025, 3, 10)
 
     def test_date_object(self):
-        assert _parse_scan_date(date(2025, 3, 10), self.FORMATS) == date(2025, 3, 10)
+        assert _parse_scan_date(date(2025, 3, 10)) == date(2025, 3, 10)
 
     def test_none_returns_none(self):
-        assert _parse_scan_date(None, self.FORMATS) is None
+        assert _parse_scan_date(None) is None
 
     def test_empty_string_returns_none(self):
-        assert _parse_scan_date("", self.FORMATS) is None
+        assert _parse_scan_date("") is None
 
     def test_nan_returns_none(self):
-        assert _parse_scan_date("nan", self.FORMATS) is None
+        assert _parse_scan_date("nan") is None
 
     def test_invalid_returns_none(self):
-        assert _parse_scan_date("hello", self.FORMATS) is None
+        assert _parse_scan_date("hello") is None
 
     def test_uses_centralized_formats(self):
-        """Fix #5: prescan formats come from the single shared source."""
-        from core.constants import DATE_FORMATS as SHARED
-        assert tuple(DATE_FORMATS) == tuple(SHARED)
-        # Superset coverage preserved.
-        assert _parse_scan_date("10/03/2025", self.FORMATS) == date(2025, 3, 10)
-        assert _parse_scan_date("20250310", self.FORMATS) == date(2025, 3, 10)
+        """Fix #5: prescan parsing IS the single shared parser
+        (core.constants.parse_date) — day-first + compact coverage."""
+        assert _parse_scan_date("10/03/2025") == date(2025, 3, 10)
+        assert _parse_scan_date("20250310") == date(2025, 3, 10)
 
 
 # =========================================================================

@@ -19,7 +19,6 @@ Provides:
 import contextlib
 import os
 import sys
-from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -146,12 +145,6 @@ def mock_api():
     api.make_rate = make_rate
     api.make_holiday = make_holiday
     return api
-
-
-@pytest.fixture
-def thai_holidays_2025():
-    """A small, well-known set of 2025 Thai holiday dates."""
-    return [date(2025, 1, 1)]
 
 
 @pytest.fixture(scope="session")

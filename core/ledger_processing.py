@@ -13,7 +13,6 @@ slim. These functions take all of their dependencies as explicit parameters
 """
 
 import contextlib
-import gc
 import logging
 import os
 import threading
@@ -259,12 +258,14 @@ def prescan_target_dates_and_currencies(
             openpyxl.utils.exceptions.InvalidFileException):
         raise
     finally:
+        # close + del only — the per-file-boundary gc.collect is owned by
+        # the writer's finally (core/exrate_updater.py); running it here
+        # too cost ~0.5s/file of redundant full collections on the 13MB run.
         if wb_scan is not None:
             with contextlib.suppress(OSError):
                 wb_scan.close()
             del wb_scan
             wb_scan = None
-        gc.collect()
 
     # ── Memo store (successful scans only) ────────────────────────────
     if cache_key is not None:

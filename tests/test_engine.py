@@ -1153,6 +1153,204 @@ class TestPreloadUsesBotToday:
 
 
 # =========================================================================
+#  ARCHIVAL BOOKS — BOUNDED WINDOW + MASTER SHEET (round-11)
+# =========================================================================
+
+class TestArchivalBookBoundedWindow:
+    """A ledger whose NEWEST date is in a PAST year is an archive: its
+    preload window must not include bot_today() and its master ExRate
+    sheet must not extend past max(all_target_dates). Before round-11 the
+    ledger path unconditionally added bot_today() (extend_to_today only had
+    an opt-out on the rate-audit path), so a 2023 archive reprocessed in
+    2026 grew its master sheet to 2026. Current-year books keep the
+    documented extend-to-today behavior (companion test)."""
+
+    @staticmethod
+    def _constant_rates(mock_api):
+        async def _rates(start, end, currency):
+            from datetime import timedelta as _td
+            base_b = 33.0 if currency == "USD" else 36.0
+            base_s = 33.5 if currency == "USD" else 36.5
+            out, d = [], start
+            while d <= end:
+                out.append(SimpleNamespace(
+                    period=d.strftime("%Y-%m-%d"), currency=currency,
+                    buying_transfer=base_b, buying_sight=None,
+                    selling=base_s, mid_rate=None,
+                ))
+                d += _td(days=1)
+            return out
+
+        mock_api.get_exchange_rates = AsyncMock(side_effect=_rates)
+
+    @staticmethod
+    def _exrate_dates(path):
+        wb = openpyxl.load_workbook(path)
+        try:
+            ws = wb["ExRate"]
+            return {
+                cell_val.date() if isinstance(cell_val, datetime) else cell_val
+                for row in range(2, (ws.max_row or 1) + 1)
+                if (cell_val := ws.cell(row=row, column=1).value) is not None
+            }
+        finally:
+            wb.close()
+
+    def test_prior_year_book_never_reaches_bot_today(
+        self, engine, mock_api, ledger_xlsx, monkeypatch,
+    ):
+        fixed_today = date(2026, 6, 12)
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: fixed_today)
+        newest = date(2023, 3, 7)  # Tuesday
+        path = ledger_xlsx({"Jan": [
+            (date(2023, 3, 6), "USD"),
+            (newest, "EUR"),
+        ]})
+        self._constant_rates(mock_api)
+
+        asyncio.run(engine.process_ledger(path))
+
+        # 1) No fetch window reaches the current BOT business date.
+        assert mock_api.get_exchange_rates.await_count >= 1
+        end_args = {
+            call.args[1]
+            for call in mock_api.get_exchange_rates.await_args_list
+        }
+        assert max(end_args) == newest
+        # 2) The master sheet ends at the book's own newest ledger date.
+        sheet_dates = self._exrate_dates(path)
+        assert max(sheet_dates) == newest
+        assert fixed_today not in sheet_dates
+
+    def test_current_year_book_keeps_extend_to_today(
+        self, engine, mock_api, ledger_xlsx, monkeypatch,
+    ):
+        import core.exrate_sheet as exrate_sheet_mod
+
+        fixed_today = date(2025, 3, 14)  # Friday
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: fixed_today)
+        # end_date=None on live books → the master-sheet builder's own
+        # bot_today() binding decides the upper bound; pin it too.
+        monkeypatch.setattr(
+            exrate_sheet_mod, "bot_today", lambda: fixed_today,
+        )
+        path = ledger_xlsx({"Jan": [(date(2025, 3, 10), "USD")]})
+        self._constant_rates(mock_api)
+
+        asyncio.run(engine.process_ledger(path))
+
+        end_args = {
+            call.args[1]
+            for call in mock_api.get_exchange_rates.await_args_list
+        }
+        assert max(end_args) == fixed_today
+        assert max(self._exrate_dates(path)) == fixed_today
+
+
+# =========================================================================
+#  WHITESPACE-PADDED CURRENCY — FORMULA/MIRROR PARITY (round-11)
+# =========================================================================
+
+class TestWhitespacePaddedCurrencyResolves:
+    """End-to-end: a ' USD ' ledger row must resolve exactly like 'USD'.
+    Before round-11 the injected IFS compared the raw padded cell (Excel's
+    "=" is whitespace-sensitive) so the cell rendered blank, while the
+    Python warning/audit mirror stripped — the audit CSV recorded a value
+    and no warning fired. The Cur cell is now stripped in place during
+    injection, so the saved book resolves and the mirror agrees."""
+
+    def test_padded_currency_row_resolves_with_no_warning(
+        self, mock_api, tmp_cache, ledger_xlsx, monkeypatch,
+    ):
+        fixed_today = date(2025, 3, 14)
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: fixed_today)
+        import core.exrate_sheet as exrate_sheet_mod
+        monkeypatch.setattr(
+            exrate_sheet_mod, "bot_today", lambda: fixed_today,
+        )
+
+        events: list[dict] = []
+        engine = LedgerEngine(
+            mock_api,
+            event_bus=SimpleNamespace(push=events.append),
+            cache=tmp_cache,
+            backup=MagicMock(),
+        )
+        TestArchivalBookBoundedWindow._constant_rates(mock_api)
+        target = date(2025, 3, 10)  # Monday — a trading day with a rate
+        path = ledger_xlsx({"Jan": [(target, " USD ")]})
+
+        asyncio.run(engine.process_ledger(path))
+
+        # No "no rate available" / unsupported-currency warning fired.
+        warnings = [e["msg"] for e in events if e.get("type") == "warning"]
+        assert warnings == []
+
+        wb = openpyxl.load_workbook(path)
+        try:
+            ws = wb["Jan"]
+            # Cur cell stripped in place → the IFS comparison matches.
+            assert ws.cell(row=2, column=2).value == "USD"
+            formula = ws.cell(row=2, column=3).value
+            assert isinstance(formula, str)
+            assert 'B2="USD"' in formula
+        finally:
+            wb.close()
+
+
+# =========================================================================
+#  UNPARSEABLE start_date — DYNAMIC FALLBACK (round-11)
+# =========================================================================
+
+class TestUnparseableStartDateFallback:
+    """round-11: a malformed start_date string used to anchor the fetch
+    window at a hardcoded date(2025, 1, 1) — drifting stale each year and
+    silently over-fetching 1.5+ years of weekday cache-miss dates from
+    2026 on (and never able to anchor later than 2025). It now anchors at
+    default_fetch_window_start(<year of the caller's own dates>) and logs
+    a warning."""
+
+    def test_garbage_start_date_anchors_at_dynamic_window(
+        self, engine, mock_api, monkeypatch,
+    ):
+        from core.logic import default_fetch_window_start
+
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: date(2026, 6, 12))
+
+        asyncio.run(engine._preload_api_data({date(2026, 6, 1)}, "garbage"))
+
+        assert mock_api.get_exchange_rates.await_count >= 1
+        starts = {
+            call.args[0]
+            for call in mock_api.get_exchange_rates.await_args_list
+        }
+        # Window opens at the first missing WEEKDAY at/after the dynamic
+        # anchor — default_fetch_window_start(2026) = Sat 2025-12-20, so
+        # the first fetched day is Mon 2025-12-22...
+        assert min(starts) >= default_fetch_window_start(2026)
+        assert min(starts) == date(2025, 12, 22)
+        # ...never the old hardcoded Jan 2025 anchor.
+        assert date(2025, 1, 1) not in starts
+
+    def test_empty_dates_fall_back_to_business_year(
+        self, engine, mock_api, monkeypatch,
+    ):
+        """With no ledger dates at all, the anchor year is bot_today()'s."""
+        from core.logic import default_fetch_window_start
+
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: date(2026, 6, 12))
+
+        asyncio.run(engine._preload_api_data(set(), None))
+
+        starts = {
+            call.args[0]
+            for call in mock_api.get_exchange_rates.await_args_list
+        }
+        assert starts and min(starts) >= default_fetch_window_start(2026)
+        assert date(2025, 1, 1) not in starts
+
+
+# =========================================================================
 #  PER-COLUMN CACHE MISS — SELF-HEALING (F1 regression)
 # =========================================================================
 
@@ -1717,7 +1915,10 @@ class TestSettingsSnapshotContract:
             AsyncMock(return_value=None),
         )
 
-        async def _fake_preload(dates, start_date):
+        # extend_to_today: round-11 — process_ledger now threads the
+        # archival-book bound through this keyword (see
+        # TestArchivalBookBoundedWindow); the stub must accept it.
+        async def _fake_preload(dates, start_date, *, extend_to_today=True):
             return (
                 SimpleNamespace(holidays=[]), {}, {}, {}, {}, [], [],
             )

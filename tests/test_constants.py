@@ -119,7 +119,9 @@ class TestParseDateNormalCe:
         assert parse_date("1970-01-01") == date(1970, 1, 1)
 
     def test_next_year_allowed(self):
-        nxt = date.today().year + 1
+        # round-11: pin against bot_today() (the implementation's anchor),
+        # killing the once-a-year flake on Dec 31 local / Jan 1 Bangkok.
+        nxt = bot_today().year + 1
         assert parse_date(f"{nxt}-01-01") == date(nxt, 1, 1)
 
 

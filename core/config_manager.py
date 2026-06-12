@@ -142,7 +142,11 @@ class SettingsManager:
             return dict(DEFAULT_SETTINGS)
 
     def reload(self) -> dict[str, Any]:
-        """Force re-read from disk, bypassing cache."""
+        """Force re-read from disk, bypassing cache.
+
+        Test seam: no runtime caller; exercised by
+        tests/test_config_manager.py.
+        """
         with self._lock:
             self._cache = None
         return self._load_from_disk(force=True)

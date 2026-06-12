@@ -12,7 +12,6 @@ Covers:
   - download_update (download flow, integrity check, cleanup)
   - apply_update (bat script generation, path sanitization)
   - get_install_dir (registry, frozen, dev mode)
-  - back-compat aliases (_get_install_dir, _fetch_expected_checksum)
 """
 
 import hashlib
@@ -788,56 +787,6 @@ class TestGetInstallDir:
             result = get_install_dir()
 
         assert result == str(tmp_path)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  BACK-COMPAT ALIASES (old private names)
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-class TestBackCompatAliases:
-    """The old underscore names must remain importable and point at the
-    new public functions, so GUI panels using the old names keep working."""
-
-    def test_get_install_dir_alias_is_public(self):
-        from core.auto_updater import _get_install_dir, get_install_dir
-
-        assert _get_install_dir is get_install_dir
-
-    def test_fetch_expected_checksum_alias_is_public(self):
-        from core.auto_updater import (
-            _fetch_expected_checksum,
-            fetch_expected_checksum,
-        )
-
-        assert _fetch_expected_checksum is fetch_expected_checksum
-
-    def test_old_install_dir_alias_still_callable(self):
-        """Calling via the legacy name returns a valid dir in dev mode."""
-        from core.auto_updater import _get_install_dir
-
-        with patch("sys.frozen", False, create=True):
-            result = _get_install_dir()
-
-        assert result is not None
-        assert os.path.isdir(result)
-
-    def test_old_checksum_alias_still_callable(self):
-        """Calling via the legacy name parses a checksum."""
-        from core.auto_updater import _fetch_expected_checksum
-
-        expected = "c" * 64
-        mock_resp = MagicMock()
-        mock_resp.is_redirect = False
-        mock_resp.text = f"{expected}\n"
-        mock_resp.raise_for_status = MagicMock()
-
-        with patch("core.auto_updater.httpx.get", return_value=mock_resp):
-            result = _fetch_expected_checksum(
-                "https://github.com/hash.sha256"
-            )
-
-        assert result == expected
 
 
 # ═══════════════════════════════════════════════════════════════════════════

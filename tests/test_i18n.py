@@ -284,6 +284,27 @@ class TestCallSiteCoverage:
             f"tr() keys missing a language translation: {incomplete}"
         )
 
+    def test_status_error_key_is_wired_to_app_call_sites(self):
+        """Regression: ``main.status_error`` was an orphaned catalog key.
+
+        gui/app.py's _show_error / _show_download_error / _show_revert_error
+        rendered a hard-coded ``f"Error:  {msg}"`` instead of consuming the
+        catalog entry, so Thai mode never saw the translated error status
+        ("ข้อผิดพลาด:  {msg}"). All three error-status surfaces must route
+        through tr("main.status_error", msg=...). EN rendering is byte-
+        identical to the old f-string, so this is i18n-only behavior.
+        """
+        sites = _collect_tr_keys().get("main.status_error", [])
+        app_sites = [
+            s for s in sites
+            if s.replace("\\", "/").startswith("gui/app.py")
+        ]
+        assert len(app_sites) >= 3, (
+            "main.status_error must be consumed by the three error-status "
+            "call sites in gui/app.py (_show_error, _show_download_error, "
+            f"_show_revert_error); found call sites: {sites}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # DEFAULT_SETTINGS wiring

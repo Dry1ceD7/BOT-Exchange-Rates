@@ -307,9 +307,13 @@ def _plausible_year(year: int) -> bool:
     """True if ``year`` is within the accepted Common-Era window.
 
     Lower bound is 1970 (epoch-ish; older accounting dates are not expected);
-    upper bound is next year to tolerate forward-dated entries.
+    upper bound is next year to tolerate forward-dated entries. The upper
+    bound anchors on bot_today() (Asia/Bangkok BUSINESS year, defined later
+    in this module — resolved at call time), not the machine-local year:
+    on Dec 31 local / Jan 1 Bangkok a naive date.today() rejected
+    forward-dated entries for Bangkok's year+1 for a few hours.
     """
-    return 1970 <= year <= date.today().year + 1
+    return 1970 <= year <= bot_today().year + 1
 
 
 def parse_date(cell_val) -> date | None:
