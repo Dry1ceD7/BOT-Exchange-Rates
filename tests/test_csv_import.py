@@ -485,3 +485,280 @@ class TestWideCSVToWorkbookChain:
             assert all(v is not None for v in cells), (d_str, cells)
             got = [Decimal(str(v)) for v in cells]
             assert got == [Decimal(e) for e in expected], (d_str, cells)
+
+
+class TestImportAtomicity:
+    """Round 11: the whole import is ONE transaction — a mid-file failure
+    (e.g. an invalid UTF-8 byte after the first 5000-row flush) rolls back
+    every batch instead of leaving a silently half-imported cache."""
+
+    def test_mid_file_failure_rolls_back_all_batches(self, tmp_path):
+        from datetime import timedelta
+
+        from core.database import CacheDB
+
+        # >5000 long-format USD rows (so both rates_multi AND the legacy
+        # rates mirror receive writes), then a row with a raw invalid UTF-8
+        # byte that blows up AFTER the first flush already ran.
+        lines = ["Period,Currency_ID,Rate_Type,Value"]
+        d = date(2020, 1, 1)
+        for i in range(5500):
+            lines.append(
+                f"{(d + timedelta(days=i)).isoformat()},USD,"
+                f"buying_transfer,34.5000"
+            )
+        body = ("\n".join(lines) + "\n").encode("utf-8")
+        body += b"2026-01-01,USD,buying_transfer,3\xff4.5000\n"
+        csv_path = tmp_path / "bad_tail.csv"
+        csv_path.write_bytes(body)
+
+        cache = CacheDB(db_path=str(tmp_path / "atomic.db"))
+        try:
+            # Round 11 contract change: the importer now retries the parse
+            # under fallback encodings (utf-8-sig -> cp874; 0xff is invalid
+            # in BOTH), then raises a clear ValueError naming the tried
+            # encodings instead of leaking a raw UnicodeDecodeError. Each
+            # failed attempt is its own rolled-back transaction, so the
+            # atomicity guarantee below is unchanged.
+            with pytest.raises(ValueError, match="encoding"):
+                import_bot_csv(str(csv_path), cache)
+            conn = cache._conn()
+            # Pre-fix: 5000 rows in rates_multi and their legacy mirrors
+            # were already committed. Post-fix: full rollback.
+            assert conn.execute(
+                "SELECT COUNT(*) FROM rates_multi"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM rates"
+            ).fetchone()[0] == 0
+        finally:
+            cache.close()
+
+
+# =========================================================================
+#  ENCODING FALLBACK: cp874 (Thai-Windows ANSI) + UTF-16 (Excel "Unicode
+#  Text") saves must import; undecodable bytes get a clear error. (Round 11)
+# =========================================================================
+
+# Thai BOT column headers as written by Thai-locale Excel exports.
+_THAI_HEADER = "วันที่,สกุลเงิน,อัตราซื้อ (โอน),อัตราขาย"
+
+
+class TestEncodingFallback:
+    """The importer advertises Thai header support, but a hardcoded
+    encoding='utf-8-sig' meant those headers could only ever match in UTF-8
+    files. cp874 is the DEFAULT 'CSV (Comma delimited)' encoding on Thai
+    Windows Excel; 'Unicode Text' saves are UTF-16 with a BOM."""
+
+    def test_cp874_thai_headers_import(self, tmp_path):
+        """A wide CSV with Thai headers saved as cp874 must import."""
+        from core.database import CacheDB
+
+        content = (
+            f"{_THAI_HEADER}\r\n"
+            "2025-01-02,USD,34.5000,34.8000\r\n"
+            "2025-01-02,EUR,37.2000,37.6000\r\n"
+        )
+        csv_path = tmp_path / "thai_ansi.csv"
+        csv_path.write_bytes(content.encode("cp874"))
+
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+        try:
+            assert import_bot_csv(str(csv_path), cache) == 2
+            assert cache.get_multi_rate(
+                date(2025, 1, 2), "USD", "buying_transfer",
+            ) == Decimal("34.5000")
+            assert cache.get_multi_rate(
+                date(2025, 1, 2), "EUR", "selling",
+            ) == Decimal("37.6000")
+            # Legacy mirror must be populated through the same path.
+            row = cache.get_rate(date(2025, 1, 2))
+            assert row["usd_buying"] == Decimal("34.5000")
+            assert row["eur_selling"] == Decimal("37.6000")
+        finally:
+            cache.close()
+
+    def test_utf16_unicode_text_import(self, tmp_path):
+        """Excel's 'Unicode Text' save = UTF-16 with BOM, tab-delimited."""
+        from core.database import CacheDB
+
+        header = _THAI_HEADER.replace(",", "\t")
+        content = (
+            f"{header}\r\n"
+            "2025-01-02\tUSD\t34.5000\t34.8000\r\n"
+            "2025-01-03\tUSD\t34.6000\t34.9000\r\n"
+        )
+        csv_path = tmp_path / "unicode_text.csv"
+        # Python's 'utf-16' encoder prepends the (little-endian) BOM,
+        # matching what Excel writes.
+        csv_path.write_bytes(content.encode("utf-16"))
+
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+        try:
+            assert import_bot_csv(str(csv_path), cache) == 2
+            assert cache.get_multi_rate(
+                date(2025, 1, 3), "USD", "selling",
+            ) == Decimal("34.9000")
+        finally:
+            cache.close()
+
+    def test_utf16_big_endian_bom_import(self, tmp_path):
+        """A big-endian UTF-16 BOM is honored too (BOM-detected codec)."""
+        from core.database import CacheDB
+
+        content = (
+            "Period\tCurrency_ID\tBuying Transfer\tSelling\r\n"
+            "2025-01-02\tUSD\t34.5000\t34.8000\r\n"
+        )
+        csv_path = tmp_path / "utf16be.csv"
+        csv_path.write_bytes(b"\xfe\xff" + content.encode("utf-16-be"))
+
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+        try:
+            assert import_bot_csv(str(csv_path), cache) == 1
+        finally:
+            cache.close()
+
+    def test_undecodable_file_raises_clear_error(self, tmp_path):
+        """Total decode failure must name the tried encodings, not leak a
+        raw UnicodeDecodeError."""
+        from core.database import CacheDB
+
+        # 0xFF is invalid UTF-8 here AND undefined in cp874; no UTF-16 BOM.
+        csv_path = tmp_path / "binary.csv"
+        csv_path.write_bytes(b"Period,Currency\n\xff\x81\xff junk")
+
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+        try:
+            with pytest.raises(ValueError, match="utf-8-sig") as excinfo:
+                import_bot_csv(str(csv_path), cache)
+            assert "cp874" in str(excinfo.value)
+            assert "encoding" in str(excinfo.value).lower()
+        finally:
+            cache.close()
+
+    def test_plain_utf8_still_imports(self, tmp_path):
+        """The first-choice encoding path is unchanged for UTF-8 files."""
+        from core.database import CacheDB
+
+        csv_path = tmp_path / "utf8.csv"
+        csv_path.write_bytes(
+            "Period,Currency_ID,Buying Transfer,Selling\n"
+            "2025-01-02,USD,34.5000,34.8000\n".encode("utf-8-sig")
+        )
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+        try:
+            assert import_bot_csv(str(csv_path), cache) == 1
+        finally:
+            cache.close()
+
+
+# =========================================================================
+#  Excel 'sep=<char>' first-line directive (Round 11)
+# =========================================================================
+
+class TestSepDirective:
+    """Excel honors an optional 'sep=<char>' first line (written by
+    LibreOffice / added for Excel compatibility). It must be treated as a
+    delimiter declaration, never mistaken for the header row."""
+
+    def _import(self, tmp_path, content: str) -> tuple:
+        from core.database import CacheDB
+
+        csv_path = tmp_path / "sep.csv"
+        csv_path.write_text(content, encoding="utf-8")
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+        return csv_path, cache
+
+    def test_long_format_with_sep_comma_directive(self, tmp_path):
+        csv_path, cache = self._import(
+            tmp_path,
+            "sep=,\n"
+            "Period,Currency_ID,Rate_Type,Value\n"
+            "2025-01-02,USD,buying_transfer,34.5000\n",
+        )
+        try:
+            assert import_bot_csv(str(csv_path), cache) == 1
+            assert cache.get_multi_rate(
+                date(2025, 1, 2), "USD", "buying_transfer",
+            ) == Decimal("34.5000")
+        finally:
+            cache.close()
+
+    def test_wide_semicolon_file_with_sep_directive(self, tmp_path):
+        """'sep=;' declares the delimiter — parsing must use ';'."""
+        csv_path, cache = self._import(
+            tmp_path,
+            "sep=;\n"
+            "Period;Currency_ID;Buying Transfer;Selling\n"
+            "2025-01-02;USD;34.5000;34.8000\n",
+        )
+        try:
+            assert import_bot_csv(str(csv_path), cache) == 1
+            assert cache.get_multi_rate(
+                date(2025, 1, 2), "USD", "selling",
+            ) == Decimal("34.8000")
+        finally:
+            cache.close()
+
+    def test_sep_directive_case_insensitive_with_crlf_and_bom(self, tmp_path):
+        """'SEP=;' + CRLF + UTF-8 BOM (the Excel-edited shape) parses."""
+        from core.database import CacheDB
+
+        content = (
+            "SEP=;\r\n"
+            "Period;Currency_ID;Buying Transfer;Selling\r\n"
+            "2025-01-02;USD;34.5000;34.8000\r\n"
+        )
+        csv_path = tmp_path / "sep_bom.csv"
+        csv_path.write_bytes(content.encode("utf-8-sig"))
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+        try:
+            assert import_bot_csv(str(csv_path), cache) == 1
+        finally:
+            cache.close()
+
+    def test_file_with_only_sep_line_raises_no_header(self, tmp_path):
+        csv_path, cache = self._import(tmp_path, "sep=,\n")
+        try:
+            with pytest.raises(ValueError, match="no header row"):
+                import_bot_csv(str(csv_path), cache)
+        finally:
+            cache.close()
+
+
+# =========================================================================
+#  Legacy USD/EUR mirror is batched, never per-row (Round 11)
+# =========================================================================
+
+class TestLegacyMirrorBatched:
+    def test_usd_eur_mirror_never_calls_per_row_insert_rate(self, tmp_path):
+        """The legacy mirror must flow through insert_rates_bulk (one
+        executemany per batch) — per-row insert_rate is one COMMIT (= one
+        WAL fsync on the target HDD) per USD/EUR row, ~53x slower."""
+        from core.database import CacheDB
+
+        csv_content = (
+            "Period,Currency_ID,Buying Transfer,Selling\n"
+            "2025-01-06,USD,34.0512,34.3209\n"
+            "2025-01-06,EUR,35.4023,36.1217\n"
+        )
+        csv_path = tmp_path / "mirror.csv"
+        csv_path.write_text(csv_content, encoding="utf-8")
+        cache = CacheDB(db_path=str(tmp_path / "c.db"))
+
+        def _no_per_row(*args, **kwargs):
+            raise AssertionError(
+                "importer must not mirror USD/EUR via per-row insert_rate"
+            )
+
+        cache.insert_rate = _no_per_row
+        try:
+            assert import_bot_csv(str(csv_path), cache) == 2
+            row = cache.get_rate(date(2025, 1, 6))
+            assert row["usd_buying"] == Decimal("34.0512")
+            assert row["usd_selling"] == Decimal("34.3209")
+            assert row["eur_buying"] == Decimal("35.4023")
+            assert row["eur_selling"] == Decimal("36.1217")
+        finally:
+            cache.close()

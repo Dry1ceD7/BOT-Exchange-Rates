@@ -21,7 +21,7 @@ import sqlite3
 import threading
 import weakref
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from core.logic import safe_to_decimal
@@ -113,6 +113,40 @@ class CacheDB:
             with self._conn_lock:
                 self._all_conns.add(conn)
         return conn
+
+    @contextlib.contextmanager
+    def transaction(self):
+        """Atomic multi-call scope on this thread's connection.
+
+        While the scope is active, the per-method commits in
+        :meth:`insert_rate` / :meth:`insert_rates_bulk` /
+        :meth:`insert_multi_rates_bulk` are deferred (via
+        :meth:`_maybe_commit`); the scope commits ONCE on success and rolls
+        back everything on error — so a multi-batch CSV import can never
+        leave a half-imported cache behind a failure. Re-entrant: a nested
+        scope on the same thread is a no-op and the OUTERMOST scope owns the
+        commit/rollback. Thread-local by construction (connection-per-thread
+        + a thread-local flag), so one thread's open transaction never
+        affects another thread's reads under WAL.
+        """
+        if getattr(self._local, "in_txn", False):
+            yield  # nested: outermost scope owns commit/rollback
+            return
+        conn = self._conn()
+        self._local.in_txn = True
+        try:
+            yield
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            self._local.in_txn = False
+
+    def _maybe_commit(self, conn: sqlite3.Connection) -> None:
+        """Commit unless an enclosing :meth:`transaction` scope is active."""
+        if not getattr(self._local, "in_txn", False):
+            conn.commit()
 
     def _recover_from_corruption(self, exc: sqlite3.DatabaseError) -> None:
         """Recreate a corrupted cache.db from scratch so the engine keeps running.
@@ -247,7 +281,20 @@ class CacheDB:
         if not any(decls.get(col, "TEXT").upper() == "REAL" for col in rate_cols):
             return
 
+        # Transaction control is embedded INSIDE the script: Python sqlite3's
+        # executescript performs no implicit transaction management, so the
+        # old script's DROP TABLE rates committed instantly — a crash/power
+        # loss between DROP and RENAME silently emptied the cache. With
+        # BEGIN/COMMIT in the script the whole rebuild is atomic. The leading
+        # DROP TABLE IF EXISTS rates_new recovers the leftover of a prior
+        # crashed run (which used to brick __init__ with "table rates_new
+        # already exists"); the legacy table still holds every row in that
+        # state, so dropping the leftover is lossless. (Do NOT split this
+        # into bare conn.execute() calls — DDL autocommits in legacy
+        # isolation mode when no transaction is open.)
         conn.executescript("""
+            BEGIN;
+            DROP TABLE IF EXISTS rates_new;
             CREATE TABLE rates_new (
                 date          TEXT PRIMARY KEY,
                 usd_buying    TEXT,
@@ -261,8 +308,9 @@ class CacheDB:
                 FROM rates;
             DROP TABLE rates;
             ALTER TABLE rates_new RENAME TO rates;
+            COMMIT;
         """)
-        conn.commit()
+        conn.commit()  # harmless no-op (the script committed); kept for clarity
 
     def _cleanup_fabricated_buying(self, conn: sqlite3.Connection) -> None:
         """One-time cleanup of fabricated Buying TT values (F32 residual).
@@ -329,7 +377,11 @@ class CacheDB:
         if value_decl is None or value_decl.upper() == "TEXT":
             return
 
+        # Atomic rebuild — see _migrate_rates_value_text for the rationale
+        # (BEGIN/COMMIT inside the script + DROP IF EXISTS leftover recovery).
         conn.executescript("""
+            BEGIN;
+            DROP TABLE IF EXISTS rates_multi_new;
             CREATE TABLE rates_multi_new (
                 date       TEXT NOT NULL,
                 currency   TEXT NOT NULL,
@@ -341,8 +393,9 @@ class CacheDB:
                 SELECT date, currency, rate_type, value FROM rates_multi;
             DROP TABLE rates_multi;
             ALTER TABLE rates_multi_new RENAME TO rates_multi;
+            COMMIT;
         """)
-        conn.commit()
+        conn.commit()  # harmless no-op (the script committed); kept for clarity
 
     # ================================================================== #
     #  RATES
@@ -425,7 +478,7 @@ class CacheDB:
             (date_str, _rate_text(usd_buying), _rate_text(usd_selling),
              _rate_text(eur_buying), _rate_text(eur_selling))
         )
-        conn.commit()
+        self._maybe_commit(conn)
 
     def insert_rates_bulk(self, entries: list[tuple]):
         """
@@ -444,7 +497,7 @@ class CacheDB:
         ]
         conn = self._conn()
         conn.executemany(_RATES_UPSERT_SQL, normalized)
-        conn.commit()
+        self._maybe_commit(conn)
 
     # ================================================================== #
     #  HOLIDAYS
@@ -538,7 +591,18 @@ class CacheDB:
             except (ValueError, TypeError):
                 logger.debug("Skipped unparseable rates_multi date: %s", d_str)
                 continue
-            result[d] = Decimal(str(value))
+            try:
+                result[d] = Decimal(str(value))
+            except InvalidOperation:
+                # Corrupt TEXT junk (older build / manual edit / disk damage)
+                # is a cache miss, never a crash — mirrors the unparseable-
+                # date skip above. Missing rate = blank + warning downstream
+                # (Core Rule 9), and the API refetch self-heals the gap.
+                logger.debug(
+                    "Skipped corrupt rates_multi value %r for %s/%s on %s",
+                    value, currency, rate_type, d_str,
+                )
+                continue
         return result
 
     def insert_multi_rates_bulk(
@@ -569,7 +633,7 @@ class CacheDB:
             "VALUES (?, ?, ?, ?)",
             normalized,
         )
-        conn.commit()
+        self._maybe_commit(conn)
 
     # ================================================================== #
     #  EXPORT HELPERS
@@ -586,15 +650,25 @@ class CacheDB:
             "SELECT date, currency, rate_type, value "
             "FROM rates_multi ORDER BY date ASC, currency ASC, rate_type ASC"
         ).fetchall()
-        return [
-            (
-                r[0],
-                r[1],
-                r[2],
-                Decimal(str(r[3])) if r[3] is not None else None,
-            )
-            for r in rows
-        ]
+        out: list[tuple[str, str, str, Decimal | None]] = []
+        for r in rows:
+            value: Decimal | None = None
+            if r[3] is not None:
+                try:
+                    # Deliberately NOT safe_to_decimal: this is the documented
+                    # LOSSLESS export path — no 4dp quantize on the way out.
+                    value = Decimal(str(r[3]))
+                except InvalidOperation:
+                    # Corrupt cached value (non-numeric TEXT): emit None so
+                    # the export skips the row with a logged warning instead
+                    # of killing the export worker (InvalidOperation is an
+                    # ArithmeticError, NOT a ValueError).
+                    logger.warning(
+                        "Skipping corrupt rates_multi value %r for %s/%s/%s",
+                        r[3], r[0], r[1], r[2],
+                    )
+            out.append((r[0], r[1], r[2], value))
+        return out
 
     # ================================================================== #
     #  CLEANUP

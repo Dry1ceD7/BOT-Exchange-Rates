@@ -225,3 +225,46 @@ class TestPrescanOldestDate:
         oldest, detected = prescan_oldest_date([str(fp)])
         assert detected is True
         assert oldest == date(2025, 3, 3)
+
+
+class TestPrescanTruncatedXml:
+    """Round 11: a truncated/garbled sheet XML inside a structurally valid
+    zip raises xml.etree.ElementTree.ParseError (a SyntaxError subclass) —
+    previously NOT in the per-file catch tuple, so one such workbook killed
+    the entire headless/scheduled/GUI prescan instead of being skipped."""
+
+    def _good_and_truncated(self, tmp_path):
+        import zipfile
+
+        good = tmp_path / "good.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Jan"
+        ws.append(["Date", "Cur", "EX Rate"])
+        for i in range(1, 20):
+            ws.append([date(2025, 2, i), "USD", None])
+        wb.save(str(good))
+        wb.close()
+
+        # Valid zip, sheet1.xml halved → ParseError mid-iteration.
+        bad = tmp_path / "bad.xlsx"
+        with zipfile.ZipFile(str(good)) as src, \
+                zipfile.ZipFile(str(bad), "w") as dst:
+            for item in src.infolist():
+                data = src.read(item.filename)
+                if item.filename == "xl/worksheets/sheet1.xml":
+                    data = data[: len(data) // 2]
+                dst.writestr(item, data)
+        return str(good), str(bad)
+
+    def test_truncated_sheet_xml_skips_file_scans_rest(self, tmp_path):
+        good, bad = self._good_and_truncated(tmp_path)
+        # Bad file FIRST: the per-file skip must let the good file still scan.
+        oldest, detected = prescan_oldest_date([bad, good])
+        assert detected is True
+        assert oldest == date(2025, 2, 1)
+
+    def test_only_truncated_file_returns_fallback(self, tmp_path):
+        _good, bad = self._good_and_truncated(tmp_path)
+        oldest, detected = prescan_oldest_date([bad])
+        assert detected is False  # fallback date, no crash

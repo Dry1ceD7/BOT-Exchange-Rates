@@ -75,10 +75,16 @@ def ledger_xlsx(tmp_path):
     one data row per (date, currency) tuple. The date value is written
     verbatim, so callers may pass a real date object OR a string to exercise
     the date-normalization path. The EX Rate cell is left empty.
+
+    ``header_row`` (default 1): when >1, ``header_row - 1`` Crystal-style
+    preamble rows (a report title line, then blanks) are written ABOVE the
+    header, so engine-level tests can exercise the 10-row header scan window
+    (core/excel_io.py find_header_row) end-to-end — real ledgers exported
+    from Crystal Reports carry exactly this shape.
     """
     counter = {"n": 0}
 
-    def _build(tabs, filename=None):
+    def _build(tabs, filename=None, header_row: int = 1):
         counter["n"] += 1
         name = filename or f"ledger_{counter['n']}.xlsx"
         filepath = tmp_path / name
@@ -87,6 +93,11 @@ def ledger_xlsx(tmp_path):
         wb.remove(wb.active)
         for tab_name, rows in tabs.items():
             ws = wb.create_sheet(tab_name)
+            for i in range(header_row - 1):
+                if i == 0:
+                    ws.append(["Crystal Reports - Ledger Export"])
+                else:
+                    ws.append([])
             ws.append(["Date", "Cur", "EX Rate", "Amount"])
             for raw_date, ccy in rows:
                 ws.append([raw_date, ccy, None, 1000])

@@ -535,6 +535,14 @@ class VersionPanel(SafePanel, ctk.CTkFrame):
             except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
                 self._safe_after(0, self._dl_done,
                            f"Error: {e}", t["error_text"], False)
+            except Exception as e:
+                # Broad fallback: any escaping exception would kill this bare
+                # daemon thread with _busy_download stuck True and both
+                # buttons disabled forever. _dl_done(success=False) resets
+                # the flag and re-enables them.
+                logger.exception("Update download worker failed")
+                self._safe_after(0, self._dl_done,
+                           f"Error: {e}", t["error_text"], False)
 
         threading.Thread(target=_worker, daemon=True, name="UpdateDL").start()
 

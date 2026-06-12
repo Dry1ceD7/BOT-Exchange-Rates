@@ -366,3 +366,59 @@ class TestRevertEvents:
         assert "error" in types
         assert any("Revert failed" in e.get("msg", "") for e in events)
         assert any(c[1] == app._show_revert_error for c in app.after_calls)
+
+
+class TestEngineSeamContract:
+    """Round 11: the GUI lane fakes LedgerEngine with *args/**kwargs duck
+    types, so a renamed engine kwarg passes the whole suite and TypeErrors
+    only in production. These signature binds pin both GUI→engine seams —
+    a kwarg rename now fails HERE first."""
+
+    def test_process_batch_signature_matches_handler_call(self):
+        import inspect
+
+        from core.engine import LedgerEngine
+
+        # Mirrors gui/handlers.py BatchHandler._batch_async's call:
+        #   engine.process_batch(file_queue, start_date=, progress_cb=,
+        #                        dry_run=, stop_event=)
+        inspect.signature(LedgerEngine.process_batch).bind(
+            None,  # self
+            ["f.xlsx"],
+            start_date=None,
+            progress_cb=None,
+            dry_run=False,
+            stop_event=None,
+        )
+
+    def test_process_batch_signature_matches_cli_call(self):
+        import inspect
+
+        from core.engine import LedgerEngine
+
+        # Mirrors main.py _process_headless_batch (manifest=None default
+        # there; audit is engine-owned). Pins the CLI seam too.
+        inspect.signature(LedgerEngine.process_batch).bind(
+            None,
+            ["f.xlsx"],
+            start_date=None,
+            progress_cb=None,
+            dry_run=False,
+        )
+
+    def test_update_exrate_standalone_signature_matches_dialog_call(self):
+        import inspect
+
+        from core.engine import LedgerEngine
+
+        # Mirrors gui/panels/exrate_dialog.py's _run() call:
+        #   engine.update_exrate_standalone(tmp_path, progress_cb=,
+        #       currencies=, rate_types=, date_range=)
+        inspect.signature(LedgerEngine.update_exrate_standalone).bind(
+            None,  # self
+            "f.xlsx",
+            progress_cb=None,
+            currencies=["USD"],
+            rate_types={"Buying (TT)": "buying_transfer"},
+            date_range=None,
+        )

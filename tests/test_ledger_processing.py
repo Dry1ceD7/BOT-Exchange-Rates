@@ -11,6 +11,7 @@ from datetime import date
 from decimal import Decimal
 
 import openpyxl
+import pytest
 
 from core.anomaly_guard import AnomalyGuard
 from core.ledger_processing import (
@@ -260,3 +261,122 @@ class TestRunAnomalyCheckExtraCurrencies:
             "USD_buying_transfer", "USD_selling",
             "EUR_buying_transfer", "EUR_selling",
         }
+
+
+class TestPrescanMemoization:
+    """Round 11: the Smart-Date pass and process_ledger share ONE read-only
+    workbook open per unchanged file via an opt-in memo keyed on
+    (abspath, st_mtime_ns, st_size) + header labels."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_memo(self):
+        import core.ledger_processing as lp
+        with lp._PRESCAN_CACHE_LOCK:
+            lp._PRESCAN_CACHE.clear()
+        yield
+        with lp._PRESCAN_CACHE_LOCK:
+            lp._PRESCAN_CACHE.clear()
+
+    def _count_opens(self, monkeypatch):
+        opens = {"n": 0}
+        real_load = openpyxl.load_workbook
+
+        def _counting(*a, **k):
+            opens["n"] += 1
+            return real_load(*a, **k)
+
+        monkeypatch.setattr(openpyxl, "load_workbook", _counting)
+        return opens
+
+    def test_second_scan_of_unchanged_file_uses_memo(
+        self, tmp_path, monkeypatch,
+    ):
+        path = _write_workbook(
+            tmp_path,
+            [(date(2025, 1, 7), "USD", None), (date(2025, 1, 8), "EUR", None)],
+            ["Date", "Cur", "EX Rate"],
+        )
+        opens = self._count_opens(monkeypatch)
+
+        first = prescan_target_dates_and_currencies(
+            path, TARGET_COLS, use_cache=True,
+        )
+        second = prescan_target_dates_and_currencies(
+            path, TARGET_COLS, use_cache=True,
+        )
+        assert opens["n"] == 1  # one physical open, second served from memo
+        assert first == second
+        assert first[0] == {date(2025, 1, 7), date(2025, 1, 8)}
+        assert first[1] == {"USD", "EUR"}
+
+    def test_memo_returns_defensive_copies(self, tmp_path, monkeypatch):
+        path = _write_workbook(
+            tmp_path, [(date(2025, 1, 7), "USD", None)],
+            ["Date", "Cur", "EX Rate"],
+        )
+        a = prescan_target_dates_and_currencies(
+            path, TARGET_COLS, use_cache=True,
+        )
+        a[0].add(date(1999, 1, 1))  # mutate the returned set
+        b = prescan_target_dates_and_currencies(
+            path, TARGET_COLS, use_cache=True,
+        )
+        assert date(1999, 1, 1) not in b[0]  # memo not poisoned
+
+    def test_modified_file_is_rescanned(self, tmp_path, monkeypatch):
+        path = _write_workbook(
+            tmp_path, [(date(2025, 1, 7), "USD", None)],
+            ["Date", "Cur", "EX Rate"],
+        )
+        opens = self._count_opens(monkeypatch)
+        prescan_target_dates_and_currencies(path, TARGET_COLS, use_cache=True)
+
+        # Modify the file (new row → new mtime_ns + size → new identity).
+        wb = openpyxl.load_workbook(path)
+        wb["Jan"].append([date(2025, 1, 9), "GBP", None])
+        wb.save(path)
+        wb.close()
+        opens["n"] = 0  # ignore the edit's own open
+
+        dates, ccys = prescan_target_dates_and_currencies(
+            path, TARGET_COLS, use_cache=True,
+        )
+        assert opens["n"] == 1  # memo missed → real rescan
+        assert date(2025, 1, 9) in dates
+        assert "GBP" in ccys
+
+    def test_no_memo_without_opt_in(self, tmp_path, monkeypatch):
+        path = _write_workbook(
+            tmp_path, [(date(2025, 1, 7), "USD", None)],
+            ["Date", "Cur", "EX Rate"],
+        )
+        opens = self._count_opens(monkeypatch)
+        prescan_target_dates_and_currencies(path, TARGET_COLS)
+        prescan_target_dates_and_currencies(path, TARGET_COLS)
+        assert opens["n"] == 2  # default path is untouched (opt-in only)
+
+    def test_smart_date_prescan_feeds_the_ledger_scan(
+        self, tmp_path, monkeypatch,
+    ):
+        """The headline dedup: prescan_oldest_date scans the file once and
+        the subsequent process_ledger-style scan reuses that exact result —
+        eliminating the provably duplicate read-only open per file."""
+        from core.prescan import prescan_oldest_date
+
+        path = _write_workbook(
+            tmp_path,
+            [(date(2025, 1, 7), "USD", None), (date(2025, 1, 3), "EUR", None)],
+            ["Date", "Cur", "EX Rate"],
+        )
+        opens = self._count_opens(monkeypatch)
+
+        oldest, detected = prescan_oldest_date([path])
+        assert (oldest, detected) == (date(2025, 1, 3), True)
+
+        # process_ledger's scan (same labels, use_cache=True) hits the memo.
+        dates, ccys = prescan_target_dates_and_currencies(
+            path, TARGET_COLS, use_cache=True,
+        )
+        assert opens["n"] == 1
+        assert dates == {date(2025, 1, 7), date(2025, 1, 3)}
+        assert ccys == {"USD", "EUR"}

@@ -34,6 +34,8 @@ from core.constants import (
     BACKUP_MAX_AGE_DAYS,
     DEFAULT_ANOMALY_THRESHOLD_PCT,
     MAX_FILE_SIZE_MB,
+    WORKBOOK_RAM_MULTIPLIER,
+    available_ram_bytes,
     bot_today,
     humanize_save_error,
     parse_date,
@@ -42,7 +44,6 @@ from core.database import CacheDB, get_cache
 from core.exrate_updater import StandaloneExRateUpdater, WorkbookWriter
 from core.ledger_processing import (
     classify_currencies,
-    prescan_target_dates,
     prescan_target_dates_and_currencies,
     run_anomaly_check,
 )
@@ -119,14 +120,31 @@ class BatchManifest:
         filepaths: list[str],
         start_date: str | None,
         dry_run: bool,
+        rate_type: str | None = None,
+        anomaly_threshold_pct: float | None = None,
     ) -> None:
-        """Write the initial manifest at batch start (every file pending)."""
-        self._write({
+        """Write the initial manifest at batch start (every file pending).
+
+        ``rate_type`` / ``anomaly_threshold_pct`` snapshot the engine's
+        settings at BATCH START so a resume can REUSE them instead of
+        re-reading live settings: if the operator changes the rate basis in
+        Settings between a crash and the resume, the files completed
+        pre-crash and the resumed files must still share one rate basis.
+        Both are plain run flags — still NO rates, NO tokens persisted.
+        Omitted (None) values are simply not written, which keeps manifests
+        from older builds readable (the readers return None).
+        """
+        data: dict = {
             "version": BATCH_MANIFEST_VERSION,
             "start_date": start_date,
             "dry_run": bool(dry_run),
             "files": [{"path": fp, "done": False} for fp in filepaths],
-        })
+        }
+        if rate_type is not None:
+            data["rate_type"] = str(rate_type)
+        if anomaly_threshold_pct is not None:
+            data["anomaly_threshold_pct"] = float(anomaly_threshold_pct)
+        self._write(data)
 
     def mark_done(self, filepath: str) -> None:
         """Flag ``filepath`` complete and re-persist (best-effort).
@@ -201,6 +219,28 @@ class BatchManifest:
             return None
         sd = data.get("start_date")
         return sd if isinstance(sd, str) else None
+
+    def rate_type(self) -> str | None:
+        """Return the persisted rate-type snapshot (None if absent).
+
+        None means the manifest predates the snapshot (older build) or was
+        unreadable — callers fall back to current settings in that case.
+        """
+        data = self._read_raw()
+        if data is None:
+            return None
+        rt = data.get("rate_type")
+        return rt if isinstance(rt, str) else None
+
+    def anomaly_threshold_pct(self) -> float | None:
+        """Return the persisted anomaly-threshold snapshot (None if absent)."""
+        data = self._read_raw()
+        if data is None:
+            return None
+        thr = data.get("anomaly_threshold_pct")
+        if isinstance(thr, bool) or not isinstance(thr, (int, float)):
+            return None
+        return float(thr)
 
     def has_pending(self) -> bool:
         """True when a resumable manifest with unfinished files exists."""
@@ -314,6 +354,47 @@ class LedgerEngine:
         # (None for dry runs / when an external caller owns the audit log).
         self.last_audit_path: str | None = None
 
+    def apply_settings_snapshot(
+        self,
+        rate_type: str | None = None,
+        anomaly_threshold_pct: float | None = None,
+    ) -> None:
+        """Override the construction-time settings snapshot (resume path).
+
+        A resumed batch must REUSE the rate basis / anomaly threshold
+        persisted in the crash-recovery manifest at the ORIGINAL batch start
+        — never re-read live settings — so the files completed pre-crash and
+        the resumed files share one rate basis even if the operator changed
+        Settings in between. ``None`` values leave the corresponding
+        construction-time snapshot untouched (manifests from older builds
+        carry no snapshot). Unknown/legacy rate types normalize exactly like
+        ``__init__`` so a stale manifest can never select a column the
+        master sheet does not have.
+        """
+        if isinstance(rate_type, str):
+            if rate_type not in ("buying_transfer", "selling"):
+                logger.warning(
+                    "Unsupported saved rate_type %r in resume manifest; "
+                    "using 'buying_transfer'.",
+                    rate_type,
+                )
+                rate_type = "buying_transfer"
+            if rate_type != self._rate_type:
+                logger.warning(
+                    "Resume: reusing saved rate_type %r from the interrupted "
+                    "batch (current Settings value %r is ignored for this "
+                    "run so all files share one rate basis).",
+                    rate_type, self._rate_type,
+                )
+            self._rate_type = rate_type
+        if (
+            isinstance(anomaly_threshold_pct, (int, float))
+            and not isinstance(anomaly_threshold_pct, bool)
+        ):
+            self._anomaly_guard = AnomalyGuard(
+                threshold_pct=float(anomaly_threshold_pct)
+            )
+
     def _emit(self, msg: str, etype: str = "log") -> None:
         """Push event to EventBus if one is attached."""
         if self._bus is not None:
@@ -361,6 +442,8 @@ class LedgerEngine:
               "supported": bool,  # extension is .xlsx / .xlsm
               "writable": bool,   # in-place save would not hit a lock
               "reason": str | None,  # human message when not ok, else None
+              "ram_advisory": str | None,  # low-free-RAM heads-up (advisory
+                                           # only — never affects "ok")
             }
 
         ``reason`` reuses the round-7 ``humanize_save_error`` wording for the
@@ -401,6 +484,27 @@ class LedgerEngine:
                 "Please close it and process again."
             )
 
+        # ── Peak-RSS advisory (NEVER flips ok) ────────────────────────
+        # Write-mode openpyxl peaks at ~WORKBOOK_RAM_MULTIPLIER (~100x) the
+        # file size (see core/constants.py) and that cost is inherent to the
+        # in-place + keep_vba pipeline. On a 4GB legacy PC with Excel open, a
+        # near-cap file can push the save+verify window into swap-thrash, so
+        # surface a selection-time heads-up when free RAM looks short. Purely
+        # advisory: processing proceeds and the file stays "ok".
+        ram_advisory: str | None = None
+        if reason is None and exists and size_mb > 0:
+            avail = available_ram_bytes()
+            needed = int(size_mb * WORKBOOK_RAM_MULTIPLIER)
+            if avail is not None and avail < needed * 1024 * 1024:
+                ram_advisory = (
+                    f"{name}: low free memory — processing needs roughly "
+                    f"{needed}MB of RAM (~{WORKBOOK_RAM_MULTIPLIER}x the "
+                    f"file size) but only {avail // (1024 * 1024)}MB is "
+                    "free. Close other programs (e.g. Excel) first; "
+                    "processing may be very slow otherwise."
+                )
+                logger.warning("%s", ram_advisory)
+
         return {
             "name": name,
             "ok": reason is None,
@@ -410,6 +514,7 @@ class LedgerEngine:
             "supported": supported,
             "writable": writable,
             "reason": reason,
+            "ram_advisory": ram_advisory,
         }
 
     @staticmethod
@@ -445,15 +550,6 @@ class LedgerEngine:
     ) -> tuple[date, bool]:
         """Delegate to core.prescan module."""
         return prescan_oldest_date(filepaths, target_col_name)
-
-    @staticmethod
-    def compute_year_start_date(
-        target_year: int,
-        holidays: list[date],
-    ) -> date:
-        """Backward-compat delegate to core.logic.compute_year_start_date."""
-        return compute_year_start_date(target_year, holidays)
-
 
     # ================================================================== #
     #  CACHE-FIRST DATA LOADING (v2.6.1)
@@ -712,19 +808,6 @@ class LedgerEngine:
 
         return None  # Not standalone — proceed with normal processing
 
-    def _prescan_target_dates(self, filepath: str) -> set[date]:
-        """Delegate to core.ledger_processing.prescan_target_dates.
-
-        Injects this engine's column map, parser, and emit callback so the
-        read-only date scan keeps identical behavior.
-        """
-        return prescan_target_dates(
-            filepath,
-            self.target_cols,
-            parse_date_fn=self._parse_date,
-            emit_fn=self._emit,
-        )
-
     async def _fetch_extra_currency_rates(
         self,
         extra_currencies: list[str],
@@ -802,21 +885,6 @@ class LedgerEngine:
             out[ccy] = by_date
         return out
 
-    def _build_holiday_lookup(
-        self,
-        all_target_dates: set[date],
-        computed_start: date,
-        logic_engine,
-    ) -> tuple[set[date], dict[date, str]]:
-        """Backward-compat delegate to core.logic.build_holiday_lookup.
-
-        Injects this engine's cache so existing instance callers keep
-        working unchanged.
-        """
-        return build_holiday_lookup(
-            self.cache, all_target_dates, computed_start, logic_engine,
-        )
-
     # ================================================================== #
     #  PROCESS SINGLE LEDGER
     # ================================================================== #
@@ -885,12 +953,20 @@ class LedgerEngine:
         rate_type = self._rate_type
 
         # ── Pre-scan dates + currencies for API data loading ──────────
+        # use_cache=True: when a Smart-Date prescan (core.prescan) already
+        # scanned this exact file (same path/mtime_ns/size), its memoized
+        # (dates, currencies) are reused — eliminating the provably duplicate
+        # read-only workbook open per file. self._parse_date is behaviorally
+        # the shared core.constants.parse_date (a thin delegate), which is
+        # the cache's opt-in requirement. The write-mode load and the sacred
+        # post-save read-back verify reopen are untouched.
         all_target_dates, ledger_currencies = (
             prescan_target_dates_and_currencies(
                 filepath,
                 self.target_cols,
                 parse_date_fn=self._parse_date,
                 emit_fn=self._emit,
+                use_cache=True,
             )
         )
         extra_currencies, unsupported_currencies = classify_currencies(
@@ -1034,7 +1110,14 @@ class LedgerEngine:
             manifest = BatchManifest()
         if manifest is not None:
             try:
-                manifest.begin(filepaths, start_date, dry_run)
+                # Snapshot the engine's settings (rate basis + anomaly
+                # threshold) into the manifest so a resume reuses THIS run's
+                # basis instead of whatever Settings says after the crash.
+                manifest.begin(
+                    filepaths, start_date, dry_run,
+                    rate_type=self._rate_type,
+                    anomaly_threshold_pct=self._anomaly_guard.threshold_pct,
+                )
             except OSError as exc:
                 logger.debug("batch manifest begin failed (non-fatal): %s", exc)
                 manifest = None

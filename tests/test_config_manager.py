@@ -67,6 +67,22 @@ class TestSettingsManagerLoad:
         settings = mgr.load()
         assert settings == DEFAULT_SETTINGS
 
+    @pytest.mark.parametrize("content", ['"th"', "42", '["ab"]'])
+    def test_load_non_object_json_returns_defaults(self, config_dir, content):
+        """Round 11: settings.json holding a JSON scalar or array (valid
+        JSON, but not an object) must return pure defaults — '"th"' used to
+        raise an uncaught ValueError from dict.update on every load, and a
+        pair-like array (["ab"]) silently merged as {"a": "b"} key junk."""
+        filepath = os.path.join(config_dir, "settings.json")
+        os.makedirs(config_dir, exist_ok=True)
+        with open(filepath, "w") as f:
+            f.write(content)
+
+        mgr = SettingsManager(config_dir=config_dir)
+        settings = mgr.load()  # must not raise
+        assert settings == DEFAULT_SETTINGS
+        assert mgr.get("language") == DEFAULT_SETTINGS["language"]
+
     def test_load_caches_result(self, config_dir):
         """Second load() returns cached copy without re-reading disk."""
         mgr = SettingsManager(config_dir=config_dir)
@@ -437,6 +453,35 @@ class TestImportTypeCoercion:
         assert result["anomaly_threshold_pct"] == DEFAULT_SETTINGS[
             "anomaly_threshold_pct"
         ]
+
+    @pytest.mark.parametrize("bad", [0.001, 1e12])
+    def test_out_of_range_api_timeout_falls_back(
+        self, config_dir, tmp_path, bad, caplog
+    ):
+        """Round 11: an imported api_timeout_seconds outside the
+        [MIN_API_TIMEOUT_SECONDS, MAX_API_TIMEOUT_SECONDS] bounds falls back
+        to the default — 0.001 would make every BOT call time out (with
+        tenacity retrying each chunk 4 times)."""
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "in.json")
+        self._write_json(src, {"api_timeout_seconds": bad})
+        with caplog.at_level(logging.WARNING, logger="core.config_manager"):
+            result = mgr.import_settings(src)
+        assert result["api_timeout_seconds"] == DEFAULT_SETTINGS[
+            "api_timeout_seconds"
+        ]
+        assert any(
+            "api_timeout_seconds" in rec.getMessage()
+            for rec in caplog.records
+        )
+
+    def test_in_range_api_timeout_is_honored(self, config_dir, tmp_path):
+        """An in-range imported timeout (e.g. 7) must still be accepted."""
+        mgr = SettingsManager(config_dir=config_dir)
+        src = str(tmp_path / "in.json")
+        self._write_json(src, {"api_timeout_seconds": 7})
+        result = mgr.import_settings(src)
+        assert result["api_timeout_seconds"] == 7.0
 
     def test_boolean_string_coerces(self, config_dir, tmp_path):
         mgr = SettingsManager(config_dir=config_dir)

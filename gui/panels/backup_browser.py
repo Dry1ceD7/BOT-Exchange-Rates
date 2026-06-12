@@ -376,7 +376,14 @@ class BackupBrowser(SafePanel, ctk.CTkToplevel):
         self.app._revert_running = False
         with contextlib.suppress(RuntimeError, tkinter.TclError, AttributeError):
             self.app.btn_revert.configure(state="normal")
-            self.app.btn_process.configure(state="normal")
+            # Idle-state contract: Process Batch only re-enables when files
+            # are actually queued (mirrors _poll_exrate_done). getattr because
+            # self.app may be a bare test root without a file_queue — the
+            # surrounding suppress already tolerates AttributeError anyway.
+            self.app.btn_process.configure(
+                state="normal" if getattr(self.app, "file_queue", None)
+                else "disabled"
+            )
 
 
 def show_backup_browser(app, backup_mgr: BackupManager | None = None):

@@ -13,6 +13,7 @@ Override via environment variables where noted.
 import logging
 import os
 import re
+import sys
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
@@ -27,6 +28,64 @@ MAX_FILE_SIZE_MB: int = int(os.environ.get("BOT_MAX_FILE_MB", "15"))
 CLAUDE.md mandates a strict 15MB "Featherweight" limit. Override via the
 BOT_MAX_FILE_MB environment variable when needed.
 """
+
+WORKBOOK_RAM_MULTIPLIER: int = 100
+"""Measured peak-RSS ratio of the write-mode openpyxl pipeline (~100x).
+
+A 13.00MB ledger peaked at ~1.4GB RSS end-to-end (load + formula injection +
+atomic save + read-back verify); standalone load+save alone peaked ~1.1GB.
+Write-mode openpyxl memory is INHERENT to this pipeline: in-place editing and
+``keep_vba`` (Core Rules 7) rule out ``write_only`` streaming, so the cost
+cannot be engineered away without breaking frozen contracts. This makes the
+15MB ``MAX_FILE_SIZE_MB`` cap above LOAD-BEARING on the 4GB target hardware
+(15MB x ~100 ≈ 1.5GB during the save+verify window), not a conservative
+default — do NOT raise it casually. ``LedgerEngine.preflight_file`` uses this
+multiplier for a selection-time free-RAM advisory (advisory only — it never
+blocks processing).
+"""
+
+def available_ram_bytes() -> int | None:
+    """Best-effort available physical RAM in bytes (None when unknown).
+
+    Used by the selection-time peak-RSS advisory (see
+    ``WORKBOOK_RAM_MULTIPLIER``). Windows: ``GlobalMemoryStatusEx`` via
+    ctypes (``ullAvailPhys``). POSIX: ``sysconf`` ``SC_AVPHYS_PAGES`` x
+    ``SC_PAGE_SIZE`` where exposed (Linux; macOS lacks ``SC_AVPHYS_PAGES``
+    so it returns None there). Never raises — any probe failure degrades to
+    "unknown" so the advisory simply stays silent.
+    """
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class _MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [  # noqa: RUF012 — ctypes field spec, not a mutable default
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = _MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                return int(stat.ullAvailPhys)
+            return None
+        names = getattr(os, "sysconf_names", {})
+        if "SC_AVPHYS_PAGES" in names and "SC_PAGE_SIZE" in names:
+            pages = os.sysconf("SC_AVPHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            if pages > 0 and page_size > 0:
+                return int(pages) * int(page_size)
+    except Exception as exc:  # noqa: BLE001 — advisory probe must never raise
+        logger.debug("available_ram_bytes probe failed: %s", exc)
+    return None
+
 
 SUPPORTED_EXCEL_EXTENSIONS: tuple = (".xlsx", ".xlsm")
 """File extensions accepted for processing."""
@@ -173,6 +232,17 @@ MAX_429_RETRIES: int = int(os.environ.get("BOT_MAX_429_RETRIES", "10"))
 
 API_TIMEOUT_SECONDS: float = 30.0
 """Default httpx timeout for API calls."""
+
+MIN_API_TIMEOUT_SECONDS: float = 3.0
+"""Lower bound for a user-configured 'api_timeout_seconds'.
+
+Single source of truth shared by the settings import coercion
+(core/config_manager) and the client-side guard
+(core/api_client._resolve_timeout_seconds): a hand-edited 0.001 would
+otherwise make every BOT request time out (x4 tenacity retries per chunk)."""
+
+MAX_API_TIMEOUT_SECONDS: float = 300.0
+"""Upper bound for a user-configured 'api_timeout_seconds' (see MIN)."""
 
 API_CONNECT_TIMEOUT_SECONDS: float = 10.0
 """Default httpx connect timeout."""

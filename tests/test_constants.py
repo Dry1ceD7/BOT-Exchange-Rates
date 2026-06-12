@@ -346,3 +346,22 @@ class TestHumanizeBadZipFile:
         from core.constants import humanize_save_error
 
         assert humanize_save_error("f.xlsx", ValueError("boom")) is None
+
+
+class TestAvailableRamProbe:
+    """Round 11: the peak-RSS advisory probe must never raise — any failure
+    degrades to None (advisory stays silent)."""
+
+    def test_returns_none_or_positive_int(self):
+        from core.constants import available_ram_bytes
+
+        v = available_ram_bytes()
+        assert v is None or (isinstance(v, int) and v > 0)
+
+    def test_multiplier_documented_and_loadbearing(self):
+        # 15MB cap x ~100 ≈ 1.5GB on a 4GB target: the ratio is part of the
+        # featherweight contract, pinned so a casual edit gets noticed.
+        from core.constants import MAX_FILE_SIZE_MB, WORKBOOK_RAM_MULTIPLIER
+
+        assert WORKBOOK_RAM_MULTIPLIER == 100
+        assert MAX_FILE_SIZE_MB * WORKBOOK_RAM_MULTIPLIER <= 2048  # fits 4GB PC

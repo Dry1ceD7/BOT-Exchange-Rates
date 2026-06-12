@@ -206,20 +206,30 @@ class AutoScheduler:
 
         logger.info("Scheduler firing for %s (slot %s)", current_date, target_time)
 
-        # Scan watch paths for Excel files (using the snapshot).
-        files = self._scan_watch_paths(watch_paths)
+        try:
+            # Scan watch paths for Excel files (using the snapshot).
+            files = self._scan_watch_paths(watch_paths)
 
-        # Invoke the callback OUTSIDE the lock — it may be slow or re-enter the
-        # scheduler.
-        if files and callback is not None:
-            try:
-                callback(files)
-            except (OSError, ValueError, RuntimeError) as e:
-                logger.error("Scheduler callback failed: %s", e)
-        elif not files:
-            logger.info("Scheduler: no Excel files found in watched paths")
-
-        self._schedule_next()
+            # Invoke the callback OUTSIDE the lock — it may be slow or re-enter
+            # the scheduler.
+            if files and callback is not None:
+                try:
+                    callback(files)
+                except Exception:  # noqa: BLE001 — scheduler must outlive any callback failure
+                    # Broadened from (OSError, ValueError, RuntimeError): any
+                    # other exception type (KeyError/AttributeError/TclError)
+                    # previously propagated out of the Timer thread BEFORE
+                    # _schedule_next ran — no next timer armed, scheduler
+                    # silently dead until restart. logger.exception preserves
+                    # the traceback that used to vanish with the thread.
+                    logger.exception("Scheduler callback failed")
+            elif not files:
+                logger.info("Scheduler: no Excel files found in watched paths")
+        finally:
+            # The chain can NEVER break: the finally also covers an exception
+            # escaping _scan_watch_paths itself, so the next poll is always
+            # armed regardless of what this fire did.
+            self._schedule_next()
 
     def _is_run_due(self, now: datetime, target_time: str) -> bool:
         """Return True if ``now`` is at-or-after today's slot, within the window.

@@ -18,7 +18,11 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from core.constants import API_TIMEOUT_SECONDS
+from core.constants import (
+    API_TIMEOUT_SECONDS,
+    MAX_API_TIMEOUT_SECONDS,
+    MIN_API_TIMEOUT_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,11 +118,23 @@ class SettingsManager:
         try:
             with Path(self._filepath).open(encoding="utf-8") as f:
                 data = json.load(f)
+            # Shape guard (mirrors import_settings): valid JSON that is not
+            # an object must not reach dict.update — a scalar string raises
+            # ValueError (crashing every load) and a pair-like array (e.g.
+            # ["ab"]) would silently merge as junk keys ({"a": "b"}).
+            if not isinstance(data, dict):
+                logger.warning(
+                    "Settings file does not contain a JSON object (got %s). "
+                    "Using defaults.",
+                    type(data).__name__,
+                )
+                return dict(DEFAULT_SETTINGS)
             # Merge with defaults to fill any missing keys
             merged = dict(DEFAULT_SETTINGS)
             merged.update(data)
             return merged
-        except (json.JSONDecodeError, OSError, TypeError) as e:
+        except (ValueError, OSError, TypeError) as e:
+            # ValueError subsumes json.JSONDecodeError (its subclass).
             logger.warning(
                 "Settings file corrupt or unreadable (%s). Using defaults.",
                 e,
@@ -256,6 +272,17 @@ class SettingsManager:
                         and number > MAX_ANOMALY_THRESHOLD_PCT
                     ):
                         pass  # out of range — fall through to the default
+                    elif key == "api_timeout_seconds" and not (
+                        MIN_API_TIMEOUT_SECONDS
+                        <= number
+                        <= MAX_API_TIMEOUT_SECONDS
+                    ):
+                        # Out of range — fall through to the default. A
+                        # pathological timeout (0.001) would make EVERY BOT
+                        # call time out, with tenacity retrying each chunk
+                        # 4 times; api_client._resolve_timeout_seconds
+                        # enforces the same bounds for hand-edited files.
+                        pass
                     else:
                         coerced[key] = (
                             int(number) if isinstance(default, int) else number

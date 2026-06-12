@@ -428,3 +428,97 @@ class TestSchedulerHolidaySkip:
         cb.assert_called_once()
         fake_cache.get_holidays.assert_not_called()
         sched.stop()
+
+
+class TestSchedulerSurvivesCallbackFailure:
+    """Round 11: the poll chain can NEVER break — any unhandled exception in
+    the callback (or even the scan) previously propagated out of the Timer
+    thread BEFORE _schedule_next ran, leaving no next timer armed and the
+    scheduler silently dead until restart."""
+
+    def test_callback_keyerror_still_arms_next_timer(
+        self, tmp_path, monkeypatch,
+    ):
+        # KeyError is deliberately OUTSIDE the old (OSError, ValueError,
+        # RuntimeError) catch tuple — pre-fix it killed the chain.
+        _freeze(monkeypatch, datetime(2025, 1, 1, 23, 0, 0))
+        sched, _cb = _make_fired_scheduler(tmp_path)
+        sched._target_time = "23:00"
+        calls = []
+
+        def _boom(files):
+            calls.append(files)
+            raise KeyError("unhandled in callback")
+
+        sched._callback = _boom
+
+        sched._check_and_fire()  # must NOT raise
+
+        assert len(calls) == 1          # the callback did fire
+        assert sched.is_running         # scheduler still alive
+        # The chain survived: a fresh poll timer is armed.
+        assert sched._timer is not None
+        assert sched._timer.is_alive()
+        sched.stop()
+
+    def test_scan_failure_still_arms_next_timer(self, tmp_path, monkeypatch):
+        # The finally also covers an exception escaping _scan_watch_paths
+        # itself: the next poll is armed even though this fire blew up.
+        _freeze(monkeypatch, datetime(2025, 1, 1, 23, 0, 0))
+        sched, cb = _make_fired_scheduler(tmp_path)
+        sched._target_time = "23:00"
+
+        def _scan_boom(paths):
+            raise AttributeError("scan blew up")
+
+        monkeypatch.setattr(sched, "_scan_watch_paths", _scan_boom)
+
+        # On the real Timer thread this traceback would end the thread, but
+        # the next timer is ALREADY armed by then — chain intact.
+        import pytest
+        with pytest.raises(AttributeError):
+            sched._check_and_fire()
+
+        assert sched.is_running
+        assert sched._timer is not None
+        assert sched._timer.is_alive()
+        sched.stop()
+
+    def test_chain_keeps_polling_after_callback_crash(self, tmp_path):
+        """End-to-end (real timers, tiny poll interval): one crashing fire
+        must not stop subsequent polls from running."""
+        (tmp_path / "dummy.xlsx").write_text("x")
+        fired = []
+
+        def _boom(files):
+            fired.append(files)
+            raise KeyError("unhandled in callback")
+
+        scheduler = AutoScheduler()
+        scheduler.POLL_INTERVAL_SECONDS = 0.05  # instance attr shadows class
+        scheduler.start(
+            time_str=datetime.now().strftime("%H:%M"),
+            watch_paths=[str(tmp_path)],
+            callback=_boom,
+            skip_weekends=False,
+            skip_holidays=False,
+        )
+        try:
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not fired:
+                time.sleep(0.02)
+            assert len(fired) == 1  # fired once; dup-run guard blocks repeats
+            assert scheduler.is_running
+            # A fresh timer keeps being armed after the crash (poll chain
+            # alive): observe at least one live timer object post-fire.
+            deadline = time.time() + 5.0
+            alive = False
+            while time.time() < deadline:
+                t = scheduler._timer
+                if t is not None and t.is_alive():
+                    alive = True
+                    break
+                time.sleep(0.02)
+            assert alive
+        finally:
+            scheduler.stop()

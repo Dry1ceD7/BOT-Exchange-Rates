@@ -120,3 +120,35 @@ class TestExportRatesCsv:
         db = self._make_mock_db([])
         export_rates_csv(csv_path, db)
         assert os.path.exists(csv_path)
+
+
+class TestExportCorruptCachedValue:
+    """Round 11: a corrupt cached value (decimal.InvalidOperation territory)
+    must not wedge the export — the DB read boundary maps it to None and the
+    export skips it with the row count reflecting only good rows."""
+
+    def test_export_completes_and_skips_corrupt_row(self, tmp_path):
+        from core.database import CacheDB
+
+        cache = CacheDB(db_path=str(tmp_path / "corrupt.db"))
+        try:
+            cache.insert_multi_rates_bulk([
+                ("2026-01-06", "GBP", "selling", Decimal("44.5000")),
+            ])
+            # Bypass the validating insert to plant legacy junk.
+            conn = cache._conn()
+            conn.execute(
+                "INSERT INTO rates_multi (date, currency, rate_type, value) "
+                "VALUES ('2026-01-05', 'GBP', 'selling', 'N/A')"
+            )
+            conn.commit()
+
+            csv_path = str(tmp_path / "out.csv")
+            count = export_rates_csv(csv_path, cache)  # must not raise
+            assert count == 1
+            with open(csv_path, encoding="utf-8-sig") as f:
+                rows = list(csv.reader(f))
+            assert rows[1] == ["2026-01-06", "GBP", "selling", "44.5000"]
+            assert all("N/A" not in c for r in rows for c in r)
+        finally:
+            cache.close()

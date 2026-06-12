@@ -9,7 +9,6 @@ Pre-scans queued .xlsx files to detect the oldest date in the
 source column. Uses openpyxl for all modern Excel formats.
 """
 
-import contextlib
 import logging
 import zipfile
 from datetime import date
@@ -17,9 +16,9 @@ from pathlib import Path
 
 import openpyxl
 
-from core.constants import DATE_FORMATS, bot_today, is_skip_sheet
+from core.constants import DATE_FORMATS, bot_today
 from core.constants import parse_date as _shared_parse_date
-from core.excel_io import find_header_row
+from core.ledger_processing import prescan_target_dates_and_currencies
 
 logger = logging.getLogger(__name__)
 
@@ -77,65 +76,44 @@ def prescan_oldest_date(
 def _scan_xlsx(
     filepath: str, target_col_name: str, rate_col_name: str = "EX Rate",
 ) -> date | None:
-    """Scan a .xlsx file using openpyxl to find the oldest date."""
-    oldest: date | None = None
-    wb = None
+    """Scan a .xlsx file to find the oldest date in the source column.
+
+    Delegates the actual read-only workbook scan to
+    ``core.ledger_processing.prescan_target_dates_and_currencies`` with
+    ``use_cache=True``: the SAME scan process_ledger runs immediately
+    afterwards, so memoizing it here means the Smart-Date pass and the
+    ledger pipeline share ONE full workbook open per (unchanged) file
+    instead of two. The header labels passed below ("Date"/"Cur"/"EX Rate"
+    by default) match the engine's ``target_cols`` exactly so the memo key
+    lines up. Skip-sheet filtering (ExRate etc.) and the duplicate-'Date'
+    resolve-left-of-'EX Rate' anchor are owned by the delegate.
+    """
     try:
-        with Path(filepath).open("rb") as f:
-            wb = openpyxl.load_workbook(f, read_only=True, data_only=True)
-            for ws in wb.worksheets:
-                # Skip the app's own master/reference sheets (ExRate etc.):
-                # the ExRate sheet carries a "Date" column going back to the
-                # year start, so scanning it would skew oldest-date detection
-                # toward dates no ledger row actually needs.
-                if is_skip_sheet(ws.title):
-                    continue
-                # Header location is owned by core.excel_io.find_header_row;
-                # duplicates resolve to the first occurrence exactly like the
-                # old row_strs.index() lookup, but the prescan stays silent
-                # on collisions (warn_duplicates=False — the ledger paths
-                # carry the operator warning).
-                header_row_idx, cols = find_header_row(
-                    ws,
-                    (
-                        ("source", target_col_name),
-                        ("out_rate", rate_col_name),
-                    ),
-                    warn_duplicates=False,
-                    resolve_left_of={"source": "out_rate"},
-                )
-
-                if header_row_idx is None or "source" not in cols:
-                    continue
-                target_col_idx = cols["source"] + 1
-
-                for row in ws.iter_rows(
-                    min_row=header_row_idx + 1,
-                    min_col=target_col_idx, max_col=target_col_idx,
-                    values_only=True,
-                ):
-                    parsed = _parse_scan_date(row[0], DATE_FORMATS)
-                    if parsed is not None and (oldest is None or parsed < oldest):
-                        oldest = parsed
+        dates, _currencies = prescan_target_dates_and_currencies(
+            filepath,
+            {
+                "source_date": target_col_name,
+                "currency": "Cur",
+                "out_rate": rate_col_name,
+            },
+            use_cache=True,
+        )
     except (
-        OSError, ValueError, TypeError, KeyError,
+        OSError, ValueError, TypeError, KeyError, SyntaxError,
         zipfile.BadZipFile,
         openpyxl.utils.exceptions.InvalidFileException,
-    ):
-        # OSError covers a locked/permission-denied .xlsx (e.g. open in Excel
-        # on the Windows target): skip that file rather than crash the whole
-        # headless/scheduled prescan — other queued files still scan.
-        # BadZipFile covers non-zip bytes wearing an .xlsx extension (a legacy
-        # BIFF .xls renamed/mis-saved) — it is neither OSError nor
-        # InvalidFileException, so without it one masquerading file killed the
-        # entire prescan.
-        pass
-    finally:
-        if wb is not None:
-            with contextlib.suppress(OSError):
-                wb.close()
+    ) as exc:
+        # Per-file skip semantics: one bad file must never kill the whole
+        # headless/scheduled/GUI prescan — other queued files still scan.
+        #   - OSError: locked/permission-denied .xlsx (open in Excel).
+        #   - BadZipFile: non-zip bytes wearing .xlsx (renamed legacy .xls).
+        #   - SyntaxError: covers xml.etree.ElementTree.ParseError AND lxml's
+        #     XMLSyntaxError (both SyntaxError subclasses) raised on a
+        #     truncated/garbled sheet XML inside a structurally valid zip.
+        logger.debug("Prescan skipped %s: %s", filepath, exc)
+        return None
 
-    return oldest
+    return min(dates) if dates else None
 
 
 # ── Shared date parsing ─────────────────────────────────────────────────

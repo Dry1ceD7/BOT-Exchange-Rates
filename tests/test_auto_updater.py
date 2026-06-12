@@ -346,6 +346,60 @@ class TestFetchExpectedChecksum:
 
         assert result is None
 
+    @pytest.mark.parametrize("body", ["", "\n", "   \n  "])
+    def test_empty_checksum_file_returns_none(self, body):
+        """Round 11: an empty/whitespace .sha256 asset must return None —
+        ''.split()[0] used to raise an uncaught IndexError that killed the
+        bare daemon worker thread and wedged the UI on 'Downloading
+        update...'."""
+        mock_resp = MagicMock()
+        mock_resp.is_redirect = False
+        mock_resp.text = body
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch("core.auto_updater.httpx.get", return_value=mock_resp):
+            result = fetch_expected_checksum("https://github.com/hash.sha256")
+
+        assert result is None
+
+    def test_redirect_loop_is_bounded(self):
+        """Round 11: an allowlisted redirect cycle (github.com ->
+        objects.githubusercontent.com -> github.com ...) must terminate
+        with None within the 5-GET bound (mirrors download_update) instead
+        of looping forever in the update worker thread."""
+        redirect = MagicMock()
+        redirect.is_redirect = True
+        redirect.headers = {"location": "https://github.com/next.sha256"}
+
+        with patch(
+            "core.auto_updater.httpx.get", return_value=redirect,
+        ) as mock_get:
+            result = fetch_expected_checksum("https://github.com/hash.sha256")
+
+        assert result is None
+        # At most 5 GETs total: the initial fetch + 4 redirect follows.
+        assert mock_get.call_count <= 5
+
+    def test_bounded_redirects_still_follow_to_success(self):
+        """A short allowlisted redirect chain still resolves the digest."""
+        expected = "c" * 64
+        redirect = MagicMock()
+        redirect.is_redirect = True
+        redirect.headers = {
+            "location": "https://objects.githubusercontent.com/h.sha256",
+        }
+        final = MagicMock()
+        final.is_redirect = False
+        final.text = f"{expected}  BOT-ExRate-Setup.exe\n"
+        final.raise_for_status = MagicMock()
+
+        with patch(
+            "core.auto_updater.httpx.get", side_effect=[redirect, final],
+        ):
+            result = fetch_expected_checksum("https://github.com/hash.sha256")
+
+        assert result == expected
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  _verify_file_sha256

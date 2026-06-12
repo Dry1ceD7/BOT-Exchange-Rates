@@ -1027,3 +1027,223 @@ class TestResumeOnLaunch:
         app._offer_batch_resume()
 
         assert called["manifest"] is False
+
+
+# ---------------------------------------------------------------------------
+# Round 11: GUI resume pre-fills the saved start_date into the date controls
+# ---------------------------------------------------------------------------
+
+class TestResumePrefillsSavedDate:
+    """_offer_batch_resume must reproduce the saved batch's date window: the
+    manifest's start_date pre-fills the manual date combos (operator-
+    overridable), and a malformed/absent date degrades to auto mode."""
+
+    class _FakeVar:
+        def __init__(self, value):
+            self._v = value
+
+        def set(self, v):
+            self._v = v
+
+        def get(self):
+            return self._v
+
+    class _FakeCombo:
+        def __init__(self, values):
+            self._values = list(values)
+            self._current = None
+
+        def cget(self, key):
+            assert key == "values"
+            return self._values
+
+        def set(self, v):
+            self._current = v
+
+        def get(self):
+            return self._current
+
+    def _resume_app(self):
+        from gui.app import BOTExrateApp
+
+        app = SimpleNamespace(
+            _batch_running=False,
+            file_queue=[],
+            lbl_status=MagicMock(),
+            auto_detect_var=self._FakeVar("on"),
+            use_today_var=self._FakeVar("on"),
+            combo_year=self._FakeCombo(
+                [str(y) for y in range(2020, 2027)]
+            ),
+            combo_month=self._FakeCombo(
+                [f"{m:02d}" for m in range(1, 13)]
+            ),
+            combo_day=self._FakeCombo(
+                [f"{d:02d}" for d in range(1, 32)]
+            ),
+            _on_auto_detect_changed=MagicMock(),
+            _on_toggle_changed=MagicMock(),
+            _set_queue=MagicMock(),
+            _preflight_warn=MagicMock(),
+            _warn_resume_settings_drift=MagicMock(),
+        )
+        app._offer_batch_resume = (
+            lambda: BOTExrateApp._offer_batch_resume(app)
+        )
+        app._prefill_resume_date = (
+            lambda saved: BOTExrateApp._prefill_resume_date(app, saved)
+        )
+        return app
+
+    def _manifest(self, monkeypatch, start_date, accept=True):
+        fake_manifest = MagicMock()
+        fake_manifest.pending_files.return_value = ["/a/feb.xlsx"]
+        fake_manifest.start_date.return_value = start_date
+        monkeypatch.setattr(
+            "core.engine.BatchManifest", lambda *a, **k: fake_manifest,
+        )
+        monkeypatch.setattr(
+            "gui.app.messagebox.askyesno", MagicMock(return_value=accept),
+        )
+        return fake_manifest
+
+    def test_accept_prefills_manual_date_from_manifest(self, monkeypatch):
+        self._manifest(monkeypatch, "2025-01-02")
+        app = self._resume_app()
+
+        app._offer_batch_resume()
+
+        # Auto-detect off, "use today" off, combos hold the saved date —
+        # exactly what _assemble_start_date will hand the engine.
+        assert app.auto_detect_var.get() == "off"
+        assert app.use_today_var.get() == "off"
+        assert (
+            app.combo_year.get(), app.combo_month.get(), app.combo_day.get()
+        ) == ("2025", "01", "02")
+        app._on_auto_detect_changed.assert_called_once()
+        app._on_toggle_changed.assert_called_once()
+        # The status hint quotes the date the engine will receive.
+        text = app.lbl_status.configure.call_args.kwargs["text"]
+        assert "2025-01-02" in text
+
+    def test_garbage_start_date_leaves_auto_mode(self, monkeypatch):
+        self._manifest(monkeypatch, "not-a-date")
+        app = self._resume_app()
+
+        app._offer_batch_resume()
+
+        assert app.auto_detect_var.get() == "on"  # untouched
+        assert app.combo_year.get() is None
+        app._on_auto_detect_changed.assert_not_called()
+        # Falls back to the plain resume hint (no date quoted).
+        text = app.lbl_status.configure.call_args.kwargs["text"]
+        assert "not-a-date" not in text
+
+    def test_none_start_date_leaves_auto_mode(self, monkeypatch):
+        self._manifest(monkeypatch, None)
+        app = self._resume_app()
+        app._offer_batch_resume()
+        assert app.auto_detect_var.get() == "on"
+        app._on_auto_detect_changed.assert_not_called()
+
+    def test_year_outside_combo_range_stays_auto(self, monkeypatch):
+        # combo_year spans 2020..2026 — a 2019 manifest date cannot be
+        # displayed, so the pre-fill is skipped rather than shown wrong.
+        self._manifest(monkeypatch, "2019-05-01")
+        app = self._resume_app()
+        app._offer_batch_resume()
+        assert app.auto_detect_var.get() == "on"
+        assert app.combo_year.get() is None
+
+    def test_settings_drift_warning_consulted_on_accept(self, monkeypatch):
+        manifest = self._manifest(monkeypatch, "2025-01-02")
+        app = self._resume_app()
+        app._offer_batch_resume()
+        app._warn_resume_settings_drift.assert_called_once_with(manifest)
+
+
+# ---------------------------------------------------------------------------
+# Round 11: a crashed Smart-Date prescan must not brick the batch UI
+# ---------------------------------------------------------------------------
+
+class TestPrescanFailureRecovery:
+    """_lock_ui_for_batch runs BEFORE the prescan worker spawns and
+    _batch_running blocks all retries, so the failure handler must unlock
+    the UI (queue retained) instead of leaving Process disabled forever."""
+
+    def test_fail_prescan_batch_unlocks_ui_and_reports(self):
+        from gui.app import BOTExrateApp
+
+        app = SimpleNamespace(
+            _closing=False,
+            _unlock_ui_after_batch=MagicMock(),
+            lbl_status=MagicMock(),
+        )
+        BOTExrateApp._fail_prescan_batch(app, "bad file")
+
+        app._unlock_ui_after_batch.assert_called_once()
+        text = app.lbl_status.configure.call_args.kwargs["text"]
+        assert "Pre-scan failed" in text
+        assert "bad file" in text
+        assert "batch not started" in text
+
+    def test_fail_prescan_batch_noop_when_closing(self):
+        from gui.app import BOTExrateApp
+
+        app = SimpleNamespace(
+            _closing=True,
+            _unlock_ui_after_batch=MagicMock(),
+            lbl_status=MagicMock(),
+        )
+        BOTExrateApp._fail_prescan_batch(app, "bad file")
+        app._unlock_ui_after_batch.assert_not_called()
+        app.lbl_status.configure.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Round 11: revert terminal paths honor the idle-state contract
+# ---------------------------------------------------------------------------
+
+class TestRevertHonorsIdleStateContract:
+    """_show_revert_success/_error re-enable Process Batch ONLY when files
+    are queued (mirrors _poll_exrate_done) — a revert loads no queue, so an
+    empty queue must leave Process disabled."""
+
+    def _app(self, file_queue):
+        from gui.app import BOTExrateApp
+
+        app = SimpleNamespace(
+            file_queue=file_queue,
+            last_processed_path=None,
+            progressbar=MagicMock(),
+            lbl_status=MagicMock(),
+            btn_process=_btn(),
+            btn_reveal=MagicMock(),
+            btn_revert=_btn(),
+            btn_backups=_btn(),
+            backup_mgr=MagicMock(),
+        )
+        app._settle_progressbar = MagicMock()
+        app._refresh_revert_state = MagicMock()
+        app._show_revert_success = (
+            lambda fp, name: BOTExrateApp._show_revert_success(app, fp, name)
+        )
+        app._show_revert_error = (
+            lambda msg: BOTExrateApp._show_revert_error(app, msg)
+        )
+        return app
+
+    def test_revert_success_empty_queue_keeps_process_disabled(self):
+        app = self._app(file_queue=[])
+        app._show_revert_success("/a/ledger.xlsx", "backup_1.xlsx")
+        app.btn_process.configure.assert_any_call(state="disabled")
+
+    def test_revert_success_loaded_queue_reenables_process(self):
+        app = self._app(file_queue=["/a/queued.xlsx"])
+        app._show_revert_success("/a/ledger.xlsx", "backup_1.xlsx")
+        app.btn_process.configure.assert_any_call(state="normal")
+
+    def test_revert_error_empty_queue_keeps_process_disabled(self):
+        app = self._app(file_queue=[])
+        app._show_revert_error("boom")
+        app.btn_process.configure.assert_any_call(state="disabled")

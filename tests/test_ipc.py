@@ -104,6 +104,33 @@ def test_raw_garbage_payload_rejected(isolated_ipc):
         server.stop()
 
 
+def test_holdopen_client_does_not_wedge_restore(isolated_ipc):
+    """Round 11: a client that connects but never sends data must not
+    starve the accept loop. Pre-fix, the loop blocked forever in
+    conn.recv_bytes(256) on the silent holder, so a second launch's
+    RESTORE sat unaccepted while the launch exited 0 believing it was
+    delivered. The bounded conn.poll(2.0) drops the holder and the queued
+    RESTORE is then accepted and fires on_restore."""
+    from multiprocessing.connection import Client
+
+    sock, _ = isolated_ipc
+    restored = threading.Event()
+    server = ipc.SingleInstanceServer(on_restore=restored.set)
+    assert server.start() is True
+    holder = None
+    try:
+        holder = Client(sock)  # connects, never sends anything
+        time.sleep(0.3)  # let the accept loop pick up the holder
+        # The "second launch": main.py treats True as delivered + exits 0.
+        assert ipc.ping_running_instance() is True
+        # RESTORE must be delivered while the holder is STILL connected.
+        assert restored.wait(timeout=6.0) is True
+    finally:
+        if holder is not None:
+            holder.close()
+        server.stop()
+
+
 # ───────────────────────────────────────────────────────────────────────
 #  Per-user private socket path
 # ───────────────────────────────────────────────────────────────────────

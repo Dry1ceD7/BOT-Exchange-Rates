@@ -796,6 +796,26 @@ class TestBOTClientConstruction:
         client = api_client.BOTClient(AsyncMock())
         assert client.timeout_seconds == API_TIMEOUT_SECONDS
 
+    @pytest.mark.parametrize("bad", [0.001, 1e12])
+    def test_out_of_range_timeout_falls_back_to_constant(
+        self, monkeypatch, bad,
+    ):
+        """Round 11: hand-edited settings.json bypasses the import-side
+        coercion (only import_settings calls _coerce_imported), so the
+        client must reject a pathological timeout itself — 0.001 makes
+        every BOT call time out (x4 tenacity retries per chunk), 1e12
+        hangs ~forever on a dead network."""
+        from core import api_client
+        from core.constants import API_TIMEOUT_SECONDS
+        monkeypatch.setattr(
+            "core.config_manager.SettingsManager.get",
+            lambda self, key, default=None: (
+                bad if key == "api_timeout_seconds" else default
+            ),
+        )
+        client = api_client.BOTClient(AsyncMock())
+        assert client.timeout_seconds == API_TIMEOUT_SECONDS
+
     def test_constructor_registers_tokens_with_filter(self, monkeypatch):
         from core import api_client
         registered: list = []
@@ -806,3 +826,57 @@ class TestBOTClientConstruction:
         api_client.BOTClient(AsyncMock())
         assert "exg" in registered
         assert "hol" in registered
+
+
+# =========================================================================
+#  INTER-CHUNK COOLDOWN (Round 11): sleep BETWEEN chunks only
+# =========================================================================
+
+class TestInterChunkCooldown:
+    """The 0.3-0.8s jitter cooldown must run between chunks only — the old
+    loop also slept after the LAST chunk (pure dead time: ~3.3s on the
+    default Dec-20->today window, ~6.6s per currency on a full year)."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_tokens(self, monkeypatch):
+        monkeypatch.setattr(
+            "core.secure_tokens.get_token",
+            lambda key: {"BOT_TOKEN_EXG": "exg", "BOT_TOKEN_HOL": "hol"}.get(key),
+        )
+
+    @pytest.mark.parametrize(
+        ("span_days", "expected_chunks"),
+        [
+            (0, 1),    # single-chunk window -> zero sleeps
+            (30, 1),   # exactly one 31-day chunk -> zero sleeps
+            (31, 2),   # two chunks -> one sleep
+            (70, 3),   # three chunks -> two sleeps
+        ],
+    )
+    def test_sleep_count_is_chunks_minus_one(
+        self, monkeypatch, span_days, expected_chunks,
+    ):
+        from datetime import timedelta
+
+        from core import api_client
+
+        sleeps: list[float] = []
+
+        async def _fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr("core.api_client.asyncio.sleep", _fake_sleep)
+
+        client = api_client.BOTClient(AsyncMock())
+        # Bypass the tenacity-wrapped fetch entirely: {} means "no data".
+        client._fetch_json = AsyncMock(return_value={})
+
+        start = date(2025, 1, 1)
+        result = asyncio.run(
+            client.get_exchange_rates(
+                start, start + timedelta(days=span_days), "USD",
+            )
+        )
+        assert result == []
+        assert client._fetch_json.await_count == expected_chunks
+        assert len(sleeps) == expected_chunks - 1

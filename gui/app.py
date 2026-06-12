@@ -1149,9 +1149,19 @@ class BOTExrateApp(ctk.CTk):
             )
             # Run prescan in background thread to prevent UI freeze
             def _prescan_and_batch():
-                from core.engine import LedgerEngine
-                oldest_date, was_detected = LedgerEngine.prescan_oldest_date(queue_snapshot)
-                start_date_str = oldest_date.strftime("%Y-%m-%d")
+                try:
+                    from core.engine import LedgerEngine
+                    oldest_date, was_detected = (
+                        LedgerEngine.prescan_oldest_date(queue_snapshot)
+                    )
+                    start_date_str = oldest_date.strftime("%Y-%m-%d")
+                except Exception as e:  # noqa: BLE001 — see _fail_prescan_batch
+                    # _lock_ui_for_batch already ran and _batch_running blocks
+                    # every retry, so an escaping exception here would
+                    # permanently brick batch processing until restart.
+                    logger.exception("Pre-scan failed — batch not started")
+                    self._safe_marshal(self._fail_prescan_batch, str(e))
+                    return
 
                 def _update_ui_and_start():
                     # May land after the app started closing — bail before
@@ -1210,6 +1220,24 @@ class BOTExrateApp(ctk.CTk):
                 queue_snapshot, start_date_str, dry_run=dry_run,
             )
 
+    def _fail_prescan_batch(self, err: str):
+        """Tk-thread failure handler for a crashed Smart-Date prescan.
+
+        ``_lock_ui_for_batch`` runs BEFORE the prescan worker spawns and
+        ``_batch_running`` blocks every retry, so without this unlock a
+        prescan exception would leave Process Batch permanently disabled
+        with the queue still loaded (batch UI bricked until restart). The
+        operator keeps the queue and can retry after fixing the bad file.
+        """
+        if getattr(self, "_closing", False):
+            return
+        self._unlock_ui_after_batch()
+        with contextlib.suppress(RuntimeError, tkinter.TclError):
+            self.lbl_status.configure(
+                text=f"Pre-scan failed: {err} — batch not started",
+                text_color=_get_colors()["warning"],
+            )
+
     def _offer_batch_resume(self):
         """Offer to resume an interrupted batch on launch (crash-recovery).
 
@@ -1248,11 +1276,118 @@ class BOTExrateApp(ctk.CTk):
         with contextlib.suppress(Exception):
             self._preflight_warn(pending)
         self._set_queue(pending)
+        # Settings drift check: the GUI resume rebuilds the engine from
+        # CURRENT settings at the next Process click, so if rate_type /
+        # anomaly threshold changed since the crash, warn the operator
+        # BEFORE they press Process. Suppressed: a resume offer must never
+        # break startup (method contract above).
+        with contextlib.suppress(Exception):
+            self._warn_resume_settings_drift(manifest)
+        # Pre-fill the manual date controls from the saved start date so the
+        # resumed run reproduces the saved window while staying operator-
+        # overridable. Suppressed: a malformed/absent manifest date degrades
+        # to today's behavior (auto mode untouched).
+        prefilled_date: str | None = None
+        with contextlib.suppress(Exception):
+            saved = manifest.start_date()
+            if self._prefill_resume_date(saved):
+                prefilled_date = saved
         with contextlib.suppress(RuntimeError, tkinter.TclError):
+            if prefilled_date is not None:
+                # The hint quotes exactly what the engine will receive — the
+                # combos now hold the saved date _assemble_start_date reads.
+                text = tr(
+                    "main.resume_date_loaded",
+                    count=count, plural=plural(count), date=prefilled_date,
+                )
+            else:
+                text = tr(
+                    "main.resume_loaded", count=count, plural=plural(count),
+                )
             self.lbl_status.configure(
-                text=tr("main.resume_loaded", count=count, plural=plural(count)),
+                text=text,
                 text_color=_get_colors()["process_text"],
             )
+
+    def _prefill_resume_date(self, saved) -> bool:
+        """Pre-fill the manual date controls from a resume manifest date.
+
+        Returns True when the controls were switched to manual mode and set
+        to ``saved`` (a ``YYYY-MM-DD`` string); False (or an exception the
+        caller suppresses) leaves auto-detect mode untouched. The visible
+        controls are pre-filled rather than passing the date straight to
+        start_batch so the display and the engine input stay in lockstep
+        AND the operator can override before pressing Process.
+
+        NOTE (documented asymmetry): the manifest's ``dry_run`` flag is
+        deliberately NOT restored here — the simulation checkbox stays as
+        the operator left it, because re-running a crashed REAL batch as a
+        surprise simulation (or vice versa) is worse than asking the
+        operator to re-tick one visible box. The CLI ``--resume`` is always
+        a real run for the same reason.
+        """
+        if not isinstance(saved, str):
+            return False
+        datetime.strptime(saved, "%Y-%m-%d")  # validate; raises on garbage
+        y, m, d = saved.split("-")
+        if y not in list(self.combo_year.cget("values")):
+            # Outside the pickable range (combo spans 2020..current year):
+            # stay in auto mode rather than display a date the combos
+            # cannot actually hold.
+            return False
+        self.auto_detect_var.set("off")
+        self._on_auto_detect_changed()  # reveals manual_date_frame
+        self.use_today_var.set("off")
+        self._on_toggle_changed()       # unlocks the combos
+        self.combo_year.set(y)
+        self.combo_month.set(m)
+        self.combo_day.set(d)
+        return True
+
+    def _warn_resume_settings_drift(self, manifest) -> None:
+        """Warn when Settings changed between the crash and this resume.
+
+        The crash-recovery manifest snapshots the rate basis + anomaly
+        threshold at the ORIGINAL batch start. The GUI resume path cannot
+        inject that snapshot into the engine (a fresh engine snapshots
+        CURRENT settings when Process is clicked), so when the two differ
+        the resumed files would be written on a different rate basis than
+        the files completed pre-crash. Surface the drift so the operator
+        can restore the original Settings first. No-op when the manifest
+        predates the snapshot (readers return None) or nothing changed.
+        """
+        from core.constants import DEFAULT_ANOMALY_THRESHOLD_PCT
+
+        saved_rt = manifest.rate_type()
+        saved_thr = manifest.anomaly_threshold_pct()
+        settings = SettingsManager().load()
+        current_rt = settings.get("rate_type", "buying_transfer")
+        current_thr = settings.get(
+            "anomaly_threshold_pct", DEFAULT_ANOMALY_THRESHOLD_PCT
+        )
+        drift: list[str] = []
+        if isinstance(saved_rt, str) and saved_rt != current_rt:
+            drift.append(f"rate type: {saved_rt} → {current_rt}")
+        if (
+            isinstance(saved_thr, (int, float))
+            and not isinstance(saved_thr, bool)
+            and isinstance(current_thr, (int, float))
+            and float(saved_thr) != float(current_thr)
+        ):
+            drift.append(
+                f"anomaly threshold: {saved_thr}% → {current_thr}%"
+            )
+        if not drift:
+            return
+        changes = ";  ".join(drift)
+        logger.warning(
+            "Resume settings drift — interrupted batch ran with different "
+            "settings than the current ones: %s", changes,
+        )
+        messagebox.showwarning(
+            tr("main.resume_settings_title"),
+            tr("main.resume_settings_body", changes=changes),
+        )
 
     def _settle_progressbar(self, value: float):
         """Stop any pulse animation and pin the bar to a determinate value (#7).
@@ -1759,7 +1894,11 @@ class BOTExrateApp(ctk.CTk):
             text=tr("main.status_reverted", backup=backup_name),
             text_color=_get_colors()["success"]
         )
-        self.btn_process.configure(state="normal")
+        # Idle-state contract (#3): Process only re-enables when files are
+        # queued — mirrors _poll_exrate_done. A revert does not load a queue.
+        self.btn_process.configure(
+            state="normal" if self.file_queue else "disabled"
+        )
         self.last_processed_path = filepath
         self.btn_reveal.pack(pady=(12, 14))
         # A backup still exists post-revert — keep Revert/Backups enabled (#6).
@@ -1771,7 +1910,10 @@ class BOTExrateApp(ctk.CTk):
         self.progressbar.configure(mode="determinate")
         self.progressbar.set(0)
         self.lbl_status.configure(text=f"Error:  {msg}", text_color=_get_colors()["error_text"])
-        self.btn_process.configure(state="normal")
+        # Idle-state contract (#3): same conditional as _show_revert_success.
+        self.btn_process.configure(
+            state="normal" if self.file_queue else "disabled"
+        )
         self._refresh_revert_state()
 
     def _open_backup_browser(self):
@@ -1969,17 +2111,27 @@ class BOTExrateApp(ctk.CTk):
             # concurrency guard in start_batch rejects overlap with a manual run.
             scheduled = list(files)
             logger.info("Auto-scheduler firing with %d files", len(scheduled))
-            # Use prescan to detect the oldest date in the ledgers,
-            # matching the manual processing path instead of hardcoding today.
-            from core.engine import LedgerEngine
-            oldest, was_detected = LedgerEngine.prescan_oldest_date(scheduled)
-            start_str = oldest.strftime("%Y-%m-%d")
-            flag = "auto-detected" if was_detected else "fallback"
-            logger.info("Scheduler start_date: %s (%s)", start_str, flag)
-            # Marshal onto the UI thread: lock the SAME controls a manual run
-            # locks and reflect the run in lbl_status, so a desk-side user can
-            # see it and can't collide with Process/Revert/ExRate (#3).
-            self.after(0, lambda: self._begin_scheduled_batch(scheduled, start_str))
+            try:
+                # Use prescan to detect the oldest date in the ledgers,
+                # matching the manual processing path instead of hardcoding
+                # today.
+                from core.engine import LedgerEngine
+                oldest, was_detected = LedgerEngine.prescan_oldest_date(
+                    scheduled
+                )
+                start_str = oldest.strftime("%Y-%m-%d")
+                flag = "auto-detected" if was_detected else "fallback"
+                logger.info("Scheduler start_date: %s (%s)", start_str, flag)
+            except Exception:  # noqa: BLE001 — one corrupt watched file costs one day's run, not the scheduler
+                logger.exception(
+                    "Scheduler prescan failed — skipping today's run"
+                )
+                return
+            # _safe_marshal (not raw self.after): no-ops once the app is
+            # closing — never queues _begin_scheduled_batch mid-teardown —
+            # and swallows RuntimeError/TclError so a scheduler fire racing
+            # window destruction cannot kill the Timer thread (#3).
+            self._safe_marshal(self._begin_scheduled_batch, scheduled, start_str)
 
         self._auto_scheduler.start(
             time_str=time_str,
