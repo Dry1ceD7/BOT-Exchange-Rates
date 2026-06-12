@@ -1,0 +1,192 @@
+{
+  "tabs": {
+    "Jan": {
+      "header_row": 3,
+      "max_row": 61,
+      "rows": [
+        {
+          "row": 4,
+          "no": "1",
+          "invoice_date": "30/12/2024",
+          "detail": "ค่าสินค้านำเข้า",
+          "cur": "USD",
+          "entry_date": "2025-01-02",
+          "entry_date_number_format": "dd mmm yyyy",
+          "formula": "=IF(OR(D4=\"\",E4=\"\"),\"\",_xlfn.IFS(D4=\"THB\",1,D4=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(E4,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E4,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),D4=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(E4,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E4,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),D4=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(E4,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E4,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))",
+          "amount": "18500"
+        },
+        {
+          "row": 5,
+          "no": "=ROW()-3",
+          "invoice_date": "02/01/2025",
+          "detail": "ค่าขนส่งระหว่างประเทศ",
+          "cur": "EUR",
+          "entry_date": "2025-01-03",
+          "entry_date_number_format": "dd mmm yyyy",
+          "formula": "=IF(OR(D5=\"\",E5=\"\"),\"\",_xlfn.IFS(D5=\"THB\",1,D5=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(E5,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E5,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),D5=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(E5,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E5,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),D5=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(E5,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E5,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))",
+          "amount": "7200"
+        },
+        {
+          "row": 6,
+          "no": "=ROW()-3",
+          "invoice_date": "03/01/2025",
+          "detail": "ค่าสินค้านำเข้า",
+          "cur": "GBP",
+          "entry_date": "2025-01-06",
+          "entry_date_number_format": "dd mmm yyyy",
+          "formula": "=IF(OR(D6=\"\",E6=\"\"),\"\",_xlfn.IFS(D6=\"THB\",1,D6=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(E6,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E6,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),D6=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(E6,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E6,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),D6=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(E6,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E6,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))",
+          "amount": "5100"
+        },
+        {
+          "row": 7,
+          "no": "=ROW()-3",
+          "invoice_date": "03/01/2025",
+          "detail": "ค่าธรรมเนียมธนาคาร",
+          "cur": "USD",
+          "entry_date": "2025-01-04",
+          "entry_date_number_format": "dd mmm yyyy",
+          "formula": "=IF(OR(D7=\"\",E7=\"\"),\"\",_xlfn.IFS(D7=\"THB\",1,D7=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(E7,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E7,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),D7=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(E7,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E7,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),D7=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(E7,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E7,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))",
+          "amount": "950"
+        },
+        {
+          "row": 8,
+          "no": "=ROW()-3",
+          "invoice_date": "31/12/2024",
+          "detail": "ค่าสินค้านำเข้า",
+          "cur": "EUR",
+          "entry_date": "2025-01-01",
+          "entry_date_number_format": "dd mmm yyyy",
+          "formula": "=IF(OR(D8=\"\",E8=\"\"),\"\",_xlfn.IFS(D8=\"THB\",1,D8=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(E8,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E8,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),D8=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(E8,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E8,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),D8=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(E8,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E8,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))",
+          "amount": "4400"
+        },
+        {
+          "row": 9,
+          "no": "=ROW()-3",
+          "invoice_date": "06/01/2025",
+          "detail": "ค่าสินค้าในประเทศ",
+          "cur": "THB",
+          "entry_date": "2025-01-07",
+          "entry_date_number_format": "dd mmm yyyy",
+          "formula": "=IF(OR(D9=\"\",E9=\"\"),\"\",_xlfn.IFS(D9=\"THB\",1,D9=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(E9,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E9,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),D9=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(E9,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E9,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),D9=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(E9,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E9,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))",
+          "amount": "30000"
+        },
+        {
+          "row": 10,
+          "no": "=ROW()-3",
+          "invoice_date": "06/01/2025",
+          "detail": "ค่าอะไหล่นำเข้า",
+          "cur": "JPY",
+          "entry_date": "2025-01-08",
+          "entry_date_number_format": "dd mmm yyyy",
+          "formula": "=IF(OR(D10=\"\",E10=\"\"),\"\",_xlfn.IFS(D10=\"THB\",1,D10=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(E10,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E10,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),D10=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(E10,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E10,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),D10=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(E10,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E10,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))",
+          "amount": "2100"
+        },
+        {
+          "row": 11,
+          "no": "=ROW()-3",
+          "invoice_date": "08/01/2025",
+          "detail": "ค่าสินค้านำเข้า",
+          "cur": "USD",
+          "entry_date": "2025-01-10",
+          "entry_date_number_format": "dd mmm yyyy",
+          "formula": "=IF(OR(D11=\"\",E11=\"\"),\"\",_xlfn.IFS(D11=\"THB\",1,D11=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(E11,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E11,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),D11=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(E11,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E11,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),D11=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(E11,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(E11,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))",
+          "amount": "12750"
+        }
+      ]
+    },
+    "Feb": {
+      "header_row": 3,
+      "max_row": 53,
+      "rows": []
+    },
+    "Mar": {
+      "header_row": 3,
+      "max_row": 53,
+      "rows": []
+    },
+    "Apr": {
+      "header_row": 3,
+      "max_row": 53,
+      "rows": []
+    },
+    "May": {
+      "header_row": 3,
+      "max_row": 53,
+      "rows": []
+    },
+    "Jun": {
+      "header_row": 3,
+      "max_row": 53,
+      "rows": []
+    },
+    "Jul": {
+      "header_row": 3,
+      "max_row": 53,
+      "rows": []
+    },
+    "Aug": {
+      "header_row": 3,
+      "max_row": 53,
+      "rows": []
+    },
+    "Sep": {
+      "header_row": 3,
+      "max_row": 53,
+      "rows": []
+    },
+    "Oct": {
+      "header_row": 3,
+      "max_row": 53,
+      "rows": []
+    },
+    "Nov": {
+      "header_row": 3,
+      "max_row": 53,
+      "rows": []
+    },
+    "Dec": {
+      "header_row": 3,
+      "max_row": 53,
+      "rows": []
+    }
+  },
+  "passthrough": {
+    "PI": [
+      [
+        "PI No",
+        "Customer",
+        "Value"
+      ],
+      [
+        "PI-2025-001",
+        "ACME Industrial GmbH",
+        "12000"
+      ],
+      [
+        "PI-2025-002",
+        "Siam Trading Co., Ltd.",
+        "8400"
+      ]
+    ],
+    "Exrate USD": [
+      [
+        "Date",
+        "Rate"
+      ],
+      [
+        "2024-12-27",
+        "34.2071"
+      ]
+    ],
+    "Exrate EUR": [
+      [
+        "Date",
+        "Rate"
+      ],
+      [
+        "2024-12-27",
+        "35.556"
+      ]
+    ]
+  }
+}

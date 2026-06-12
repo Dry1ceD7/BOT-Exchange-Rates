@@ -9,6 +9,8 @@ Unit tests for core/logic.py — trading-day utilities & Decimal helpers.
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 
+import pytest
+
 from core.logic import (
     BOTLogicEngine,
     build_holiday_lookup,
@@ -156,6 +158,22 @@ class TestComputeYearStartDate:
         # Even with no holidays, Dec 31 shouldn't appear
         result = compute_year_start_date(2025, holidays=[])
         assert result.day != 31 or result.month != 12
+
+    def test_no_trading_day_raises(self):
+        """If every December weekday is a holiday, raise (no silent Dec 20).
+
+        Migrated from tests/test_engine.py in round 11 when the dead
+        LedgerEngine.compute_year_start_date static delegate was removed.
+        """
+        from datetime import timedelta
+        prev_year = 2024
+        all_dec = []
+        d = date(prev_year, 12, 1)
+        while d.year == prev_year:
+            all_dec.append(d)
+            d += timedelta(days=1)
+        with pytest.raises(ValueError):
+            compute_year_start_date(prev_year + 1, all_dec)
 
 
 # =========================================================================

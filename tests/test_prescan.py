@@ -11,42 +11,42 @@ from datetime import date
 import openpyxl
 import pytest
 
-from core.prescan import DATE_FORMATS, _parse_scan_date, prescan_oldest_date
+from core.prescan import _parse_scan_date, prescan_oldest_date
 
 # =========================================================================
 #  HELPERS
 # =========================================================================
 
 class TestParseScanDate:
-    """Tests for _parse_scan_date helper."""
+    """Tests for _parse_scan_date helper.
 
-    FORMATS = DATE_FORMATS
+    round-11: the vestigial ``formats`` parameter (accepted but ignored
+    since the parse moved to core.constants.parse_date) and the
+    test-only ``core.prescan.DATE_FORMATS`` re-export were removed."""
 
     def test_iso_string(self):
-        assert _parse_scan_date("2025-03-10", self.FORMATS) == date(2025, 3, 10)
+        assert _parse_scan_date("2025-03-10") == date(2025, 3, 10)
 
     def test_date_object(self):
-        assert _parse_scan_date(date(2025, 3, 10), self.FORMATS) == date(2025, 3, 10)
+        assert _parse_scan_date(date(2025, 3, 10)) == date(2025, 3, 10)
 
     def test_none_returns_none(self):
-        assert _parse_scan_date(None, self.FORMATS) is None
+        assert _parse_scan_date(None) is None
 
     def test_empty_string_returns_none(self):
-        assert _parse_scan_date("", self.FORMATS) is None
+        assert _parse_scan_date("") is None
 
     def test_nan_returns_none(self):
-        assert _parse_scan_date("nan", self.FORMATS) is None
+        assert _parse_scan_date("nan") is None
 
     def test_invalid_returns_none(self):
-        assert _parse_scan_date("hello", self.FORMATS) is None
+        assert _parse_scan_date("hello") is None
 
     def test_uses_centralized_formats(self):
-        """Fix #5: prescan formats come from the single shared source."""
-        from core.constants import DATE_FORMATS as SHARED
-        assert tuple(DATE_FORMATS) == tuple(SHARED)
-        # Superset coverage preserved.
-        assert _parse_scan_date("10/03/2025", self.FORMATS) == date(2025, 3, 10)
-        assert _parse_scan_date("20250310", self.FORMATS) == date(2025, 3, 10)
+        """Fix #5: prescan parsing IS the single shared parser
+        (core.constants.parse_date) — day-first + compact coverage."""
+        assert _parse_scan_date("10/03/2025") == date(2025, 3, 10)
+        assert _parse_scan_date("20250310") == date(2025, 3, 10)
 
 
 # =========================================================================
@@ -202,3 +202,69 @@ class TestPrescanOldestDate:
         oldest, detected = prescan_oldest_date([str(fake), str(good)])
         assert detected is True
         assert oldest == date(2025, 4, 4)
+
+    def test_duplicate_date_uses_export_entry_column(self, tmp_path):
+        """With two 'Date' columns, the window comes from the one the
+        formulas look up — the Date adjacent to 'EX Rate', not the
+        invoice Date in column A/B.
+
+        If the prescan kept first-occurrence resolution while the writer
+        targets the export-entry column, the fetch window could open too
+        late/early for exactly the dates the written XLOOKUPs need.
+        """
+        fp = tmp_path / "dup.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Date", "Cur", "Export Entry", "Date", "EX Rate"])
+        # Invoice date deliberately OLDER than the export-entry date: a
+        # first-occurrence regression would report 2025-01-01.
+        ws.append([date(2025, 1, 1), "USD", "x", date(2025, 3, 3), None])
+        wb.save(str(fp))
+        wb.close()
+
+        oldest, detected = prescan_oldest_date([str(fp)])
+        assert detected is True
+        assert oldest == date(2025, 3, 3)
+
+
+class TestPrescanTruncatedXml:
+    """Round 11: a truncated/garbled sheet XML inside a structurally valid
+    zip raises xml.etree.ElementTree.ParseError (a SyntaxError subclass) —
+    previously NOT in the per-file catch tuple, so one such workbook killed
+    the entire headless/scheduled/GUI prescan instead of being skipped."""
+
+    def _good_and_truncated(self, tmp_path):
+        import zipfile
+
+        good = tmp_path / "good.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Jan"
+        ws.append(["Date", "Cur", "EX Rate"])
+        for i in range(1, 20):
+            ws.append([date(2025, 2, i), "USD", None])
+        wb.save(str(good))
+        wb.close()
+
+        # Valid zip, sheet1.xml halved → ParseError mid-iteration.
+        bad = tmp_path / "bad.xlsx"
+        with zipfile.ZipFile(str(good)) as src, \
+                zipfile.ZipFile(str(bad), "w") as dst:
+            for item in src.infolist():
+                data = src.read(item.filename)
+                if item.filename == "xl/worksheets/sheet1.xml":
+                    data = data[: len(data) // 2]
+                dst.writestr(item, data)
+        return str(good), str(bad)
+
+    def test_truncated_sheet_xml_skips_file_scans_rest(self, tmp_path):
+        good, bad = self._good_and_truncated(tmp_path)
+        # Bad file FIRST: the per-file skip must let the good file still scan.
+        oldest, detected = prescan_oldest_date([bad, good])
+        assert detected is True
+        assert oldest == date(2025, 2, 1)
+
+    def test_only_truncated_file_returns_fallback(self, tmp_path):
+        _good, bad = self._good_and_truncated(tmp_path)
+        oldest, detected = prescan_oldest_date([bad])
+        assert detected is False  # fallback date, no crash

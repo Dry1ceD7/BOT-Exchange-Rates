@@ -24,12 +24,16 @@ and commit the new JSONs with a message declaring and justifying the change.
 ---------------------------------------------------------------------------
 """
 
+import re
+
 import pytest
 
+from core.exrate_sheet import exrate_fixed_letters
 from tests.golden.build_fixtures import (
     EXPECTED_FILES,
     load_expected,
     run_ledger_scenario,
+    run_realistic_scenario,
     run_standalone_scenario,
 )
 
@@ -47,6 +51,12 @@ def ledger_result(tmp_path_factory):
 def standalone_result(tmp_path_factory):
     """Run the standalone USD/EUR ExRate scenario once for this module."""
     return run_standalone_scenario(tmp_path_factory.mktemp("golden_standalone"))
+
+
+@pytest.fixture(scope="module")
+def realistic_result(tmp_path_factory):
+    """Run the 16-sheet production-shape ledger scenario once."""
+    return run_realistic_scenario(tmp_path_factory.mktemp("golden_realistic"))
 
 
 # =========================================================================
@@ -99,6 +109,161 @@ class TestGoldenLedger:
         for row in labelled:
             assert row[0] is not None
             assert all(v is None for v in row[1:-1]), row
+
+
+# =========================================================================
+#  REALISTIC PRODUCTION-SHAPE LEDGER (16 sheets, dual Date columns)
+# =========================================================================
+
+class TestGoldenRealistic:
+    """Characterization of the production workbook shape: 12 month tabs
+    (NO | Date(invoice) | Thai detail | Cur | Date(export-entry) |
+    EX Rate | Amount, header at row 3 under a Crystal-style preamble),
+    a PI sheet, 'Exrate USD'/'Exrate EUR' historical tabs, and a
+    pre-existing ExRate master with prior history."""
+
+    def test_exrate_sheet_matches_golden(self, realistic_result):
+        """Every ExRate cell — including the PRESERVED pre-existing
+        history row and the appended GBP column."""
+        assert realistic_result["exrate"] == load_expected(
+            "realistic_exrate"
+        )
+
+    def test_ledger_tabs_match_golden(self, realistic_result):
+        """Every month tab: injected formulas verbatim, normalized
+        export-entry dates, untouched invoice dates/Thai details, and
+        the bounded max_row (last data row + buffer)."""
+        assert realistic_result["ledger"] == load_expected(
+            "realistic_formulas"
+        )
+
+    def test_audit_csv_matches_golden(self, realistic_result):
+        assert realistic_result["audit"] == load_expected(
+            "realistic_audit"
+        )
+
+    def test_skip_sheets_round_trip_untouched(self, realistic_result):
+        """PI and the historical 'Exrate USD'/'Exrate EUR' tabs are
+        outside the ledger scan — their content must survive verbatim."""
+        passthrough = realistic_result["ledger"]["passthrough"]
+        assert passthrough["PI"][0] == ["PI No", "Customer", "Value"]
+        assert passthrough["Exrate USD"][0] == ["Date", "Rate"]
+        assert passthrough["Exrate EUR"][0] == ["Date", "Rate"]
+        # No formula/IFS leakage into any of them.
+        for rows in passthrough.values():
+            for row in rows:
+                assert not any(
+                    isinstance(v, str) and v.startswith("=") for v in row
+                )
+
+    def test_prior_master_history_row_preserved(self, realistic_result):
+        """The pre-existing 2024-12-16 master row survives the run (the
+        history-preservation contract) with its exact 4dp values."""
+        rows = {row[0]: row for row in realistic_result["exrate"]["rows"]}
+        assert rows["2024-12-16"][1:5] == [
+            "33.9876", "34.2587", "35.3399", "36.0601",
+        ]
+
+
+# =========================================================================
+#  FORMULA GRAMMAR PROPERTY (frozen AND fresh payloads)
+# =========================================================================
+
+# One guarded lookup: IFERROR(IF(<lookup>="","",<lookup>),"") with the SAME
+# lookup repeated verbatim. XLOOKUP arguments never contain parentheses, so
+# [^()]* is exact.
+_XLOOKUP_RE = re.compile(r"_xlfn\.XLOOKUP\([^()]*\)")
+_GUARDED_RE = re.compile(
+    r'IFERROR\(IF\((_xlfn\.XLOOKUP\([^()]*\))="","",'
+    r'(_xlfn\.XLOOKUP\([^()]*\))\),""\)'
+)
+# round-11: WHOLE-COLUMN references ($A:$A) are the formula contract —
+# row-pinned $A$2:$A$N ranges went stale when the master grew without
+# re-injection. The regex deliberately rejects the pinned shape so a
+# regression to row-pinned ranges fails the allowlist below.
+_EXRATE_RANGE_RE = re.compile(r"ExRate!\$([A-Z]{1,3}):\$([A-Z]{1,3})")
+_LOCAL_REF_RE = re.compile(r"\b([A-Z]{1,3})(\d+)\b")
+
+
+class TestGoldenFormulaGrammar:
+    """Property-style invariants over EVERY formula in both the FROZEN and
+    the FRESHLY-GENERATED ledger payloads. A `--regen` re-freezes whatever
+    the code currently emits (the mechanism that once froze the
+    single-guard 0-render bug); these checks hold regardless of
+    regeneration:
+
+      (a) every _xlfn.XLOOKUP is double-guarded
+          IFERROR(IF(<lookup>="","",<lookup>),"") — blank-never-0;
+      (b) every A1-style reference resolves to the row's OWN source-date /
+          Cur columns or to the allowed ExRate columns (lookup key A +
+          the rate-type fixed letters + appended extra-currency letters)
+          — no formula can silently bind a foreign column again.
+    """
+
+    # buying_transfer is the pinned golden rate type; GBP is the single
+    # appended extra currency (first extra slot -> column F).
+    _ALLOWED_EXRATE = (
+        {"A"}
+        | set(exrate_fixed_letters("buying_transfer").values())
+        | {"F"}
+    )
+
+    def _assert_grammar(self, formula, row, date_letter, cur_letter):
+        # (a) double-guarded lookups, condition == result, none unguarded.
+        guards = _GUARDED_RE.findall(formula)
+        assert guards, formula
+        for cond, result in guards:
+            assert cond == result, formula
+        n_lookups = len(_XLOOKUP_RE.findall(formula))
+        assert n_lookups == 2 * len(guards), formula
+        assert "_xlfn.XLOOKUP" not in _GUARDED_RE.sub("", formula), formula
+
+        # (b) reference allowlist.
+        exrate_letters: set[str] = set()
+
+        def _collect(match):
+            exrate_letters.update((match.group(1), match.group(2)))
+            return ""
+
+        remainder = _EXRATE_RANGE_RE.sub(_collect, formula)
+        assert exrate_letters <= self._ALLOWED_EXRATE, formula
+        local_refs = set(_LOCAL_REF_RE.findall(remainder))
+        assert local_refs <= {
+            (date_letter, str(row)), (cur_letter, str(row)),
+        }, formula
+
+    def _check_simple_payload(self, payload):
+        formulas = [
+            (row["row"], row["formula"])
+            for row in payload["rows"] if row["formula"]
+        ]
+        assert formulas, "golden ledger payload carries no formulas"
+        for row, formula in formulas:
+            # Simple golden layout: A=Date, B=Cur.
+            self._assert_grammar(formula, row, "A", "B")
+
+    def _check_realistic_payload(self, payload):
+        formulas = [
+            (row["row"], row["formula"])
+            for tab in payload["tabs"].values()
+            for row in tab["rows"] if row["formula"]
+        ]
+        assert formulas, "realistic payload carries no formulas"
+        for row, formula in formulas:
+            # Production layout: E=export-entry Date, D=Cur.
+            self._assert_grammar(formula, row, "E", "D")
+
+    def test_frozen_ledger_formulas_grammar(self):
+        self._check_simple_payload(load_expected("ledger_formulas"))
+
+    def test_fresh_ledger_formulas_grammar(self, ledger_result):
+        self._check_simple_payload(ledger_result["ledger"])
+
+    def test_frozen_realistic_formulas_grammar(self):
+        self._check_realistic_payload(load_expected("realistic_formulas"))
+
+    def test_fresh_realistic_formulas_grammar(self, realistic_result):
+        self._check_realistic_payload(realistic_result["ledger"])
 
 
 # =========================================================================

@@ -140,6 +140,42 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "Resumed:  {count} ledger{plural} reloaded into the queue.",
         "th": "ดำเนินการต่อ:  โหลดสมุดบัญชี {count} ไฟล์กลับเข้าคิวแล้ว",
     },
+    # Variant of main.resume_loaded shown when the saved batch's start date
+    # was loaded into the manual date picker — the {date} quoted here is
+    # exactly what the engine will receive (UI-hint/engine lockstep).
+    "main.resume_date_loaded": {
+        "en": (
+            "Resumed:  {count} ledger{plural} reloaded — start date {date} "
+            "loaded from the saved batch (adjust the date picker to "
+            "override)."
+        ),
+        "th": (
+            "ดำเนินการต่อ:  โหลดสมุดบัญชี {count} ไฟล์กลับเข้าคิวแล้ว — "
+            "ใช้วันที่เริ่มต้น {date} จากชุดงานที่บันทึกไว้ "
+            "(ปรับตัวเลือกวันที่เพื่อเปลี่ยน)"
+        ),
+    },
+    # Warning raised when Settings changed between a crash and the resume:
+    # the completed pre-crash files used the SAVED settings, so processing
+    # the remainder under the current ones would mix rate bases in one batch.
+    "main.resume_settings_title": {
+        "en": "Settings changed since the interrupted batch",
+        "th": "การตั้งค่าเปลี่ยนไปจากชุดงานที่ค้างไว้",
+    },
+    "main.resume_settings_body": {
+        "en": (
+            "The interrupted batch ran with different settings than the "
+            "current ones ({changes}).  Files completed before the crash "
+            "used the old settings — restore them in Settings before "
+            "pressing Process Batch, or the remaining files will be "
+            "written on a different rate basis."
+        ),
+        "th": (
+            "ชุดงานที่ค้างไว้ใช้การตั้งค่าต่างจากปัจจุบัน ({changes})  "
+            "ไฟล์ที่เสร็จก่อนหน้าใช้การตั้งค่าเดิม — โปรดคืนค่าการตั้งค่า"
+            "ก่อนกดประมวลผล มิฉะนั้นไฟล์ที่เหลือจะใช้ฐานอัตราต่างกัน"
+        ),
+    },
     "main.empty_state_steps": {
         "en": (
             "1. Drop or select your Excel ledgers   "

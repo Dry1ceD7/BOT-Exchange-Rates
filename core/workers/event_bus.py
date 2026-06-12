@@ -44,8 +44,8 @@ class EventBus:
 
         On overflow, the oldest NON-priority event is evicted so audit-critical
         error/success lines survive. If the queue is full of priority events,
-        a visible "N log lines dropped" marker is injected instead of silently
-        discarding.
+        a visible "N events dropped (queue full, including error/success
+        lines)" marker is injected instead of silently discarding.
         """
         with self._lock:
             was_full = len(self._queue) >= self._maxlen
@@ -75,12 +75,14 @@ class EventBus:
                     self._last_warn_ts = now
 
     def _evict_one(self) -> None:
-        """Evict one event to make room. Caller must hold the lock.
+        """Make room for one incoming event. Caller must hold the lock.
 
         Prefers dropping the oldest non-priority event. If every queued event
-        is priority (error/success), drops the oldest priority event but leaves
-        a visible "N log lines dropped" marker so the audit trail shows a gap
-        rather than silently losing lines.
+        is priority (error/success), drops the oldest priority event(s) but
+        leaves a visible "N events dropped" marker so the audit trail shows a
+        gap rather than silently losing lines. Net length change is always
+        -1 (a FRESH marker pays for its own slot by evicting a second
+        priority event), so the caller's append keeps len == maxlen.
         """
         # Reuse an existing drop marker if present (so its count accumulates).
         existing_marker = None
@@ -97,24 +99,46 @@ class EventBus:
                 del self._queue[i]
                 return
 
-        # All remaining events are priority — drop the oldest priority event
-        # and record the gap in a visible marker (audit trail shows a gap
-        # rather than a silent loss).
+        # All remaining events are priority — drop the oldest priority
+        # event(s) and record the gap in a visible marker (audit trail shows
+        # a gap rather than a silent loss). The marker text says so plainly:
+        # what was dropped here INCLUDES error/success lines.
         # popleft may remove the marker; guard by removing first priority event.
+        removed = 0
         for i, ev in enumerate(self._queue):
             if ev.get("type") in self.PRIORITY_TYPES:
                 del self._queue[i]
+                removed = 1
                 break
         if existing_marker is not None:
-            existing_marker["_dropped"] += 1
+            existing_marker["_dropped"] += removed
             existing_marker["msg"] = (
-                f"WARNING: {existing_marker['_dropped']} log lines dropped (queue full)"
+                f"WARNING: {existing_marker['_dropped']} events dropped "
+                "(queue full, including error/success lines)"
             )
         else:
+            # A FRESH marker occupies a slot of its own, so evict a SECOND
+            # oldest priority event (when one exists) to keep the net length
+            # change at -1 — the caller's append then restores len == maxlen
+            # exactly (the old code peaked at maxlen+1). The second evicted
+            # event is COUNTED in the marker, never silently lost. Residual
+            # edge: with maxlen=1 there is no second event to evict, so len
+            # peaks at 2 (stable, never grows further); the production
+            # default is 2000.
+            extra = 0
+            for i, ev in enumerate(self._queue):
+                if ev.get("type") in self.PRIORITY_TYPES:
+                    del self._queue[i]
+                    extra = 1
+                    break
+            dropped = removed + extra
             self._queue.appendleft({
                 "type": "warning",
-                "msg": "WARNING: 1 log lines dropped (queue full)",
-                "_dropped": 1,
+                "msg": (
+                    f"WARNING: {dropped} events dropped "
+                    "(queue full, including error/success lines)"
+                ),
+                "_dropped": dropped,
             })
 
     def drain(self) -> list[dict[str, Any]]:

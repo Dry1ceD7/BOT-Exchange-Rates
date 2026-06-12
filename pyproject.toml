@@ -26,6 +26,11 @@ dependencies = [
     "tkinterdnd2-universal>=1.7.3",
     "packaging>=26.2",
     "keyring>=25.7.0",
+    # lxml: openpyxl auto-detects it and switches to its C-based writer/reader
+    # (~20% faster saves, ~17% faster loads on a 13MB ledger; identical peak
+    # RSS). Zero code change — the post-save read-back gate verifies VALUES,
+    # not XML bytes. Wheels exist for the Windows 4GB target.
+    "lxml>=5.0",
     "pystray>=0.19.5; sys_platform == 'win32'",
     # Pillow is required on all platforms: gui/app.py uses a PIL-based icon
     # fallback (PhotoImage TclError path) that was unreachable on non-Windows

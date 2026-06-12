@@ -634,7 +634,11 @@ class SchedulerPanel(ctk.CTkFrame):
         self._settings.update(scheduler_keys)
 
     def get_config(self) -> dict:
-        """Return current scheduler config for external use."""
+        """Return the panel's current scheduler config as a plain dict.
+
+        Test seam: persistence goes through _save()/self._mgr.set(), so no
+        runtime code consumes this; read by tests/gui/test_scheduler_panel.py.
+        """
         return {
             "enabled": self._enable_var.get() == "on",
             "time": f"{self._hour_var.get()}:{self._minute_var.get()}",

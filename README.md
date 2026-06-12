@@ -4,7 +4,7 @@
 
 **Enterprise Desktop Application for Bank of Thailand Exchange Rate Automation**
 
-Version 3.6.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
+Version 3.7.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Release Pipeline
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red)](LICENSE)
@@ -18,6 +18,19 @@ Version 3.6.0  ·  Modular SFFB Architecture  ·  Cross-Platform  ·  CI/CD Rele
 The **BOT Exchange Rate Processor** is a standalone desktop application that automates the extraction, resolution, and embedding of official Bank of Thailand (BOT) exchange rates into financial accounting ledgers (`.xlsx`).
 
 It replaces a fragmented, error-prone multi-script workflow with a single, production-grade GUI application — built for **zero-downtime corporate environments**, legacy office hardware (4GB RAM, low-resolution monitors), and strict Thai accounting compliance.
+
+### What's New in V3.7.0 (Rounds 11-12: Zero-Residual Audit — Accuracy, Resilience, Speed)
+
+| Feature | Description |
+|---------|-------------|
+| **Correct rate-date binding** | Production ledgers carry two `Date` columns (invoice + export entry). The pipeline now binds rates to the **export-entry date** next to `EX Rate` — the legacy formula contract — across the writer, the fetch window, and the start-date prescan. Incomplete rows (no export-entry date yet) render **blank**, never a number. |
+| **Massively faster prescan** | The date/currency prescan was accidentally quadratic on read-only sheets — a 2,000-row sheet took ~193s; it now takes **0.03s** (~6,200×). Duplicate Smart-Date scans are memoized (one open per unchanged file), and `lxml` accelerates saves ~20%. |
+| **Idempotent re-runs** | Re-processing a workbook no longer grows sheets (buffer rows key off the last data row) and master-sheet formulas use whole-column references that stay valid as the master grows. Existing history rows are never silently deleted by a manual date-range refresh. |
+| **Data-safety hardening** | A transient `database is locked` can no longer wipe a healthy cache; schema migrations are transactional; backups are keyed by source identity so same-named ledgers from different folders/years can never cross-restore; appended extra-currency columns (GBP/CNY/…) survive every re-run. |
+| **Holiday-aware caching** | Weekday holidays no longer count as cache misses — fully cached batches make zero API calls, and the offline CSV path works again. CSV import accepts Thai-Windows (cp874) and UTF-16 Excel saves, skips `sep=,` directives, imports in one transaction, and rejects negative/ambiguous data. |
+| **Thai calendar accuracy** | Buddhist-Era leap days parse correctly (`29/02/2567` → 29 Feb 2024); case/whitespace-variant `Exrate USD` tabs are skipped; whitespace-padded currency codes resolve; rows with unreadable dates are warned, not silently blanked. |
+| **Resilient GUI & scheduler** | The auto-scheduler survives callback exceptions; resumed batches keep their original rate-type; the settings modal keeps modality and re-themes itself on appearance change; update installs refuse mid-batch and shut down cleanly. |
+| **Stronger test floor** | +158 tests since v3.6.0 (now ~1,774), including a production-shaped golden fixture (dual Date columns, Thai text, legacy tabs) and a formula-grammar property check enforcing the blank-never-0 guard on every formula written. |
 
 ### What's New in V3.6.0 (Round-10 Audit: Exact Decimal Pipeline, Verified Saves, Field Fixes)
 
@@ -412,7 +425,7 @@ redistribution is not permitted. See [LICENSE](LICENSE) for the full terms.
 
 <div align="center">
 
-*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.6.0*
+*Built for the Finance Department  ·  Bank of Thailand API  ·  V3.7.0*
 
 Property of  
 Advanced ID Asia Engineering., Ltd

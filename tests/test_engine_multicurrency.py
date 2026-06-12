@@ -398,8 +398,12 @@ class TestStandardPathManualRange:
         written.discard(None)
         wb.close()
 
-        # Exactly the manual 3-day window — dr_end honored, not today().
-        assert written == {dr_start, date(2025, 3, 11), dr_end}
+        # The manual 3-day window — dr_end honored, not today() — PLUS the
+        # fixture's pre-existing 1999 row: existing history outside the
+        # requested range is preserved, never silently trimmed.
+        assert written == {
+            date(1999, 1, 1), dr_start, date(2025, 3, 11), dr_end,
+        }
 
     def test_standalone_run_prunes_old_backups(
         self, exrate_file, temp_backup, tmp_cache,
@@ -436,7 +440,8 @@ class TestStandardPathManualRange:
 
         # The stale backup is gone; a fresh backup of this run remains.
         assert not old_backup.exists()
-        fresh = list(backup_dir.glob("ExRate_standalone__bak__*.xlsx"))
+        # Digest-aware glob: backup names are now {stem}__{digest}__bak__...
+        fresh = list(backup_dir.glob("ExRate_standalone__*__bak__*.xlsx"))
         assert fresh, "expected a fresh backup from the standalone run"
 
 
@@ -542,7 +547,9 @@ class TestLedgerMultiCurrency:
             assert 'B3="GBP"' in gbp_formula
             from openpyxl.utils import get_column_letter
             col_letter = get_column_letter(gbp_col)
-            assert f"ExRate!${col_letter}$2" in gbp_formula
+            # round-11: whole-column master references ($F:$F) — see
+            # core/excel_io.py _guarded_lookup (stale-N elimination).
+            assert f"ExRate!${col_letter}:${col_letter}" in gbp_formula
         finally:
             wb.close()
 
@@ -953,7 +960,8 @@ class TestRateTypeSnapshot:
         try:
             formula = wb["Jan"].cell(row=2, column=3).value
             # Buying columns are B (USD) / D (EUR); selling would be C / E.
-            assert "ExRate!$B$2" in formula
-            assert "ExRate!$C$2" not in formula
+            # (round-11: whole-column master references, $B:$B.)
+            assert "ExRate!$B:$B" in formula
+            assert "ExRate!$C:$C" not in formula
         finally:
             wb.close()

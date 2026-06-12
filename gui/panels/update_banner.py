@@ -11,6 +11,7 @@ import contextlib
 import logging
 import sys
 import threading
+import tkinter
 
 import customtkinter as ctk
 
@@ -209,41 +210,48 @@ class UpdateManager(SafePanel):
             self._dl_label.place(relx=0.5, rely=0.5, anchor="center")
 
         def _worker():
-            from core.auto_updater import fetch_expected_checksum
+            # The whole body is guarded: any escaping exception would kill
+            # this bare daemon thread and leave the banner wedged on
+            # "Downloading update..." with no way to retry.
+            try:
+                from core.auto_updater import fetch_expected_checksum
 
-            asset = get_installer_asset_url(version)
-            if asset.get("error") or not asset.get("url"):
-                self._safe_after(0, self._show_error,
-                               asset.get("error", "No installer found"))
-                return
+                asset = get_installer_asset_url(version)
+                if asset.get("error") or not asset.get("url"):
+                    self._safe_after(0, self._show_error,
+                                   asset.get("error", "No installer found"))
+                    return
 
-            # C-02: Fetch SHA-256 checksum for integrity verification
-            expected_sha256 = None
-            if asset.get("sha256_url"):
-                expected_sha256 = fetch_expected_checksum(
-                    asset["sha256_url"]
+                # C-02: Fetch SHA-256 checksum for integrity verification
+                expected_sha256 = None
+                if asset.get("sha256_url"):
+                    expected_sha256 = fetch_expected_checksum(
+                        asset["sha256_url"]
+                    )
+                # Stash for the re-verify-before-exec step in _execute_installer.
+                self._pending_sha256 = expected_sha256
+
+                def _progress(downloaded, total):
+                    pct = int(downloaded / total * 100)
+                    self._safe_after(0, self._update_progress, pct)
+
+                result = download_update(
+                    url=asset["url"],
+                    filename=asset.get("filename"),
+                    progress_cb=_progress,
+                    expected_sha256=expected_sha256,
                 )
-            # Stash for the re-verify-before-exec step in _execute_installer.
-            self._pending_sha256 = expected_sha256
+                if result.get("error"):
+                    self._safe_after(0, self._show_error, result["error"])
+                    return
 
-            def _progress(downloaded, total):
-                pct = int(downloaded / total * 100)
-                self._safe_after(0, self._update_progress, pct)
-
-            result = download_update(
-                url=asset["url"],
-                filename=asset.get("filename"),
-                progress_cb=_progress,
-                expected_sha256=expected_sha256,
-            )
-            if result.get("error"):
-                self._safe_after(0, self._show_error, result["error"])
-                return
-
-            # Instead of applying the update immediately and keeping the app alive,
-            # we present a 'Ready to Install' banner. The user must click to apply,
-            # which will execute the bat file and immediately exit the app.
-            self._safe_after(0, self._show_ready_to_install, result["path"])
+                # Instead of applying the update immediately and keeping the app alive,
+                # we present a 'Ready to Install' banner. The user must click to apply,
+                # which will execute the bat file and immediately exit the app.
+                self._safe_after(0, self._show_ready_to_install, result["path"])
+            except Exception as e:
+                logger.exception("Update download worker failed")
+                self._safe_after(0, self._show_error, str(e))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -309,6 +317,30 @@ class UpdateManager(SafePanel):
         t = get_theme()
         from core.auto_updater import apply_update
 
+        # Never tear the process down under a live batch save — same hazard
+        # VersionPanel._do_restart refuses (a sys.exit mid-write risks a torn
+        # ledger; the read-back gate protects the file, but the run is lost
+        # and the operator gets no summary). The banner stays; the user
+        # retries after the batch finishes.
+        batch_handler = getattr(self.app, "batch_handler", None)
+        if (
+            getattr(self.app, "_batch_running", False)
+            or getattr(batch_handler, "_batch_active", False)
+        ):
+            if self._banner:
+                for w in self._banner.winfo_children():
+                    w.destroy()
+                ctk.CTkLabel(
+                    self._banner,
+                    text=(
+                        "  A batch is running — finish it, then click "
+                        "Install & Restart again."
+                    ),
+                    font=ctk.CTkFont(size=13, weight="bold"),
+                    text_color=t["banner_text_light"],
+                ).place(relx=0.5, rely=0.5, anchor="center")
+            return
+
         # Update the UI first so user knows it's working
         if self._banner:
             for w in self._banner.winfo_children():
@@ -345,8 +377,17 @@ class UpdateManager(SafePanel):
             )
 
     def _exit_for_restart(self) -> None:
-        """Clean exit for restart — destroy window and exit process."""
+        """Clean exit for restart — full app shutdown, then exit.
+
+        Routes through _on_app_close (ThreadRegistry.shutdown_all, tray/IPC
+        teardown) instead of a bare destroy() so workers are joined before
+        the installer overwrites the executable.
+        """
         import sys
-        with contextlib.suppress(RuntimeError):
-            self.app.destroy()
+        close = getattr(self.app, "_on_app_close", None)
+        with contextlib.suppress(RuntimeError, tkinter.TclError):
+            if callable(close):
+                close()
+            else:
+                self.app.destroy()
         sys.exit(0)

@@ -296,16 +296,34 @@ def fetch_expected_checksum(sha256_url: str) -> str | None:
     try:
         # follow_redirects=False + manual host validation prevents a
         # redirect from leading us off the allowlist (SSRF).
-        resp = httpx.get(sha256_url, timeout=10.0, follow_redirects=False)
-        while resp.is_redirect:
+        resp: httpx.Response | None = None
+        next_url = sha256_url
+        for _ in range(5):  # bounded redirect chain (mirrors download_update)
+            resp = httpx.get(next_url, timeout=10.0, follow_redirects=False)
+            if not resp.is_redirect:
+                break
             location = resp.headers.get("location", "")
             if not _is_allowed_download_url(location):
                 logger.warning("Checksum redirect to non-allowlisted host blocked: %s", location)
                 return None
-            resp = httpx.get(location, timeout=10.0, follow_redirects=False)
+            next_url = location
+        else:
+            # An allowlisted redirect cycle (github.com <-> objects.github...)
+            # used to loop forever, hanging the update worker thread.
+            logger.warning(
+                "Checksum fetch blocked: redirect limit exceeded for %s",
+                sha256_url,
+            )
+            return None
         resp.raise_for_status()
         # Format: "abcdef123456...  filename.exe" or just "abcdef123456..."
-        line = resp.text.strip().split()[0]
+        parts = resp.text.strip().split()
+        if not parts:
+            # An empty/whitespace .sha256 asset: [0] would raise IndexError
+            # straight out of the caller's daemon worker thread.
+            logger.warning("Empty checksum file at %s", sha256_url)
+            return None
+        line = parts[0]
         if len(line) == 64:  # valid SHA-256 hex length
             return line.lower()
     except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
@@ -691,13 +709,3 @@ def restart_app() -> None:
 
     sys.exit(0)
 
-
-# ---------------------------------------------------------------------------
-# BACK-COMPAT ALIASES
-# ---------------------------------------------------------------------------
-# These helpers were promoted from private (_name) to public (name) so other
-# modules (e.g. GUI panels) can import them across package boundaries. The old
-# underscore names are kept as thin module-level aliases so existing importers
-# keep working until they migrate to the public names. Remove after migration.
-_get_install_dir = get_install_dir
-_fetch_expected_checksum = fetch_expected_checksum

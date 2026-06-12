@@ -133,6 +133,10 @@ class TestScheduledBatchHonorsRevert:
             _scheduled_run_active=False,
             _revert_running=revert_running,
             _exrate_running=False,
+            # Round 11: _show_revert_success/_error now consult file_queue
+            # for the idle-state contract (Process only re-enables with a
+            # loaded queue), so the fake must carry one.
+            file_queue=[],
             last_processed_path=None,
             backup_mgr=MagicMock(),
             btn_process=_btn(),
@@ -247,6 +251,8 @@ class TestGuardedRevertEntry:
             _scheduled_run_active=False,
             _revert_running=revert_running,
             _exrate_running=exrate_running,
+            # Round 11: idle-state contract reads file_queue (see above).
+            file_queue=[],
             last_processed_path=None,
             backup_mgr=MagicMock(),
             btn_process=_btn(),

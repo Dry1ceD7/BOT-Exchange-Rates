@@ -24,7 +24,7 @@ from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-from core.constants import PREFORMAT_BUFFER_ROWS, SKIP_SHEET_NAMES
+from core.constants import PREFORMAT_BUFFER_ROWS, is_skip_sheet
 from core.exrate_sheet import (
     EXRATE_RATE_COLUMNS,
     exrate_fixed_letters,
@@ -38,6 +38,11 @@ logger = logging.getLogger(__name__)
 # entire IFS formula for a row, so we validate before interpolating.
 _CCY_RE = re.compile(r"^[A-Z]{2,4}$")
 _COL_RE = re.compile(r"^[A-Z]{1,3}$")
+
+
+def _is_blank_value(value) -> bool:
+    """True for cell values that render as blank (None or whitespace-only)."""
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def zero_touch_write(ws, row: int, col: int, value) -> None:
@@ -116,23 +121,32 @@ def find_header_row(
     scan_depth: int = 10,
     sheet_name: str = "?",
     warn_duplicates: bool = True,
+    resolve_left_of: dict[str, str] | None = None,
 ) -> tuple[int | None, dict[str, int]]:
     """Locate a sheet's header row and map labelled columns (single owner).
 
     Scans the first ``scan_depth`` rows for the ANCHOR label — ``labels[0]``
     — and, on the first row containing it, maps every ``(key, label)`` pair
-    to its 0-based column index. Duplicate labelled columns are resolved
+    to its 0-based column index. Duplicate labelled columns resolve
     deterministically to the FIRST occurrence (never last-wins, which
-    silently depends on column order); with ``warn_duplicates`` the
-    collision is logged so the operator can fix the sheet. ``None`` labels
+    silently depends on column order), EXCEPT keys listed in
+    ``resolve_left_of``: ``{key: ref_key}`` resolves a duplicated ``key``
+    to the occurrence nearest LEFT of ``ref_key``'s column. The real
+    production ledgers carry TWO ``Date`` columns per sheet — the invoice
+    date (column B) and the export-entry date immediately left of
+    ``EX Rate`` — and the legacy formula contract resolves rates by the
+    export-entry date, so the source-date column must bind to the
+    occurrence adjacent to ``EX Rate``, not the first one. With
+    ``warn_duplicates`` the collision and the applied resolution are
+    logged so the operator can see which column won. ``None`` labels
     are skipped.
 
     Canonical implementation behind :func:`scan_sheet_headers` (ledger write
     path), ``core.ledger_processing.prescan_target_dates_and_currencies``,
-    and ``core.prescan._scan_xlsx``. Depth note: all header scans share the
-    10-row default; the standalone-ExRate PROBE
-    (``core.workbook_io.is_standalone_exrate_workbook``) keeps its separate
-    5-row window — it only recognises month tabs, it never maps columns.
+    ``core.prescan._scan_xlsx``, and the standalone-ExRate routing PROBE
+    (``core.workbook_io.is_standalone_exrate_workbook``) — the probe reuses
+    this primitive so its month-tab recognition can never diverge from what
+    the ledger scan would actually process.
 
     Returns:
         ``(header_row_idx, col_indices)`` — the 1-based header row index (or
@@ -149,19 +163,32 @@ def find_header_row(
         ]
         if anchor in row_strs:
             header_row_idx = row_idx
+            occurrences: dict[str, list[int]] = {}
+            label_by_key = {key: label for key, label in labels}
             for ci, val in enumerate(row_strs):
                 for key, label in labels:
-                    if label is None or val != label:
-                        continue
-                    if key in col_indices:
-                        if warn_duplicates:
-                            logger.warning(
-                                "Sheet '%s': duplicate '%s' header column "
-                                "— using the first occurrence.",
-                                sheet_name, label,
-                            )
-                    else:
-                        col_indices[key] = ci
+                    if label is not None and val == label:
+                        occurrences.setdefault(key, []).append(ci)
+            for key, occ in occurrences.items():
+                chosen = occ[0]
+                if len(occ) > 1:
+                    ref_key = (resolve_left_of or {}).get(key)
+                    ref_occ = occurrences.get(ref_key) if ref_key else None
+                    left = (
+                        [c for c in occ if c < ref_occ[0]] if ref_occ else []
+                    )
+                    if left:
+                        chosen = max(left)
+                    if warn_duplicates:
+                        logger.warning(
+                            "Sheet '%s': duplicate '%s' header column — "
+                            "using the %s.",
+                            sheet_name, label_by_key[key],
+                            "occurrence nearest left of "
+                            f"'{label_by_key.get(ref_key, ref_key)}'"
+                            if left else "first occurrence",
+                        )
+                col_indices[key] = chosen
             break
     return header_row_idx, col_indices
 
@@ -181,7 +208,7 @@ def scan_sheet_headers(
     sheet_maps: dict[str, dict] = {}
 
     for sheet_name in wb.sheetnames:
-        if sheet_name in SKIP_SHEET_NAMES:
+        if is_skip_sheet(sheet_name):
             continue
         ws = wb[sheet_name]
         header_row_idx, col_indices_local = find_header_row(
@@ -191,6 +218,10 @@ def scan_sheet_headers(
                 ("currency", target_cols["currency"]),
                 ("out_rate", target_cols["out_rate"]),
             ),
+            # Duplicate 'Date' headers resolve to the column nearest left
+            # of 'EX Rate' (the export-entry date the legacy formulas use),
+            # not the first occurrence (the invoice date).
+            resolve_left_of={"source": "out_rate"},
             sheet_name=sheet_name,
         )
 
@@ -212,7 +243,6 @@ def scan_sheet_headers(
 def inject_xlookup_formulas(
     wb,
     sheet_maps: dict[str, dict],
-    exrate_last_row: int,
     parse_date_fn: Callable,
     emit_fn: Callable[[str], None] | None = None,
     dry_run: bool = False,
@@ -242,7 +272,6 @@ def inject_xlookup_formulas(
     Args:
         wb: openpyxl Workbook.
         sheet_maps: Dict from scan_sheet_headers().
-        exrate_last_row: Last data row in ExRate sheet.
         parse_date_fn: Callable to parse cell values to date objects.
         emit_fn: Optional status callback.
         dry_run: If True, don't write; just report what would change.
@@ -253,8 +282,6 @@ def inject_xlookup_formulas(
         exrate_col_map: Optional dict mapping currency code → ExRate
             column letter for additional currencies beyond USD/EUR.
     """
-    N = exrate_last_row
-
     # ── Map rate_type → ExRate column letters for USD and EUR ─────
     # Resolved from the single layout source (core/exrate_sheet.py):
     # selling → C/E, buying_transfer → B/D. The ledger rate_type is
@@ -274,11 +301,19 @@ def inject_xlookup_formulas(
         THB amounts compute 0. The IF guard renders found-but-empty
         results as blank "" instead. Exact-match semantics (match_mode 0)
         are preserved: NO rollback, NO carry-forward.
+
+        WHOLE-COLUMN references ($A:$A / $B:$B): a row-pinned $A$2:$A$N
+        range went stale whenever the master grew without re-injection
+        (user-dragged formula copies, misrouted/skipped sheets, the
+        standalone updater growing the master inside a ledger workbook).
+        Row-1 text headers can never exact-match a date serial, and the
+        lookup/return columns stay aligned by construction, so the
+        unbounded range is safe and self-healing.
         """
         lookup = (
             f"_xlfn.XLOOKUP({date_ref},"
-            f"ExRate!$A$2:$A${N},"
-            f"ExRate!${rate_col}$2:${rate_col}${N},\"\",0)"
+            f"ExRate!$A:$A,"
+            f"ExRate!${rate_col}:${rate_col},\"\",0)"
         )
         return f"IFERROR(IF({lookup}=\"\",\"\",{lookup}),\"\")"
 
@@ -300,17 +335,61 @@ def inject_xlookup_formulas(
         skipped = 0
         written = 0
         overwritten = 0
+        # Rows whose Date or EX Rate cell is a non-anchor MergedCell —
+        # read-only, so no formula can be injected and the date is not
+        # normalized. Collected so the skip is SURFACED (warning + emit)
+        # instead of silently leaving the row untouched.
+        merged_rows: list[int] = []
+
+        # ── Last DATA row (bounds the injection loop AND the preformat
+        #    base) ────────────────────────────────────────────────────
+        # A row counts as data when ANY of its source-date / Cur /
+        # EX Rate cells holds a non-blank value. Bounding on ws.max_row
+        # instead grew every tab without bound: the preformat pass below
+        # styles buffer rows (which inflates max_row on save), so the
+        # NEXT run's injection loop reached into the previous run's
+        # empty buffer and wrote formulas there — +buffer_rows of sheet
+        # growth per run under the daily scheduler.
+        last_data_row = mapping["header_row"]
         for row_idx in range(
-            mapping["header_row"] + 1, ws.max_row + 1
+            mapping["header_row"] + 1, (ws.max_row or 0) + 1
+        ):
+            if not all(
+                _is_blank_value(ws.cell(row=row_idx, column=col).value)
+                for col in (src_idx, cur_col, out_col)
+            ):
+                last_data_row = row_idx
+
+        for row_idx in range(
+            mapping["header_row"] + 1, last_data_row + 1
         ):
             src_cell = ws.cell(row=row_idx, column=src_idx)
             out_cell = ws.cell(row=row_idx, column=out_col)
+            cur_cell = ws.cell(row=row_idx, column=cur_col)
 
-            # Skip merged cells — they are read-only
-            if isinstance(src_cell, MergedCell):
+            # Merged cells are read-only at non-anchor positions — record
+            # the row so the operator hears about it (warning below).
+            if isinstance(src_cell, MergedCell) or isinstance(
+                out_cell, MergedCell
+            ):
+                merged_rows.append(row_idx)
                 continue
-            if isinstance(out_cell, MergedCell):
-                continue
+
+            # ── Currency Normalization (in-place strip) ────
+            # Excel's IFS comparison ({cur_ref}="USD") is whitespace-
+            # sensitive while the Python warning/audit mirror strips
+            # (core/exrate_updater.py) — a " USD " row rendered BLANK
+            # in Excel yet was recorded as filled with no warning.
+            # Strip the Cur cell in place so the formula and the
+            # mirror resolve identically. Case is left untouched:
+            # Excel's "=" comparison is case-insensitive, which
+            # matches the mirror's .upper().
+            if not isinstance(cur_cell, MergedCell) and isinstance(
+                cur_cell.value, str
+            ):
+                stripped_cur = cur_cell.value.strip()
+                if stripped_cur != cur_cell.value:
+                    cur_cell.value = stripped_cur if stripped_cur else None
 
             # ── Date Normalization ─────────────────────────
             inv_date = parse_date_fn(src_cell.value)
@@ -323,6 +402,16 @@ def inject_xlookup_formulas(
                     src_cell.number_format = "dd mmm yyyy"
                 else:
                     src_cell.number_format = existing_fmt
+
+            # ── Skip rows with neither date nor currency ───
+            # Spacer rows inside the data extent (and any buffer rows a
+            # pre-fix run already polluted) stay truly blank instead of
+            # accreting an IFS formula that can only ever render "".
+            cur_value = (
+                None if isinstance(cur_cell, MergedCell) else cur_cell.value
+            )
+            if _is_blank_value(src_cell.value) and _is_blank_value(cur_value):
+                continue
 
             # ── Build the expected XLOOKUP formula ─────────
             date_ref = f"{date_letter}{row_idx}"
@@ -398,9 +487,27 @@ def inject_xlookup_formulas(
                     f"{written - overwritten} new"
                 )
 
+        if merged_rows:
+            # Cap the listed rows at 10 to bound message size (4GB target).
+            listed = ", ".join(map(str, merged_rows[:10]))
+            suffix = ", …" if len(merged_rows) > 10 else ""
+            msg = (
+                f"{sheet_name}: {len(merged_rows)} row(s) have merged "
+                f"Date/EX Rate cells — EX Rate left untouched "
+                f"(rows {listed}{suffix})"
+            )
+            logger.warning("%s", msg)
+            if emit_fn:
+                emit_fn(f"[SIM] {msg}" if dry_run else msg)
+
         # ── Pre-format Date column for manual entry ───────────
-        max_preformat = ws.max_row + buffer_rows
-        for r in range(mapping["header_row"] + 1, max_preformat + 1):
+        # Buffer rows ONLY (last_data_row+1 .. +buffer_rows): data-row
+        # date formats are owned by the normalization branch above,
+        # which preserves user formats. Basing this range on ws.max_row
+        # both clobbered every data row to DD/MM/YYYY and re-extended
+        # the styled region by buffer_rows on every run (the styled
+        # cells inflate max_row), growing the sheet without bound.
+        for r in range(last_data_row + 1, last_data_row + buffer_rows + 1):
             cell = ws.cell(row=r, column=src_idx)
             if not isinstance(cell, MergedCell):
                 cell.number_format = "DD/MM/YYYY"

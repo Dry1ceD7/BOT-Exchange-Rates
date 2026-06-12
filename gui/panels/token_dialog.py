@@ -14,6 +14,7 @@ import contextlib
 import logging
 import os
 import threading
+import tkinter
 import webbrowser
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from core.api_client import ping_token
 from core.i18n import tr
 from core.paths import get_project_root
 from core.secure_tokens import _keyring_available, set_token
+from gui.panels._base_panel import SafePanel
 from gui.theme import MONO_FONT, get_theme
 
 logger = logging.getLogger(__name__)
@@ -50,9 +52,14 @@ def _sanitize_key(raw: str) -> tuple[str, str | None]:
     return cleaned, None
 
 
-class TokenRegistrationDialog(ctk.CTkToplevel):
+class TokenRegistrationDialog(SafePanel, ctk.CTkToplevel):
     """
     A registration-key-style modal for collecting BOT API tokens.
+
+    SafePanel (mixed in FIRST, per its docstring) owns the `_destroyed`
+    flag and `_safe_after` — the dialog's former hand-rolled copies were a
+    weaker duplicate (no after-id tracking, blanket suppress). destroy()
+    now also cancels still-pending after() callbacks.
 
     Usage:
         dialog = TokenRegistrationDialog(root)
@@ -74,7 +81,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         self.activated = False
         self._env_path = env_path or str(Path(get_project_root()) / ".env")
         self._busy_test = False
-        self._destroyed = False
+        # (_destroyed is owned by the SafePanel mixin.)
         # Set once a keychain write has failed and we fell back to plaintext
         # .env; gates a one-time visible warning before the dialog dismisses.
         self._keychain_warned = False
@@ -94,7 +101,11 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
 
         self._build_ui()
         self._center()
-        self.grab_set()
+        # Cosmetic modality only — grab_set on a not-yet-viewable Toplevel
+        # raises TclError on X11; a failed grab must not abort first-run
+        # token entry (no busy-flag blast radius here).
+        with contextlib.suppress(RuntimeError, tkinter.TclError):
+            self.grab_set()
 
         # ── Keyboard accessibility ─────────────────────────────────
         # Enter submits (Activate), Escape cancels — first-run cancel handling
@@ -255,17 +266,8 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         self._entry_exg.configure(show=char)
         self._entry_hol.configure(show=char)
 
-    def _safe_after(self, delay_ms, callback, *args):
-        """Schedule ``callback`` on the Tk thread, skipping if destroyed.
-
-        The Test Keys worker runs on a background thread; by the time it
-        finishes the user may have closed the dialog. Guard the after() call
-        so a late result never touches a torn-down widget.
-        """
-        if self._destroyed:
-            return
-        with contextlib.suppress(Exception):
-            self.after(delay_ms, lambda: callback(*args))
+    # _safe_after is inherited from SafePanel: post-destroy-safe, with
+    # after-id tracking so destroy() cancels still-pending callbacks.
 
     def _on_test_keys(self):
         """Verify the entered keys against the BOT API off the Tk thread."""
@@ -419,7 +421,7 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
             return
         elif not keychain_fell_back:
             logger.info("API tokens activated and saved to .env (no keychain available).")
-        self._destroyed = True
+        # SafePanel.destroy() flips _destroyed and cancels pending afters.
         self.grab_release()
         self.destroy()
 
@@ -462,6 +464,6 @@ class TokenRegistrationDialog(ctk.CTkToplevel):
         # only True once tokens were already stored (the keychain-fallback
         # warning path keeps the dialog open with activated=True). Closing the
         # window in that state must NOT discard the successful activation.
-        self._destroyed = True
+        # SafePanel.destroy() flips _destroyed and cancels pending afters.
         self.grab_release()
         self.destroy()

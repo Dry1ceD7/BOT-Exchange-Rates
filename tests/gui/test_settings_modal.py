@@ -626,7 +626,12 @@ class TestOpenLogsFolder:
 # ---------------------------------------------------------------------------
 
 class TestOpenFolderHelper:
-    """_open_folder validates the target and dispatches a fixed-argv launcher."""
+    """_open_folder validates the target and dispatches a fixed-argv launcher.
+
+    round-11 consolidation: the implementation moved to gui/os_open.py
+    (single owner, shared with gui/app.py); settings_modal keeps the
+    ``_open_folder`` alias. platform/subprocess are therefore patched on
+    gui.os_open — the module the launch actually executes in."""
 
     def test_returns_false_for_nonexistent_dir(self):
         from gui.panels.settings_modal import _open_folder
@@ -638,11 +643,19 @@ class TestOpenFolderHelper:
         f.write_text("x", encoding="utf-8")
         assert _open_folder(str(f)) is False
 
+    def test_alias_is_the_shared_helper(self):
+        """The settings_modal name must stay bound to the canonical
+        gui.os_open implementation — no second copy may reappear."""
+        from gui import os_open
+        from gui.panels import settings_modal
+        assert settings_modal._open_folder is os_open.open_folder
+
     def test_launches_open_on_darwin(self, tmp_path):
+        from gui import os_open
         from gui.panels import settings_modal
         with (
-            patch.object(settings_modal.platform, "system", return_value="Darwin"),
-            patch.object(settings_modal.subprocess, "Popen") as mock_popen,
+            patch.object(os_open.platform, "system", return_value="Darwin"),
+            patch.object(os_open.subprocess, "Popen") as mock_popen,
         ):
             assert settings_modal._open_folder(str(tmp_path)) is True
         argv = mock_popen.call_args[0][0]
@@ -650,31 +663,34 @@ class TestOpenFolderHelper:
         assert argv[1] == str(tmp_path.resolve())
 
     def test_launches_explorer_on_windows(self, tmp_path):
+        from gui import os_open
         from gui.panels import settings_modal
         with (
-            patch.object(settings_modal.platform, "system", return_value="Windows"),
-            patch.object(settings_modal.subprocess, "Popen") as mock_popen,
+            patch.object(os_open.platform, "system", return_value="Windows"),
+            patch.object(os_open.subprocess, "Popen") as mock_popen,
         ):
             assert settings_modal._open_folder(str(tmp_path)) is True
         argv = mock_popen.call_args[0][0]
         assert argv[0] == "explorer"
 
     def test_launches_xdg_open_on_linux(self, tmp_path):
+        from gui import os_open
         from gui.panels import settings_modal
         with (
-            patch.object(settings_modal.platform, "system", return_value="Linux"),
-            patch.object(settings_modal.subprocess, "Popen") as mock_popen,
+            patch.object(os_open.platform, "system", return_value="Linux"),
+            patch.object(os_open.subprocess, "Popen") as mock_popen,
         ):
             assert settings_modal._open_folder(str(tmp_path)) is True
         argv = mock_popen.call_args[0][0]
         assert argv[0] == "xdg-open"
 
     def test_returns_false_on_oserror(self, tmp_path):
+        from gui import os_open
         from gui.panels import settings_modal
         with (
-            patch.object(settings_modal.platform, "system", return_value="Linux"),
+            patch.object(os_open.platform, "system", return_value="Linux"),
             patch.object(
-                settings_modal.subprocess, "Popen", side_effect=OSError("boom")
+                os_open.subprocess, "Popen", side_effect=OSError("boom")
             ),
         ):
             assert settings_modal._open_folder(str(tmp_path)) is False

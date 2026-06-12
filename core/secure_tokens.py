@@ -97,6 +97,24 @@ def get_token(env_key: str) -> str | None:
             import keyring
             token = keyring.get_password(SERVICE_NAME, keyring_key)
             if token:
+                # A renewed key is delivered by editing .env (the documented
+                # workflow) — a stale keychain value must not shadow it
+                # forever, silently 401-ing while the fresh key sits unread.
+                # Prefer a differing non-empty .env value and re-migrate it.
+                env_token = (os.environ.get(env_key) or "").strip()
+                if env_token and env_token != token:
+                    logger.warning(
+                        "%s differs between the OS keychain and .env — "
+                        "using the .env value and updating the keychain.",
+                        env_key,
+                    )
+                    with contextlib.suppress(Exception):
+                        keyring.set_password(
+                            SERVICE_NAME, keyring_key, env_token,
+                        )
+                        os.environ.pop(env_key, None)
+                        _purge_env_file_token(env_key)
+                    return env_token
                 return token
         except Exception as e:
             logger.debug("Keyring read failed for %s: %s", keyring_key, e)

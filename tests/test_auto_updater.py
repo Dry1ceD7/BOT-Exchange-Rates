@@ -12,7 +12,6 @@ Covers:
   - download_update (download flow, integrity check, cleanup)
   - apply_update (bat script generation, path sanitization)
   - get_install_dir (registry, frozen, dev mode)
-  - back-compat aliases (_get_install_dir, _fetch_expected_checksum)
 """
 
 import hashlib
@@ -345,6 +344,60 @@ class TestFetchExpectedChecksum:
             result = fetch_expected_checksum("https://github.com/hash.sha256")
 
         assert result is None
+
+    @pytest.mark.parametrize("body", ["", "\n", "   \n  "])
+    def test_empty_checksum_file_returns_none(self, body):
+        """Round 11: an empty/whitespace .sha256 asset must return None —
+        ''.split()[0] used to raise an uncaught IndexError that killed the
+        bare daemon worker thread and wedged the UI on 'Downloading
+        update...'."""
+        mock_resp = MagicMock()
+        mock_resp.is_redirect = False
+        mock_resp.text = body
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch("core.auto_updater.httpx.get", return_value=mock_resp):
+            result = fetch_expected_checksum("https://github.com/hash.sha256")
+
+        assert result is None
+
+    def test_redirect_loop_is_bounded(self):
+        """Round 11: an allowlisted redirect cycle (github.com ->
+        objects.githubusercontent.com -> github.com ...) must terminate
+        with None within the 5-GET bound (mirrors download_update) instead
+        of looping forever in the update worker thread."""
+        redirect = MagicMock()
+        redirect.is_redirect = True
+        redirect.headers = {"location": "https://github.com/next.sha256"}
+
+        with patch(
+            "core.auto_updater.httpx.get", return_value=redirect,
+        ) as mock_get:
+            result = fetch_expected_checksum("https://github.com/hash.sha256")
+
+        assert result is None
+        # At most 5 GETs total: the initial fetch + 4 redirect follows.
+        assert mock_get.call_count <= 5
+
+    def test_bounded_redirects_still_follow_to_success(self):
+        """A short allowlisted redirect chain still resolves the digest."""
+        expected = "c" * 64
+        redirect = MagicMock()
+        redirect.is_redirect = True
+        redirect.headers = {
+            "location": "https://objects.githubusercontent.com/h.sha256",
+        }
+        final = MagicMock()
+        final.is_redirect = False
+        final.text = f"{expected}  BOT-ExRate-Setup.exe\n"
+        final.raise_for_status = MagicMock()
+
+        with patch(
+            "core.auto_updater.httpx.get", side_effect=[redirect, final],
+        ):
+            result = fetch_expected_checksum("https://github.com/hash.sha256")
+
+        assert result == expected
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -734,56 +787,6 @@ class TestGetInstallDir:
             result = get_install_dir()
 
         assert result == str(tmp_path)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  BACK-COMPAT ALIASES (old private names)
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-class TestBackCompatAliases:
-    """The old underscore names must remain importable and point at the
-    new public functions, so GUI panels using the old names keep working."""
-
-    def test_get_install_dir_alias_is_public(self):
-        from core.auto_updater import _get_install_dir, get_install_dir
-
-        assert _get_install_dir is get_install_dir
-
-    def test_fetch_expected_checksum_alias_is_public(self):
-        from core.auto_updater import (
-            _fetch_expected_checksum,
-            fetch_expected_checksum,
-        )
-
-        assert _fetch_expected_checksum is fetch_expected_checksum
-
-    def test_old_install_dir_alias_still_callable(self):
-        """Calling via the legacy name returns a valid dir in dev mode."""
-        from core.auto_updater import _get_install_dir
-
-        with patch("sys.frozen", False, create=True):
-            result = _get_install_dir()
-
-        assert result is not None
-        assert os.path.isdir(result)
-
-    def test_old_checksum_alias_still_callable(self):
-        """Calling via the legacy name parses a checksum."""
-        from core.auto_updater import _fetch_expected_checksum
-
-        expected = "c" * 64
-        mock_resp = MagicMock()
-        mock_resp.is_redirect = False
-        mock_resp.text = f"{expected}\n"
-        mock_resp.raise_for_status = MagicMock()
-
-        with patch("core.auto_updater.httpx.get", return_value=mock_resp):
-            result = _fetch_expected_checksum(
-                "https://github.com/hash.sha256"
-            )
-
-        assert result == expected
 
 
 # ═══════════════════════════════════════════════════════════════════════════

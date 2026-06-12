@@ -385,6 +385,11 @@ class TestBackupBrowserRestore:
         tk_root.thread_registry = None
         tk_root.btn_revert = MagicMock()
         tk_root.btn_process = MagicMock()
+        # Round 11 idle-state contract: _finalize_restore re-enables Process
+        # only when files are queued. Give the fake a loaded queue so the
+        # recovery assertion below (state="normal") still proves the
+        # fail-safe re-enables the button.
+        tk_root.file_queue = ["queued.xlsx"]
         error_calls = []
         tk_root._show_revert_success = lambda fp, name: error_calls.append(
             ("OK", fp, name),
@@ -425,6 +430,7 @@ class TestBackupBrowserRestore:
             assert "unexpected boom" in error_calls
         finally:
             del tk_root._safe_marshal
+            del tk_root.file_queue  # session-scoped root: don't leak state
             with contextlib.suppress(Exception):
                 dialog.destroy()
 

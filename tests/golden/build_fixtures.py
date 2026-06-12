@@ -64,6 +64,9 @@ EXPECTED_FILES = {
     "ledger_formulas": GOLDEN_DIR / "expected_ledger_formulas.json",
     "ledger_audit": GOLDEN_DIR / "expected_ledger_audit.json",
     "standalone_exrate": GOLDEN_DIR / "expected_standalone_exrate.json",
+    "realistic_exrate": GOLDEN_DIR / "expected_realistic_exrate.json",
+    "realistic_formulas": GOLDEN_DIR / "expected_realistic_formulas.json",
+    "realistic_audit": GOLDEN_DIR / "expected_realistic_audit.json",
 }
 
 # ── Fixed business calendar ──────────────────────────────────────────────
@@ -126,6 +129,53 @@ STANDARD_EXRATE_HEADERS = [
     "EUR Buying TT Rate", "EUR Selling Rate", "Holidays/Weekend",
 ]
 
+# ── Realistic production-ledger fixture ──────────────────────────────────
+# Mirrors the REAL 16-sheet ledger workbooks: 12 month tabs in the
+# production column layout (NO | Date(invoice) | Thai detail | Cur |
+# Date(export-entry) | EX Rate | Amount) with the header at row 3 below a
+# Crystal-Reports-style preamble, plus a PI sheet, the pre-existing
+# 'Exrate USD'/'Exrate EUR' historical tabs (SKIP_SHEET_NAMES members that
+# must round-trip untouched), and a pre-existing ExRate master carrying one
+# prior trading-day row the run must preserve. Only Jan holds data — the
+# production shape at the start of a year.
+REALISTIC_MONTHS = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+]
+REALISTIC_HEADER_ROW = 3
+REALISTIC_HEADERS = [
+    "NO", "Date", "รายละเอียด", "Cur", "Date", "EX Rate", "Amount",
+]
+REALISTIC_PREAMBLE = "บริษัท ตัวอย่างการค้า จำกัด — Crystal Reports Export"
+
+# (invoice_date, thai_detail, cur, export_entry_date, amount). The
+# export-entry Date (column E, nearest left of EX Rate) is the
+# rate-resolving one; invoice dates deliberately differ so a regression
+# that re-binds the source column to the first 'Date' changes the output.
+REALISTIC_JAN_ROWS = [
+    ("30/12/2024", "ค่าสินค้านำเข้า",  "USD", "02/01/2025", 18500),
+    ("02/01/2025", "ค่าขนส่งระหว่างประเทศ", "EUR", "03/01/2025", 7200),
+    ("03/01/2025", "ค่าสินค้านำเข้า",  "GBP", "06/01/2025", 5100),
+    ("03/01/2025", "ค่าธรรมเนียมธนาคาร", "USD", "04/01/2025", 950),   # Saturday
+    ("31/12/2024", "ค่าสินค้านำเข้า",  "EUR", "01/01/2025", 4400),   # holiday
+    ("06/01/2025", "ค่าสินค้าในประเทศ", "THB", "07/01/2025", 30000),
+    ("06/01/2025", "ค่าอะไหล่นำเข้า",  "JPY", "08/01/2025", 2100),   # per-100 excluded
+    ("08/01/2025", "ค่าสินค้านำเข้า",  "USD", "10/01/2025", 12750),
+]
+
+# One historical trading-day row already on the pre-existing ExRate master
+# (before the fetch window) — the run must PRESERVE it, never trim history.
+REALISTIC_PRIOR_MASTER_ROW = (
+    date(2024, 12, 16), "33.9876", "34.2587", "35.3399", "36.0601",
+)
+
+# Historical per-currency tabs found in older production books. They are
+# SKIP_SHEET_NAMES members: never scanned, never written.
+REALISTIC_HISTORICAL_TABS = {
+    "Exrate USD": [(date(2024, 12, 27), 34.2071)],
+    "Exrate EUR": [(date(2024, 12, 27), 35.5560)],
+}
+
 
 # ========================================================================
 #  INPUT WORKBOOK BUILDERS
@@ -141,6 +191,60 @@ def build_ledger_workbook(filepath) -> str:
     ws.append(["Date", "Cur", "EX Rate", "Amount"])
     for raw_date, ccy in LEDGER_ROWS:
         ws.append([raw_date, ccy, None, 1000])
+    wb.save(str(filepath))
+    wb.close()
+    return str(filepath)
+
+
+def build_realistic_ledger_workbook(filepath) -> str:
+    """Build the deterministic 16-sheet production-shape ledger workbook.
+
+    12 month tabs (production layout, header at row 3 under a Crystal-style
+    preamble; data in Jan only), a PI sheet, the 'Exrate USD'/'Exrate EUR'
+    historical tabs, and a pre-existing ExRate master with one prior
+    trading-day row.
+    """
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    for month in REALISTIC_MONTHS:
+        ws = wb.create_sheet(month)
+        ws.append([REALISTIC_PREAMBLE])   # row 1 — report title
+        ws.append([])                     # row 2 — blank preamble row
+        ws.append(REALISTIC_HEADERS)      # row 3 — production header
+        if month == "Jan":
+            for no, (inv, detail, ccy, entry, amount) in enumerate(
+                REALISTIC_JAN_ROWS, 1,
+            ):
+                # Production books carry a FORMULA in the NO column (a
+                # running row number) on most rows — it must round-trip
+                # untouched by injection. Keep one plain int (row 1) so
+                # both shapes are pinned.
+                no_val = (
+                    no if no == 1
+                    else f"=ROW()-{REALISTIC_HEADER_ROW}"
+                )
+                ws.append([no_val, inv, detail, ccy, entry, None, amount])
+
+    ws_pi = wb.create_sheet("PI")
+    ws_pi.append(["PI No", "Customer", "Value"])
+    ws_pi.append(["PI-2025-001", "ACME Industrial GmbH", 12000])
+    ws_pi.append(["PI-2025-002", "Siam Trading Co., Ltd.", 8400])
+
+    for tab, rows in REALISTIC_HISTORICAL_TABS.items():
+        ws_h = wb.create_sheet(tab)
+        ws_h.append(["Date", "Rate"])
+        for d, rate in rows:
+            ws_h.append([d, rate])
+
+    ws_ex = wb.create_sheet("ExRate")
+    ws_ex.append(STANDARD_EXRATE_HEADERS)
+    prior_date, usd_b, usd_s, eur_b, eur_s = REALISTIC_PRIOR_MASTER_ROW
+    ws_ex.append([prior_date, float(usd_b), float(usd_s),
+                  float(eur_b), float(eur_s), ""])
+
     wb.save(str(filepath))
     wb.close()
     return str(filepath)
@@ -316,6 +420,57 @@ def snapshot_ledger_sheet(filepath, sheet: str = "Jan") -> dict:
         wb.close()
 
 
+def snapshot_realistic_ledger(filepath) -> dict:
+    """Serialize the production-shape workbook's user-visible output.
+
+    Per month tab: the header row, ``max_row`` (locks the bounded
+    last-data-row + PREFORMAT_BUFFER_ROWS extent — the unbounded-growth
+    regression guard), and every row holding any value in the production
+    columns (NO/invoice/detail/Cur/entry/EX Rate). The PI and
+    'Exrate USD'/'Exrate EUR' tabs are dumped whole: they must round-trip
+    byte-identical through the run (skip-sheet contract).
+    """
+    wb = openpyxl.load_workbook(str(filepath))
+    try:
+        tabs = {}
+        for sheet in REALISTIC_MONTHS:
+            ws = wb[sheet]
+            rows = []
+            for r in range(REALISTIC_HEADER_ROW + 1, (ws.max_row or 1) + 1):
+                entry_cell = ws.cell(row=r, column=5)
+                row_repr = {
+                    "row": r,
+                    "no": _cell_repr(ws.cell(row=r, column=1).value),
+                    "invoice_date": _cell_repr(ws.cell(row=r, column=2).value),
+                    "detail": _cell_repr(ws.cell(row=r, column=3).value),
+                    "cur": _cell_repr(ws.cell(row=r, column=4).value),
+                    "entry_date": _cell_repr(entry_cell.value),
+                    "entry_date_number_format": entry_cell.number_format,
+                    "formula": ws.cell(row=r, column=6).value,
+                    "amount": _cell_repr(ws.cell(row=r, column=7).value),
+                }
+                if any(
+                    v is not None for k, v in row_repr.items()
+                    if k not in ("row", "entry_date_number_format")
+                ):
+                    rows.append(row_repr)
+            tabs[sheet] = {
+                "header_row": REALISTIC_HEADER_ROW,
+                "max_row": ws.max_row,
+                "rows": rows,
+            }
+        passthrough = {
+            sheet: [
+                [_cell_repr(v) for v in row]
+                for row in wb[sheet].iter_rows(values_only=True)
+            ]
+            for sheet in ("PI", *REALISTIC_HISTORICAL_TABS)
+        }
+        return {"tabs": tabs, "passthrough": passthrough}
+    finally:
+        wb.close()
+
+
 def snapshot_audit_csv(filepath) -> dict:
     """Serialize the audit CSV shape: full header, every row WITHOUT the
     volatile Timestamp column (column 0). Blank separator rows stay []."""
@@ -354,6 +509,37 @@ def run_ledger_scenario(workdir) -> dict:
         return {
             "exrate": snapshot_exrate_sheet(ledger_path),
             "ledger": snapshot_ledger_sheet(ledger_path),
+            "audit": snapshot_audit_csv(engine.last_audit_path),
+        }
+    finally:
+        cache.close()
+
+
+def run_realistic_scenario(workdir) -> dict:
+    """Run process_batch on the 16-sheet production-shape golden ledger."""
+    from core.database import CacheDB
+    from core.engine import BatchManifest, LedgerEngine
+
+    workdir = Path(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    ledger_path = build_realistic_ledger_workbook(
+        workdir / "golden_realistic.xlsx"
+    )
+    cache = CacheDB(db_path=str(workdir / "golden_cache.db"))
+    try:
+        with deterministic_patches(workdir / "logs"):
+            engine = LedgerEngine(
+                make_mock_api(), backup=MagicMock(), cache=cache,
+            )
+            manifest = BatchManifest(workdir / "batch_state.json")
+            success, failed, errors = asyncio.run(
+                engine.process_batch([ledger_path], manifest=manifest)
+            )
+        if (success, failed) != (1, 0):
+            raise RuntimeError(f"golden realistic scenario failed: {errors}")
+        return {
+            "exrate": snapshot_exrate_sheet(ledger_path),
+            "ledger": snapshot_realistic_ledger(ledger_path),
             "audit": snapshot_audit_csv(engine.last_audit_path),
         }
     finally:
@@ -403,11 +589,15 @@ def _current_payloads() -> dict[str, dict]:
         td = Path(td)
         ledger = run_ledger_scenario(td / "ledger")
         standalone = run_standalone_scenario(td / "standalone")
+        realistic = run_realistic_scenario(td / "realistic")
     return {
         "ledger_exrate": ledger["exrate"],
         "ledger_formulas": ledger["ledger"],
         "ledger_audit": ledger["audit"],
         "standalone_exrate": standalone["exrate"],
+        "realistic_exrate": realistic["exrate"],
+        "realistic_formulas": realistic["ledger"],
+        "realistic_audit": realistic["audit"],
     }
 
 

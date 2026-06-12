@@ -1,0 +1,90 @@
+{
+  "headers": [
+    "Timestamp",
+    "Filename",
+    "Sheet",
+    "Row",
+    "Date",
+    "Currency",
+    "Original_Value",
+    "New_Value",
+    "Rate_Source",
+    "Holiday_Rollback",
+    "Anomaly_Flag"
+  ],
+  "rows": [
+    [
+      "golden_realistic.xlsx",
+      "Jan",
+      "4",
+      "2025-01-02",
+      "USD",
+      "",
+      "34.3088",
+      "Cache/API",
+      "No",
+      ""
+    ],
+    [
+      "golden_realistic.xlsx",
+      "Jan",
+      "5",
+      "2025-01-03",
+      "EUR",
+      "",
+      "35.6080",
+      "Cache/API",
+      "No",
+      ""
+    ],
+    [
+      "golden_realistic.xlsx",
+      "Jan",
+      "6",
+      "2025-01-06",
+      "GBP",
+      "",
+      "43.0962",
+      "Cache/API",
+      "No",
+      ""
+    ],
+    [
+      "golden_realistic.xlsx",
+      "Jan",
+      "9",
+      "2025-01-07",
+      "THB",
+      "",
+      "1",
+      "Cache/API",
+      "No",
+      ""
+    ],
+    [
+      "golden_realistic.xlsx",
+      "Jan",
+      "11",
+      "2025-01-10",
+      "USD",
+      "",
+      "34.4119",
+      "Cache/API",
+      "No",
+      ""
+    ],
+    [],
+    [
+      "'=== BATCH SUMMARY ===",
+      "Files: 1",
+      "Success: 1",
+      "Failed: 0",
+      "Anomalies: 0",
+      "Total Rows Modified: 5",
+      "",
+      "",
+      "",
+      ""
+    ]
+  ]
+}

@@ -84,6 +84,25 @@ class TestPriorityRetain:
         assert any("dropped" in m for m in msgs), msgs
         # Newest priority event is still retained.
         assert any(m == "E2" for m in msgs)
+        # round-11: the fresh marker pays for its own slot — len stays at
+        # maxlen (the old code peaked at maxlen + 1 here).
+        assert len(events) <= 2
+
+    def test_all_priority_overflow_never_exceeds_maxlen(self):
+        """round-11 regression: under a sustained all-priority flood the
+        queue length must stay bounded at maxlen at every step (the fresh
+        drop marker used to add a slot: len hit maxlen + 1)."""
+        bus = EventBus(maxlen=3)
+        for i in range(10):
+            bus.push({"type": "error", "msg": f"E{i}"})
+            assert len(bus._queue) <= 3, f"after push {i}"
+        events = bus.drain()
+        # No audit line vanished uncounted: marker count + survivors >= 10.
+        marker = next(e for e in events if e.get("_dropped"))
+        survivors = [e for e in events if not e.get("_dropped")]
+        assert marker["_dropped"] + len(survivors) == 10
+        # The marker says plainly that priority lines were among the drops.
+        assert "including error/success lines" in marker["msg"]
 
     def test_drop_marker_counts_accumulate(self):
         bus = EventBus(maxlen=2)

@@ -536,11 +536,22 @@ def _run_headless(args: argparse.Namespace) -> int:
                 )
             return EXIT_NOTHING
         start_date = manifest.start_date()
+        # REUSE the settings snapshot taken at the original batch start: a
+        # Settings change between the crash and this resume must not write
+        # the remaining files on a different rate basis than the files
+        # completed pre-crash. None values (older manifest) leave the
+        # engine's own snapshot in force.
+        resume_settings = (
+            manifest.rate_type(), manifest.anomaly_threshold_pct(),
+        )
         _emit("BOT Exchange Rate Processor — Headless Resume")
         _emit(f"Resuming {len(files)} unfinished file(s)")
         if start_date:
             _emit(f"Start date: {start_date} (from saved batch)")
+        if resume_settings[0]:
+            _emit(f"Rate type: {resume_settings[0]} (from saved batch)")
     else:
+        resume_settings = None
         input_path = _resolve_input_path(args)
         if not Path(input_path).exists():
             print(f"ERROR: Input path not found: {input_path}", file=sys.stderr)
@@ -598,7 +609,7 @@ def _run_headless(args: argparse.Namespace) -> int:
 
     success, fail, errors, audit_path = _process_headless_batch(
         files, start_date, dry_run=args.dry_run, quiet=quiet,
-        json_mode=args.json,
+        json_mode=args.json, resume_settings=resume_settings,
     )
 
     if args.json:
@@ -632,11 +643,17 @@ def _process_headless_batch(
     dry_run: bool = False,
     quiet: bool = False,
     json_mode: bool = False,
+    resume_settings: tuple | None = None,
 ) -> tuple[int, int, list[str], str | None]:
     """Run one engine batch; return (success, fail, errors, audit_path).
 
     Owns its own AsyncClient so it is fully self-contained and reusable by both
     the one-shot headless path and the foreground scheduler's per-fire callback.
+
+    ``resume_settings`` is the ``(rate_type, anomaly_threshold_pct)`` snapshot
+    read from the crash-recovery manifest by ``--resume``: it overrides the
+    engine's construction-time settings so the resumed files are written on
+    the SAME rate basis as the files completed before the crash.
     """
     import asyncio
 
@@ -663,6 +680,15 @@ def _process_headless_batch(
         async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT) as client:
             api = BOTClient(client)
             engine = LedgerEngine(api)
+            if resume_settings is not None:
+                # --resume: override the construction-time settings snapshot
+                # with the one persisted at the ORIGINAL batch start, so the
+                # resumed files share one rate basis with the files completed
+                # pre-crash. None entries (older manifest) are no-ops.
+                engine.apply_settings_snapshot(
+                    rate_type=resume_settings[0],
+                    anomaly_threshold_pct=resume_settings[1],
+                )
 
             def progress_cb(
                 idx: int, total: int, fname: str, error: str | None

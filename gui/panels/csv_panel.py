@@ -12,6 +12,7 @@ SFFB: Strict < 100 lines.
 
 import logging
 import threading
+from decimal import InvalidOperation
 
 import customtkinter as ctk
 
@@ -60,6 +61,18 @@ def _humanize_csv_error(action: str, exc: BaseException) -> str:
         return f"{action} failed: The file could not be found. Check the location and try again."
     if isinstance(exc, OSError):
         return f"{action} failed: The file could not be read or written. Check the file and try again."
+    # Encoding failure: the importer raises a ValueError naming the tried
+    # encodings ("...not readable text in any supported encoding..."); a raw
+    # UnicodeError is the belt-and-suspenders case. Both get the actionable
+    # re-save guidance instead of the generic format message. UnicodeError is
+    # a ValueError subclass, so this branch must come first.
+    if isinstance(exc, UnicodeError) or (
+        isinstance(exc, ValueError) and "encoding" in str(exc).lower()
+    ):
+        return (
+            f"{action} failed: The file's text encoding wasn't recognized. "
+            "Re-save it from Excel as 'CSV UTF-8 (Comma delimited)' and try again."
+        )
     if isinstance(exc, ValueError | KeyError):
         return f"{action} failed: This CSV format wasn't recognized. Check it is a BOT exchange-rate CSV."
     return f"{action} failed: An unexpected error occurred. See the log for details."
@@ -157,7 +170,10 @@ class CSVPanel(SafePanel, ctk.CTkFrame):
                     msg = tr("csv.import_ok", count=count)
                 self._safe_after(0, lambda m=msg: self._lbl_csv.configure(
                     text=m, text_color=t["modal_success"]))
-            except (OSError, ValueError, KeyError) as e:
+            except (OSError, ValueError, KeyError, InvalidOperation) as e:
+                # InvalidOperation subclasses ArithmeticError, NOT ValueError —
+                # without it a corrupt cached Decimal killed this daemon thread
+                # and left the label stuck on "Importing…" forever.
                 logger.error("CSV import failed for %s: %r", csv_path, e)
                 msg = _humanize_csv_error("Import", e)
                 self._safe_after(0, lambda: self._lbl_csv.configure(
@@ -207,7 +223,11 @@ class CSVPanel(SafePanel, ctk.CTkFrame):
                     0,
                     lambda m=msg, c=color: self._lbl_csv_export.configure(
                         text=m, text_color=c))
-            except (OSError, ValueError) as e:
+            except (OSError, ValueError, InvalidOperation) as e:
+                # Belt-and-braces: the DB read boundary already maps corrupt
+                # values to None, but any residual decimal junk must surface
+                # via _humanize_csv_error instead of a dead thread with a
+                # permanently stale "Exporting…" label.
                 logger.error("CSV export failed for %s: %r", csv_path, e)
                 msg = _humanize_csv_error("Export", e)
                 self._safe_after(0, lambda: self._lbl_csv_export.configure(

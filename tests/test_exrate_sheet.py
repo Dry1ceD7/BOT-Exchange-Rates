@@ -116,12 +116,21 @@ class TestBuildDateRange:
         result = _build_date_range(start, end, existing)
         assert date(2025, 3, 11) in result
 
-    def test_filters_before_start(self):
+    def test_existing_rows_before_start_are_kept(self):
+        """History BEFORE the requested start is preserved, not trimmed.
+
+        Regression: the old `d >= start` drop silently deleted every
+        existing row older than the range start — a manual Q1 refresh on a
+        multi-year standalone ExRate book lost all prior years' history,
+        and the post-save read-back gate could not catch it (the snapshot
+        is taken after the rebuild). Rows after end were always kept; the
+        contract is now symmetric.
+        """
         start = date(2025, 3, 10)
         end = date(2025, 3, 10)
         existing = {date(2025, 3, 5): {"usd_buy": 33.0}}
         result = _build_date_range(start, end, existing)
-        assert date(2025, 3, 5) not in result
+        assert date(2025, 3, 5) in result
 
 
 class TestMergeRateData:
@@ -623,4 +632,90 @@ class TestExtraCurrencyColumns:
         assert ws.max_column == 6
         assert ws.cell(row=1, column=6).value == "Holidays/Weekend"
         assert col_map == {}
+        wb.close()
+
+
+class TestExtraCurrencyRoundTrip:
+    """Appended extra-currency columns must survive every subsequent run.
+
+    Regression: _read_existing_data read only fixed columns 1-6, so the
+    existing-sheet fallback never fired for 'extra:<CCY>' keys, and a run
+    that did not re-select the currency (the standalone standard path never
+    does) repurposed column F as the Holidays label — silently destroying
+    GBP/CNY/... values that injected ledger XLOOKUPs still reference.
+    """
+
+    _D = date(2025, 3, 10)  # Monday (trading day)
+
+    def _build_with_gbp(self):
+        wb = openpyxl.Workbook()
+        update_master_exrate_sheet(
+            wb,
+            usd_buying_rates={self._D: Decimal("34.5650")},
+            usd_selling_rates={self._D: Decimal("34.7350")},
+            eur_buying_rates={self._D: Decimal("37.1250")},
+            eur_selling_rates={self._D: Decimal("37.4450")},
+            holidays_list=[], holidays_names={},
+            start_date=self._D, end_date=self._D,
+            extra_currency_rates={"GBP": {self._D: Decimal("43.2100")}},
+        )
+        return wb
+
+    def test_rerun_without_extras_preserves_gbp_column(self):
+        wb = self._build_with_gbp()
+        ws = wb["ExRate"]
+        assert ws.cell(row=1, column=6).value == "GBP Rate"
+        assert ws.cell(row=2, column=6).value == Decimal("43.2100")
+
+        # Re-run with NO extras selected (standalone standard path).
+        col_map = update_master_exrate_sheet(
+            wb,
+            usd_buying_rates={}, usd_selling_rates={},
+            eur_buying_rates={}, eur_selling_rates={},
+            holidays_list=[], holidays_names={},
+            start_date=self._D, end_date=self._D,
+        )
+        ws = wb["ExRate"]
+        assert ws.cell(row=1, column=6).value == "GBP Rate"
+        assert ws.cell(row=2, column=6).value == Decimal("43.2100")
+        assert ws.cell(row=1, column=7).value == "Holidays/Weekend"
+        # The carried-over column is reported so formula wiring stays valid.
+        assert col_map == {"GBP": "F"}
+        wb.close()
+
+    def test_rerun_with_data_gap_falls_back_to_sheet_value(self):
+        wb = self._build_with_gbp()
+        # Re-select GBP but with NO data for the date (API gap / cold
+        # cache): the existing-sheet fallback must keep the previous value,
+        # exactly like USD/EUR.
+        update_master_exrate_sheet(
+            wb,
+            usd_buying_rates={}, usd_selling_rates={},
+            eur_buying_rates={}, eur_selling_rates={},
+            holidays_list=[], holidays_names={},
+            start_date=self._D, end_date=self._D,
+            extra_currency_rates={"GBP": {}},
+        )
+        ws = wb["ExRate"]
+        assert ws.cell(row=2, column=6).value == Decimal("43.2100")
+        wb.close()
+
+    def test_new_extra_appends_after_prior_columns(self):
+        wb = self._build_with_gbp()
+        col_map = update_master_exrate_sheet(
+            wb,
+            usd_buying_rates={}, usd_selling_rates={},
+            eur_buying_rates={}, eur_selling_rates={},
+            holidays_list=[], holidays_names={},
+            start_date=self._D, end_date=self._D,
+            extra_currency_rates={"CNY": {self._D: Decimal("4.7800")}},
+        )
+        ws = wb["ExRate"]
+        # Prior sheet order first (injected formulas point at F), new after.
+        assert ws.cell(row=1, column=6).value == "GBP Rate"
+        assert ws.cell(row=1, column=7).value == "CNY Rate"
+        assert ws.cell(row=1, column=8).value == "Holidays/Weekend"
+        assert ws.cell(row=2, column=6).value == Decimal("43.2100")
+        assert ws.cell(row=2, column=7).value == Decimal("4.7800")
+        assert col_map == {"GBP": "F", "CNY": "G"}
         wb.close()

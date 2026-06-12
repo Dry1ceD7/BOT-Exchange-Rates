@@ -30,11 +30,10 @@ logger = logging.getLogger(__name__)
 PLACEHOLDER = "--.----"
 
 # Bright placeholder color. The ticker sits on the navy header_bg in BOTH
-# appearance modes, but ticker_muted is tuned for card_bg (white in light
-# mode), so on the navy header it falls to ~1.5:1 in light mode. #CBD5E1
-# reaches 8.18:1 (dark header) / 5.96:1 (light header) — clearly readable as
-# a "loading" state. Themed via the optional "ticker_placeholder" token with
-# this value as the .get() fallback until the theme defines it.
+# appearance modes. #CBD5E1 reaches 8.18:1 (dark header) / 5.96:1 (light
+# header) — clearly readable as a "loading" state. The theme now defines the
+# "ticker_placeholder" token with this same value (contrast-tested against
+# header_bg); this constant remains as the .get() fallback only.
 PLACEHOLDER_COLOR = "#CBD5E1"
 
 

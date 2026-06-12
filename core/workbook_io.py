@@ -15,7 +15,6 @@ see the patch — module objects are singletons.
 """
 
 import contextlib
-import gc
 import logging
 import shutil
 from collections.abc import Callable
@@ -26,7 +25,7 @@ from pathlib import Path
 import openpyxl
 from openpyxl.utils import get_column_letter
 
-from core.constants import MAX_FILE_SIZE_MB, SKIP_SHEET_NAMES
+from core.constants import MAX_FILE_SIZE_MB, is_skip_sheet
 
 logger = logging.getLogger(__name__)
 
@@ -90,27 +89,33 @@ def is_standalone_exrate_workbook(
     *,
     date_header: str = "Date",
     currency_header: str = "Cur",
-    scan_depth: int = 5,
 ) -> bool:
     """Read-only probe: is ``filepath`` a standalone ExRate workbook?
 
-    A standalone ExRate workbook has an ``ExRate`` sheet and NO month-tab
-    sheet carrying the ledger date/currency headers (both in one row) within
-    its first ``scan_depth`` rows. Single owner of the probe shared by
+    A standalone ExRate workbook has an ``ExRate`` sheet and NO sheet the
+    ledger pipeline would process. "Would process" is decided by the SAME
+    primitive the ledger scan uses (``core.excel_io.find_header_row``, same
+    10-row depth, same anchor semantics: a mapped source-date column) — by
+    construction the probe can never disagree with ``scan_sheet_headers``.
+    The old 5-row 'Date'+'Cur'-in-one-row heuristic could: a ledger whose
+    headers sit in rows 6-10 (or whose Cur label is absent from the header
+    row) was misrouted onto the standalone path on every run AFTER the
+    first — the run that creates the ExRate sheet — freezing its ledger
+    formulas forever while the master kept growing.
+
+    Single owner of the probe shared by
     ``LedgerEngine._detect_standalone_exrate`` (which passes its
     ``target_cols`` labels) and main.py's headless labeller (which keeps the
     literal ``'Date'``/``'Cur'`` defaults — the engine's default target_cols
     are those same literals, so the two callers' match semantics were
     already identical).
 
-    Depth note: the header SCANS (``core.excel_io.find_header_row``) look at
-    rows 1-10; this probe deliberately keeps the shallower 5-row window both
-    inline copies always used — it only needs to recognise a month tab, it
-    never maps columns.
-
-    Featherweight: read-only load, try/finally close + gc. ANY probe failure
+    Featherweight: read-only load, try/finally close. ANY probe failure
     (including OSError on a locked/corrupt file) returns False — the probe
-    must never mislabel a ledger or crash the caller.
+    must never mislabel a ledger or crash the caller. No gc.collect here:
+    the per-file-boundary collect is owned by the writer's finally
+    (core/exrate_updater.py) — one collect per file, not 3-4 (~1.1s/file
+    measured on a 13MB ledger).
     """
     if not filepath.lower().endswith(".xlsx"):
         return False
@@ -130,22 +135,30 @@ def is_standalone_exrate_workbook(
         return False
     wb = None
     try:
+        # Local import: workbook_io is imported by excel_io's save path, so
+        # a top-level import here would be circular.
+        from core.excel_io import find_header_row
+
         wb = openpyxl.load_workbook(filepath, read_only=True)
         if "ExRate" not in wb.sheetnames:
             return False
         for sheet_name in wb.sheetnames:
-            if sheet_name in SKIP_SHEET_NAMES:
+            if is_skip_sheet(sheet_name):
                 continue
             ws = wb[sheet_name]
-            for row in ws.iter_rows(
-                min_row=1, max_row=scan_depth, values_only=True,
-            ):
-                row_strs = [
-                    str(c).strip() if c is not None else "" for c in row
-                ]
-                if date_header in row_strs and currency_header in row_strs:
-                    # A month tab exists → normal ledger, not standalone.
-                    return False
+            header_row_idx, cols = find_header_row(
+                ws,
+                (
+                    ("source", date_header),
+                    ("currency", currency_header),
+                ),
+                warn_duplicates=False,
+            )
+            if header_row_idx is not None and "source" in cols:
+                # The ledger scan would process this sheet → normal
+                # ledger, not standalone. (Same condition as
+                # scan_sheet_headers' skip check.)
+                return False
         return True
     except Exception as exc:  # noqa: BLE001 — probe must never propagate
         logger.debug("Standalone detection probe failed: %s", exc)
@@ -155,7 +168,6 @@ def is_standalone_exrate_workbook(
             with contextlib.suppress(OSError):
                 wb.close()
         del wb
-        gc.collect()
 
 
 def atomic_save(
@@ -209,7 +221,9 @@ def _run_verifier(tmp_path: Path, verify: Callable) -> None:
     ANY exception from the reopen or the verifier is wrapped in
     :class:`WorkbookVerifyError` with a clear message; ``atomic_save``'s
     outer handler then unlinks the temp so the original is never replaced.
-    The reopened handle is closed + gc'd on every exit (house style).
+    The reopened handle is closed on every exit (house style); the
+    per-file-boundary gc.collect is owned by each atomic_save caller's
+    finally, not here.
 
     The temp is opened as a BINARY HANDLE (not a path) because openpyxl's
     path-based loader rejects the ``.tmp~`` extension — same pattern as
@@ -237,7 +251,6 @@ def _run_verifier(tmp_path: Path, verify: Callable) -> None:
             with contextlib.suppress(OSError):
                 fh.close()
         del reopened
-        gc.collect()
 
 
 def build_cell_verifier(

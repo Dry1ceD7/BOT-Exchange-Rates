@@ -9,6 +9,7 @@ Builds and updates the unified "ExRate" master tab in Excel workbooks.
 """
 
 import logging
+import re
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -133,9 +134,28 @@ def update_master_exrate_sheet(
     SHEET_NAME = EXRATE_SHEET_NAME
     HEADER_ROW = 1
     DATA_START_ROW = 2
-    extra_rates = extra_currency_rates or {}
-    # Deterministic, dict-order column list for the extra currencies.
-    extra_codes = list(extra_rates.keys())
+    # Copy — the union below must never mutate the caller's mapping.
+    extra_rates = dict(extra_currency_rates or {})
+    # Union previously appended extras (read from the live sheet's header
+    # row) into the layout: a run that does not re-select a currency must
+    # NEVER wipe its column — the standalone standard path passes no extras
+    # at all, and before this union it repurposed column F as the Holidays
+    # label and cleared everything beyond it, silently destroying GBP/CNY/...
+    # values that ledger XLOOKUPs still reference. PRIOR sheet order comes
+    # first (already-injected formulas point at those absolute columns),
+    # newly selected codes append after.
+    prior_codes: list[str] = []
+    if SHEET_NAME in wb.sheetnames:
+        prior_codes = [
+            ccy for ccy, _col in _read_prior_extra_codes(wb[SHEET_NAME])
+        ]
+    extra_codes = prior_codes + [
+        ccy for ccy in extra_rates if ccy not in prior_codes
+    ]
+    for ccy in extra_codes:
+        # No fresh data for a carried-over currency: empty mapping → the
+        # existing-sheet fallback in _merge_rate_data preserves its values.
+        extra_rates.setdefault(ccy, {})
     HEADERS = [EXRATE_DATE_HEADER]
     HEADERS += [label for _col, label, _ccy, _rt in EXRATE_RATE_COLUMNS]
     HEADERS.extend(f"{ccy} Rate" for ccy in extra_codes)
@@ -217,21 +237,65 @@ def update_master_exrate_sheet(
     return exrate_col_map
 
 
+def _read_prior_extra_codes(ws) -> list[tuple[str, int]]:
+    """Appended ``<CCY> Rate`` columns on the live sheet, in sheet order.
+
+    Scans header row 1 from ``EXRATE_EXTRA_START_COL`` rightward until the
+    Holidays/Weekend column (or anything that is not a ``<CCY> Rate``
+    header). These columns must survive a run that does not re-select
+    them: :func:`_read_existing_data` round-trips their values and
+    :func:`update_master_exrate_sheet` unions them into the layout.
+    """
+    out: list[tuple[str, int]] = []
+    col = EXRATE_EXTRA_START_COL
+    max_col = ws.max_column or 0
+    while col <= max_col:
+        val = ws.cell(row=1, column=col).value
+        if not isinstance(val, str):
+            break
+        text = val.strip()
+        if text == EXRATE_HOLIDAYS_HEADER or not text:
+            break
+        m = re.fullmatch(r"([A-Z]{3}) Rate", text)
+        if not m:
+            break
+        out.append((m.group(1), col))
+        col += 1
+    return out
+
+
 def _read_existing_data(ws, data_start_row: int) -> dict[date, dict]:
-    """Reads existing rate data from the ExRate sheet."""
+    """Reads existing rate data from the ExRate sheet.
+
+    Reads the fixed USD/EUR columns (B-E), every appended ``<CCY> Rate``
+    column under its ``extra:<CCY>`` key, and the Holidays label from its
+    TRUE position (column 6 only when no extras exist). Before the extras
+    were read back, _merge_rate_data's existing-sheet fallback could never
+    fire for them — any re-run silently wiped previously written
+    GBP/CNY/... values.
+    """
+    prior_extras = _read_prior_extra_codes(ws)
+    holidays_col = exrate_holidays_col(len(prior_extras))
     existing: dict[date, dict] = {}
     if ws.max_row and ws.max_row >= data_start_row:
         for row_idx in range(data_start_row, ws.max_row + 1):
             cell_val = ws.cell(row=row_idx, column=1).value
             row_date = _parse_cell_date(cell_val)
             if row_date:
-                existing[row_date] = {
+                entry = {
                     "usd_buy": ws.cell(row=row_idx, column=2).value,
                     "usd_sell": ws.cell(row=row_idx, column=3).value,
                     "eur_buy": ws.cell(row=row_idx, column=4).value,
                     "eur_sell": ws.cell(row=row_idx, column=5).value,
-                    "holidays_weekend": ws.cell(row=row_idx, column=6).value,
+                    "holidays_weekend": ws.cell(
+                        row=row_idx, column=holidays_col,
+                    ).value,
                 }
+                for ccy, col_idx in prior_extras:
+                    entry[f"extra:{ccy}"] = ws.cell(
+                        row=row_idx, column=col_idx,
+                    ).value
+                existing[row_date] = entry
     return existing
 
 
@@ -250,7 +314,14 @@ def _build_date_range(
         all_dates.add(current)
         current += timedelta(days=1)
     all_dates |= set(existing.keys())
-    return {d for d in all_dates if d >= start}
+    # Existing rows BEFORE the requested start are KEPT — symmetric with
+    # after-end rows, which were always preserved. A manual Q1 refresh on a
+    # multi-year standalone ExRate book must never silently delete prior
+    # years' history (the old `d >= start` drop did exactly that, and the
+    # post-save read-back gate could not catch it). Range trimming, if ever
+    # wanted, must be an explicit user action — not a side effect of the
+    # chosen start date.
+    return all_dates
 
 
 def _merge_rate_data(

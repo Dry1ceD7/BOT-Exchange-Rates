@@ -689,9 +689,12 @@ class TestExrateSummary:
         assert "Buying TT" in summary and "Selling" in summary
 
     def test_auto_mode_uses_current_year(self):
+        from core.constants import bot_today
         from gui.panels.exrate_dialog import _build_exrate_summary
 
-        today = date.today()
+        # round-11: the dialog's auto range now anchors on the BOT business
+        # date (Asia/Bangkok) — pin the test to the same clock.
+        today = bot_today()
         summary = _build_exrate_summary(["EUR"], {"Mid Rate": "x"}, None)
         assert f"{today.year}-01-01" in summary
         assert today.strftime("%Y-%m-%d") in summary
@@ -975,7 +978,8 @@ class TestExrateWorkerBackupFirst:
         assert _read_marker(dest) == "FILLED-EXRATE"
         # ...and a real backup of the ORIGINAL dest exists, taken BEFORE the
         # move (its bytes are the pre-overwrite content, not the new sheet).
-        backups = list(backup_dir.glob("ExRate__bak__*.xlsx"))
+        # Digest-aware glob: backup names are now {stem}__{digest}__bak__...
+        backups = list(backup_dir.glob("ExRate__*__bak__*.xlsx"))
         assert len(backups) == 1, f"Expected 1 dest backup, got {backups}"
         assert backups[0].read_bytes() == b"ORIGINAL-CONTENT", (
             "Backup must capture dest as it was before the overwrite"

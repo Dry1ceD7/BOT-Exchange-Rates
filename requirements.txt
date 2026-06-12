@@ -41,6 +41,8 @@ jeepney==0.9.0 ; sys_platform == 'linux'
     #   secretstorage
 keyring==25.7.0
     # via bot-exrate
+lxml==6.1.1
+    # via bot-exrate
 more-itertools==11.0.1
     # via
     #   jaraco-classes

@@ -27,6 +27,7 @@ from core.engine import (
     LedgerEngine,
 )
 from core.ledger_processing import prescan_target_dates, run_anomaly_check
+from core.logic import build_holiday_lookup
 
 # =========================================================================
 #  FIXTURES
@@ -151,40 +152,12 @@ class TestMemoryGuardrail:
             engine._check_memory_guardrail(oversized_file)
 
 
-# =========================================================================
-#  COMPUTE YEAR START DATE
-# =========================================================================
-
-class TestComputeYearStartDate:
-    """Tests for compute_year_start_date static method."""
-
-    def test_normal_weekday(self):
-        # 2024-12-30 is Monday
-        result = LedgerEngine.compute_year_start_date(2025, [])
-        assert result == date(2024, 12, 30)
-
-    def test_with_holiday_on_dec30(self):
-        holidays = [date(2024, 12, 30)]
-        result = LedgerEngine.compute_year_start_date(2025, holidays)
-        # Rolls back to 2024-12-27 (Friday)
-        assert result == date(2024, 12, 27)
-
-    def test_dec30_on_weekend(self):
-        # 2023-12-30 is Saturday → should roll back to Friday 12/29
-        result = LedgerEngine.compute_year_start_date(2024, [])
-        assert result == date(2023, 12, 29)
-
-    def test_no_trading_day_raises(self):
-        """If every December weekday is a holiday, raise (no silent Dec 20)."""
-        from datetime import timedelta
-        prev_year = 2024
-        all_dec = []
-        d = date(prev_year, 12, 1)
-        while d.year == prev_year:
-            all_dec.append(d)
-            d += timedelta(days=1)
-        with pytest.raises(ValueError):
-            LedgerEngine.compute_year_start_date(prev_year + 1, all_dec)
+# NOTE: TestComputeYearStartDate moved to tests/test_logic.py — the
+# LedgerEngine.compute_year_start_date static delegate was dead code (zero
+# production callers; production uses core.logic.compute_year_start_date
+# directly) and was removed in round 11. The non-duplicated case
+# (test_no_trading_day_raises) migrated to test_logic.py's
+# TestComputeYearStartDate; the rest were exact duplicates of tests there.
 
 
 # =========================================================================
@@ -386,7 +359,13 @@ class TestBatchAndHolidayLookup:
             lambda year: [substitution_entry] if year == 2025 else [],
         )
 
-        holidays_set, holidays_names = engine._build_holiday_lookup(
+        # Round 11: the engine._build_holiday_lookup delegate was dead code
+        # (zero production callers) and was removed — call the module-level
+        # core.logic.build_holiday_lookup production actually uses, passing
+        # engine.cache explicitly (the monkeypatched get_holidays still
+        # applies since the cache object is handed in).
+        holidays_set, holidays_names = build_holiday_lookup(
+            engine.cache,
             all_target_dates={date(2025, 4, 16)},
             computed_start=date(2024, 12, 30),
             logic_engine=SimpleNamespace(holidays=[]),
@@ -657,6 +636,44 @@ class TestPreflightFile:
 
     def test_probe_writable_true_for_writable_file(self, sample_xlsx):
         assert LedgerEngine._probe_writable(Path(sample_xlsx)) is True
+
+    # ── Peak-RSS advisory (round 11) ─────────────────────────────────
+    # Write-mode openpyxl peaks at ~WORKBOOK_RAM_MULTIPLIER (~100x) the
+    # file size; the advisory warns at selection time but NEVER blocks.
+
+    def _one_mb_xlsx(self, tmp_path):
+        big = tmp_path / "big.xlsx"
+        big.write_bytes(b"x" * (1024 * 1024))  # 1.00MB — preflight only stats
+        return str(big)
+
+    def test_low_free_ram_sets_advisory_but_keeps_ok(
+        self, tmp_path, monkeypatch,
+    ):
+        # 1MB file needs ~100MB; only 50MB free → advisory fires, ok stays True.
+        monkeypatch.setattr(
+            engine_mod, "available_ram_bytes", lambda: 50 * 1024 * 1024,
+        )
+        result = LedgerEngine.preflight_file(self._one_mb_xlsx(tmp_path))
+        assert result["ok"] is True          # advisory-only, never a gate
+        assert result["reason"] is None
+        assert result["ram_advisory"] is not None
+        assert "low free memory" in result["ram_advisory"]
+        assert "100MB" in result["ram_advisory"]  # ~100x the 1MB file
+
+    def test_plenty_of_ram_no_advisory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            engine_mod, "available_ram_bytes", lambda: 8 * 1024 ** 3,
+        )
+        result = LedgerEngine.preflight_file(self._one_mb_xlsx(tmp_path))
+        assert result["ok"] is True
+        assert result["ram_advisory"] is None
+
+    def test_unknown_ram_no_advisory(self, tmp_path, monkeypatch):
+        # Probe failure (e.g. macOS lacks SC_AVPHYS_PAGES) → silent, never ok=False.
+        monkeypatch.setattr(engine_mod, "available_ram_bytes", lambda: None)
+        result = LedgerEngine.preflight_file(self._one_mb_xlsx(tmp_path))
+        assert result["ok"] is True
+        assert result["ram_advisory"] is None
 
 
 # =========================================================================
@@ -1136,6 +1153,204 @@ class TestPreloadUsesBotToday:
 
 
 # =========================================================================
+#  ARCHIVAL BOOKS — BOUNDED WINDOW + MASTER SHEET (round-11)
+# =========================================================================
+
+class TestArchivalBookBoundedWindow:
+    """A ledger whose NEWEST date is in a PAST year is an archive: its
+    preload window must not include bot_today() and its master ExRate
+    sheet must not extend past max(all_target_dates). Before round-11 the
+    ledger path unconditionally added bot_today() (extend_to_today only had
+    an opt-out on the rate-audit path), so a 2023 archive reprocessed in
+    2026 grew its master sheet to 2026. Current-year books keep the
+    documented extend-to-today behavior (companion test)."""
+
+    @staticmethod
+    def _constant_rates(mock_api):
+        async def _rates(start, end, currency):
+            from datetime import timedelta as _td
+            base_b = 33.0 if currency == "USD" else 36.0
+            base_s = 33.5 if currency == "USD" else 36.5
+            out, d = [], start
+            while d <= end:
+                out.append(SimpleNamespace(
+                    period=d.strftime("%Y-%m-%d"), currency=currency,
+                    buying_transfer=base_b, buying_sight=None,
+                    selling=base_s, mid_rate=None,
+                ))
+                d += _td(days=1)
+            return out
+
+        mock_api.get_exchange_rates = AsyncMock(side_effect=_rates)
+
+    @staticmethod
+    def _exrate_dates(path):
+        wb = openpyxl.load_workbook(path)
+        try:
+            ws = wb["ExRate"]
+            return {
+                cell_val.date() if isinstance(cell_val, datetime) else cell_val
+                for row in range(2, (ws.max_row or 1) + 1)
+                if (cell_val := ws.cell(row=row, column=1).value) is not None
+            }
+        finally:
+            wb.close()
+
+    def test_prior_year_book_never_reaches_bot_today(
+        self, engine, mock_api, ledger_xlsx, monkeypatch,
+    ):
+        fixed_today = date(2026, 6, 12)
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: fixed_today)
+        newest = date(2023, 3, 7)  # Tuesday
+        path = ledger_xlsx({"Jan": [
+            (date(2023, 3, 6), "USD"),
+            (newest, "EUR"),
+        ]})
+        self._constant_rates(mock_api)
+
+        asyncio.run(engine.process_ledger(path))
+
+        # 1) No fetch window reaches the current BOT business date.
+        assert mock_api.get_exchange_rates.await_count >= 1
+        end_args = {
+            call.args[1]
+            for call in mock_api.get_exchange_rates.await_args_list
+        }
+        assert max(end_args) == newest
+        # 2) The master sheet ends at the book's own newest ledger date.
+        sheet_dates = self._exrate_dates(path)
+        assert max(sheet_dates) == newest
+        assert fixed_today not in sheet_dates
+
+    def test_current_year_book_keeps_extend_to_today(
+        self, engine, mock_api, ledger_xlsx, monkeypatch,
+    ):
+        import core.exrate_sheet as exrate_sheet_mod
+
+        fixed_today = date(2025, 3, 14)  # Friday
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: fixed_today)
+        # end_date=None on live books → the master-sheet builder's own
+        # bot_today() binding decides the upper bound; pin it too.
+        monkeypatch.setattr(
+            exrate_sheet_mod, "bot_today", lambda: fixed_today,
+        )
+        path = ledger_xlsx({"Jan": [(date(2025, 3, 10), "USD")]})
+        self._constant_rates(mock_api)
+
+        asyncio.run(engine.process_ledger(path))
+
+        end_args = {
+            call.args[1]
+            for call in mock_api.get_exchange_rates.await_args_list
+        }
+        assert max(end_args) == fixed_today
+        assert max(self._exrate_dates(path)) == fixed_today
+
+
+# =========================================================================
+#  WHITESPACE-PADDED CURRENCY — FORMULA/MIRROR PARITY (round-11)
+# =========================================================================
+
+class TestWhitespacePaddedCurrencyResolves:
+    """End-to-end: a ' USD ' ledger row must resolve exactly like 'USD'.
+    Before round-11 the injected IFS compared the raw padded cell (Excel's
+    "=" is whitespace-sensitive) so the cell rendered blank, while the
+    Python warning/audit mirror stripped — the audit CSV recorded a value
+    and no warning fired. The Cur cell is now stripped in place during
+    injection, so the saved book resolves and the mirror agrees."""
+
+    def test_padded_currency_row_resolves_with_no_warning(
+        self, mock_api, tmp_cache, ledger_xlsx, monkeypatch,
+    ):
+        fixed_today = date(2025, 3, 14)
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: fixed_today)
+        import core.exrate_sheet as exrate_sheet_mod
+        monkeypatch.setattr(
+            exrate_sheet_mod, "bot_today", lambda: fixed_today,
+        )
+
+        events: list[dict] = []
+        engine = LedgerEngine(
+            mock_api,
+            event_bus=SimpleNamespace(push=events.append),
+            cache=tmp_cache,
+            backup=MagicMock(),
+        )
+        TestArchivalBookBoundedWindow._constant_rates(mock_api)
+        target = date(2025, 3, 10)  # Monday — a trading day with a rate
+        path = ledger_xlsx({"Jan": [(target, " USD ")]})
+
+        asyncio.run(engine.process_ledger(path))
+
+        # No "no rate available" / unsupported-currency warning fired.
+        warnings = [e["msg"] for e in events if e.get("type") == "warning"]
+        assert warnings == []
+
+        wb = openpyxl.load_workbook(path)
+        try:
+            ws = wb["Jan"]
+            # Cur cell stripped in place → the IFS comparison matches.
+            assert ws.cell(row=2, column=2).value == "USD"
+            formula = ws.cell(row=2, column=3).value
+            assert isinstance(formula, str)
+            assert 'B2="USD"' in formula
+        finally:
+            wb.close()
+
+
+# =========================================================================
+#  UNPARSEABLE start_date — DYNAMIC FALLBACK (round-11)
+# =========================================================================
+
+class TestUnparseableStartDateFallback:
+    """round-11: a malformed start_date string used to anchor the fetch
+    window at a hardcoded date(2025, 1, 1) — drifting stale each year and
+    silently over-fetching 1.5+ years of weekday cache-miss dates from
+    2026 on (and never able to anchor later than 2025). It now anchors at
+    default_fetch_window_start(<year of the caller's own dates>) and logs
+    a warning."""
+
+    def test_garbage_start_date_anchors_at_dynamic_window(
+        self, engine, mock_api, monkeypatch,
+    ):
+        from core.logic import default_fetch_window_start
+
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: date(2026, 6, 12))
+
+        asyncio.run(engine._preload_api_data({date(2026, 6, 1)}, "garbage"))
+
+        assert mock_api.get_exchange_rates.await_count >= 1
+        starts = {
+            call.args[0]
+            for call in mock_api.get_exchange_rates.await_args_list
+        }
+        # Window opens at the first missing WEEKDAY at/after the dynamic
+        # anchor — default_fetch_window_start(2026) = Sat 2025-12-20, so
+        # the first fetched day is Mon 2025-12-22...
+        assert min(starts) >= default_fetch_window_start(2026)
+        assert min(starts) == date(2025, 12, 22)
+        # ...never the old hardcoded Jan 2025 anchor.
+        assert date(2025, 1, 1) not in starts
+
+    def test_empty_dates_fall_back_to_business_year(
+        self, engine, mock_api, monkeypatch,
+    ):
+        """With no ledger dates at all, the anchor year is bot_today()'s."""
+        from core.logic import default_fetch_window_start
+
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: date(2026, 6, 12))
+
+        asyncio.run(engine._preload_api_data(set(), None))
+
+        starts = {
+            call.args[0]
+            for call in mock_api.get_exchange_rates.await_args_list
+        }
+        assert starts and min(starts) >= default_fetch_window_start(2026)
+        assert date(2025, 1, 1) not in starts
+
+
+# =========================================================================
 #  PER-COLUMN CACHE MISS — SELF-HEALING (F1 regression)
 # =========================================================================
 
@@ -1386,11 +1601,11 @@ class TestPrescanTargetDates:
         )
         assert msgs == ["Scanning dates from workbook"]
 
-    def test_engine_method_delegates(self, engine, sample_xlsx):
-        """The engine shim returns identical results to the function."""
-        assert engine._prescan_target_dates(sample_xlsx) == prescan_target_dates(
-            sample_xlsx, engine.target_cols,
-        )
+    # NOTE: test_engine_method_delegates removed in round 11 — its only
+    # purpose was exercising the dead LedgerEngine._prescan_target_dates
+    # shim (zero production callers), which has been deleted. The kept
+    # tests above cover core.ledger_processing.prescan_target_dates, the
+    # function production calls.
 
 
 # =========================================================================
@@ -1700,7 +1915,10 @@ class TestSettingsSnapshotContract:
             AsyncMock(return_value=None),
         )
 
-        async def _fake_preload(dates, start_date):
+        # extend_to_today: round-11 — process_ledger now threads the
+        # archival-book bound through this keyword (see
+        # TestArchivalBookBoundedWindow); the stub must accept it.
+        async def _fake_preload(dates, start_date, *, extend_to_today=True):
             return (
                 SimpleNamespace(holidays=[]), {}, {}, {}, {}, [], [],
             )
@@ -1816,6 +2034,94 @@ class TestBatchManifest:
         # No sibling temp file may survive a successful write.
         leftovers = list(tmp_path.glob("*.tmp~"))
         assert leftovers == []
+
+    def test_begin_persists_settings_snapshot(self, tmp_path):
+        """Round 11: begin() snapshots the rate basis + anomaly threshold so
+        a resume can REUSE them instead of re-reading live settings."""
+        from core.engine import BatchManifest
+
+        mpath = tmp_path / "batch_state.json"
+        m = BatchManifest(mpath)
+        m.begin(
+            ["/a/jan.xlsx"], "2025-01-02", dry_run=False,
+            rate_type="selling", anomaly_threshold_pct=7.5,
+        )
+
+        import json
+        data = json.loads(mpath.read_text(encoding="utf-8"))
+        assert data["rate_type"] == "selling"
+        assert data["anomaly_threshold_pct"] == 7.5
+        # Readers round-trip the snapshot.
+        assert m.rate_type() == "selling"
+        assert m.anomaly_threshold_pct() == 7.5
+        # Still NO rates / NO tokens — only run flags joined the manifest.
+        assert set(data.keys()) == {
+            "version", "start_date", "dry_run", "files",
+            "rate_type", "anomaly_threshold_pct",
+        }
+
+    def test_snapshot_readers_none_for_legacy_manifest(self, tmp_path):
+        """A manifest from an older build (no snapshot) reads as None so
+        callers fall back to current settings instead of crashing."""
+        from core.engine import BatchManifest
+
+        m = BatchManifest(tmp_path / "batch_state.json")
+        m.begin(["/a/jan.xlsx"], "2025-01-02", dry_run=False)
+        assert m.rate_type() is None
+        assert m.anomaly_threshold_pct() is None
+
+
+class TestResumeSettingsSnapshot:
+    """A crashed batch resumed after a Settings change must keep writing on
+    the rate basis snapshotted at the ORIGINAL batch start (round 11)."""
+
+    def test_process_batch_snapshots_engine_settings_into_manifest(
+        self, engine, monkeypatch, tmp_path,
+    ):
+        from core.engine import BatchManifest
+
+        # An exception type process_batch does NOT catch per-file simulates a
+        # hard crash: the manifest survives (crash-recovery semantics) and
+        # must already carry the settings snapshot taken at batch START.
+        async def _boom(fp, *a, **k):
+            raise RuntimeError("simulated hard crash")
+
+        monkeypatch.setattr(engine, "process_ledger", _boom)
+        mpath = tmp_path / "batch_state.json"
+        m = BatchManifest(mpath)
+        with pytest.raises(RuntimeError):
+            asyncio.run(engine.process_batch(
+                ["a.xlsx"], dry_run=False, manifest=m, audit=MagicMock(),
+            ))
+        # The manifest carries THIS engine's snapshot, not a re-read.
+        assert m.rate_type() == engine._rate_type
+        assert m.anomaly_threshold_pct() == (
+            engine._anomaly_guard.threshold_pct
+        )
+
+    def test_apply_settings_snapshot_overrides_engine(self, engine):
+        engine.apply_settings_snapshot(
+            rate_type="selling", anomaly_threshold_pct=9.0,
+        )
+        assert engine._rate_type == "selling"
+        assert engine._anomaly_guard.threshold_pct == 9.0
+
+    def test_apply_settings_snapshot_none_is_noop(self, engine):
+        before_rt = engine._rate_type
+        before_thr = engine._anomaly_guard.threshold_pct
+        engine.apply_settings_snapshot(
+            rate_type=None, anomaly_threshold_pct=None,
+        )
+        assert engine._rate_type == before_rt
+        assert engine._anomaly_guard.threshold_pct == before_thr
+
+    def test_apply_settings_snapshot_normalizes_unknown_rate_type(
+        self, engine,
+    ):
+        """A stale/garbage saved rate type can never select a master-sheet
+        column that does not exist — same normalization as __init__."""
+        engine.apply_settings_snapshot(rate_type="mid_rate")
+        assert engine._rate_type == "buying_transfer"
 
 
 class TestProcessBatchManifestLifecycle:
@@ -2015,3 +2321,117 @@ class TestCacheFloatContamination:
         assert raw == (
             "34.1235", "text", "34.5679", "37.1235", "37.6543",
         )
+
+
+class TestHolidayNeverCacheMiss:
+    """Weekday holidays are non-publishing days — never API misses.
+
+    Regression: the miss set was built from ALL weekdays, but BOT publishes
+    no rate on holidays and nothing negative-caches them, so a fully-cached
+    window with one weekday holiday re-hit the rates API on every file of
+    every batch forever — and broke the offline CSV path, whose unavoidable
+    holiday-date fetch raised on machines with no network.
+    """
+
+    def test_cached_window_with_weekday_holiday_makes_no_rate_calls(
+        self, engine, monkeypatch,
+    ):
+        fixed_today = date(2025, 3, 14)  # Friday
+        monkeypatch.setattr(engine_mod, "bot_today", lambda: fixed_today)
+
+        # Window: Mon 03-10 .. Fri 03-14; Wed 03-12 is a weekday holiday.
+        engine.cache.insert_holidays([("2025-03-12", "Test Holiday")])
+        for d in (
+            date(2025, 3, 10), date(2025, 3, 11),
+            date(2025, 3, 13), date(2025, 3, 14),
+        ):
+            engine.cache.insert_rate(
+                d, usd_buying=33.4, usd_selling=33.5,
+                eur_buying=36.1, eur_selling=36.2,
+            )
+
+        asyncio.run(engine._preload_api_data(set(), "2025-03-10"))
+
+        # Every published trading day is cached; the holiday must not count
+        # as a miss — zero rate-API calls.
+        assert engine.api.get_exchange_rates.await_count == 0
+
+
+# =========================================================================
+#  HEADER BELOW ROW 1 + THAI/B.E. TEXT DATES — full engine path (round 11)
+# =========================================================================
+
+class TestHeaderBelowRow1AndTextDates:
+    """Crystal-style preamble rows and Thai/B.E. text dates must travel the
+    FULL process_batch path, not just the excel_io/constants unit lanes:
+    find_header_row's 10-row scan window locates the row-3 header, the B.E.
+    day-first date normalizes into the master sheet, and the Thai-script
+    month date stays unreadable (blank-rendering formula + warning)."""
+
+    def test_crystal_preamble_and_text_dates_full_path(
+        self, tmp_path, tmp_cache, ledger_xlsx, monkeypatch,
+    ):
+        _patch_audit_dir(monkeypatch, tmp_path)
+        path = ledger_xlsx(
+            {"Jan": [
+                ("07/01/2568", "USD"),       # B.E. day-first → 2025-01-07
+                ("7 มกราคม 2568", "USD"),    # Thai month name → unreadable
+            ]},
+            header_row=3,  # 2 Crystal preamble rows above the header
+        )
+        engine = _audit_engine(
+            {"USD": (33.1234, 33.5), "EUR": (36.0, 36.5)}, tmp_cache,
+        )
+        events: list[dict] = []
+        engine._bus = SimpleNamespace(push=events.append)
+
+        success, fail, errors = asyncio.run(engine.process_batch([path]))
+        assert (success, fail, errors) == (1, 0, [])
+
+        wb = openpyxl.load_workbook(path)
+        try:
+            ws = wb["Jan"]
+            # Preamble intact; header located at row 3 by the scan window.
+            assert ws.cell(row=1, column=1).value == (
+                "Crystal Reports - Ledger Export"
+            )
+            assert ws.cell(row=3, column=1).value == "Date"
+
+            # Row 4 (B.E. date): normalized in-cell to the CE date object —
+            # freezing B.E. day-first normalization through the full path.
+            d_val = ws.cell(row=4, column=1).value
+            d_norm = d_val.date() if isinstance(d_val, datetime) else d_val
+            assert d_norm == date(2025, 1, 7)
+            # Its EX Rate cell holds the injected double-guarded IFS formula.
+            f4 = ws.cell(row=4, column=3).value
+            assert isinstance(f4, str) and f4.startswith("=IF(OR(")
+            assert "XLOOKUP" in f4
+
+            # Row 5 (Thai-script month): parse_date cannot read it, so the
+            # Date cell is NOT normalized...
+            assert ws.cell(row=5, column=1).value == "7 มกราคม 2568"
+            # ...the EX Rate formula is still injected (it RENDERS blank via
+            # the IFERROR/found-but-empty double guard — blank-never-0)...
+            f5 = ws.cell(row=5, column=3).value
+            assert isinstance(f5, str) and "XLOOKUP" in f5
+
+            # The master ExRate sheet carries 2025-01-07 (B.E. normalized).
+            master_dates = set()
+            for row in wb["ExRate"].iter_rows(min_col=1, max_col=1,
+                                              values_only=True):
+                v = row[0]
+                if isinstance(v, datetime):
+                    master_dates.add(v.date())
+                elif isinstance(v, date):
+                    master_dates.add(v)
+            assert date(2025, 1, 7) in master_dates
+        finally:
+            wb.close()
+
+        # ...and the per-file unreadable-date warning fired exactly once.
+        warn_msgs = [
+            e["msg"] for e in events if e.get("type") == "warning"
+        ]
+        assert any(
+            "1 row(s) had an unreadable Date" in m for m in warn_msgs
+        ), warn_msgs

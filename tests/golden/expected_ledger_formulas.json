@@ -4,86 +4,86 @@
     {
       "row": 2,
       "date": "2025-01-02",
-      "date_number_format": "DD/MM/YYYY",
+      "date_number_format": "dd mmm yyyy",
       "cur": "USD",
-      "formula": "=IF(OR(B2=\"\",A2=\"\"),\"\",_xlfn.IFS(B2=\"THB\",1,B2=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A2,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A2,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)),\"\"),B2=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A2,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A2,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)),\"\"),B2=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A2,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A2,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)),\"\"),TRUE,\"\"))"
+      "formula": "=IF(OR(B2=\"\",A2=\"\"),\"\",_xlfn.IFS(B2=\"THB\",1,B2=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A2,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A2,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),B2=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A2,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A2,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),B2=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A2,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A2,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))"
     },
     {
       "row": 3,
       "date": "2025-01-02",
-      "date_number_format": "DD/MM/YYYY",
+      "date_number_format": "dd mmm yyyy",
       "cur": "EUR",
-      "formula": "=IF(OR(B3=\"\",A3=\"\"),\"\",_xlfn.IFS(B3=\"THB\",1,B3=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A3,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A3,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)),\"\"),B3=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A3,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A3,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)),\"\"),B3=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A3,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A3,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)),\"\"),TRUE,\"\"))"
+      "formula": "=IF(OR(B3=\"\",A3=\"\"),\"\",_xlfn.IFS(B3=\"THB\",1,B3=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A3,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A3,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),B3=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A3,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A3,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),B3=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A3,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A3,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))"
     },
     {
       "row": 4,
       "date": "2025-01-03",
-      "date_number_format": "DD/MM/YYYY",
+      "date_number_format": "dd mmm yyyy",
       "cur": "GBP",
-      "formula": "=IF(OR(B4=\"\",A4=\"\"),\"\",_xlfn.IFS(B4=\"THB\",1,B4=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A4,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A4,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)),\"\"),B4=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A4,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A4,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)),\"\"),B4=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A4,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A4,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)),\"\"),TRUE,\"\"))"
+      "formula": "=IF(OR(B4=\"\",A4=\"\"),\"\",_xlfn.IFS(B4=\"THB\",1,B4=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A4,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A4,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),B4=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A4,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A4,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),B4=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A4,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A4,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))"
     },
     {
       "row": 5,
       "date": "2025-01-04",
-      "date_number_format": "DD/MM/YYYY",
+      "date_number_format": "dd mmm yyyy",
       "cur": "USD",
-      "formula": "=IF(OR(B5=\"\",A5=\"\"),\"\",_xlfn.IFS(B5=\"THB\",1,B5=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A5,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A5,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)),\"\"),B5=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A5,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A5,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)),\"\"),B5=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A5,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A5,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)),\"\"),TRUE,\"\"))"
+      "formula": "=IF(OR(B5=\"\",A5=\"\"),\"\",_xlfn.IFS(B5=\"THB\",1,B5=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A5,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A5,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),B5=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A5,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A5,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),B5=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A5,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A5,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))"
     },
     {
       "row": 6,
       "date": "2025-01-05",
-      "date_number_format": "DD/MM/YYYY",
+      "date_number_format": "dd mmm yyyy",
       "cur": "EUR",
-      "formula": "=IF(OR(B6=\"\",A6=\"\"),\"\",_xlfn.IFS(B6=\"THB\",1,B6=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A6,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A6,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)),\"\"),B6=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A6,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A6,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)),\"\"),B6=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A6,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A6,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)),\"\"),TRUE,\"\"))"
+      "formula": "=IF(OR(B6=\"\",A6=\"\"),\"\",_xlfn.IFS(B6=\"THB\",1,B6=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A6,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A6,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),B6=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A6,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A6,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),B6=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A6,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A6,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))"
     },
     {
       "row": 7,
       "date": "2025-01-06",
-      "date_number_format": "DD/MM/YYYY",
+      "date_number_format": "dd mmm yyyy",
       "cur": "USD",
-      "formula": "=IF(OR(B7=\"\",A7=\"\"),\"\",_xlfn.IFS(B7=\"THB\",1,B7=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A7,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A7,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)),\"\"),B7=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A7,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A7,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)),\"\"),B7=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A7,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A7,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)),\"\"),TRUE,\"\"))"
+      "formula": "=IF(OR(B7=\"\",A7=\"\"),\"\",_xlfn.IFS(B7=\"THB\",1,B7=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A7,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A7,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),B7=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A7,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A7,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),B7=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A7,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A7,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))"
     },
     {
       "row": 8,
       "date": "2025-01-06",
-      "date_number_format": "DD/MM/YYYY",
+      "date_number_format": "dd mmm yyyy",
       "cur": "GBP",
-      "formula": "=IF(OR(B8=\"\",A8=\"\"),\"\",_xlfn.IFS(B8=\"THB\",1,B8=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A8,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A8,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)),\"\"),B8=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A8,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A8,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)),\"\"),B8=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A8,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A8,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)),\"\"),TRUE,\"\"))"
+      "formula": "=IF(OR(B8=\"\",A8=\"\"),\"\",_xlfn.IFS(B8=\"THB\",1,B8=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A8,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A8,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),B8=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A8,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A8,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),B8=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A8,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A8,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))"
     },
     {
       "row": 9,
       "date": "2025-01-07",
-      "date_number_format": "DD/MM/YYYY",
+      "date_number_format": "dd mmm yyyy",
       "cur": "EUR",
-      "formula": "=IF(OR(B9=\"\",A9=\"\"),\"\",_xlfn.IFS(B9=\"THB\",1,B9=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A9,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A9,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)),\"\"),B9=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A9,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A9,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)),\"\"),B9=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A9,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A9,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)),\"\"),TRUE,\"\"))"
+      "formula": "=IF(OR(B9=\"\",A9=\"\"),\"\",_xlfn.IFS(B9=\"THB\",1,B9=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A9,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A9,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),B9=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A9,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A9,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),B9=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A9,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A9,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))"
     },
     {
       "row": 10,
       "date": "2025-01-08",
-      "date_number_format": "DD/MM/YYYY",
+      "date_number_format": "dd mmm yyyy",
       "cur": "USD",
-      "formula": "=IF(OR(B10=\"\",A10=\"\"),\"\",_xlfn.IFS(B10=\"THB\",1,B10=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A10,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A10,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)),\"\"),B10=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A10,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A10,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)),\"\"),B10=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A10,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A10,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)),\"\"),TRUE,\"\"))"
+      "formula": "=IF(OR(B10=\"\",A10=\"\"),\"\",_xlfn.IFS(B10=\"THB\",1,B10=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A10,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A10,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),B10=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A10,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A10,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),B10=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A10,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A10,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))"
     },
     {
       "row": 11,
       "date": "2025-01-01",
-      "date_number_format": "DD/MM/YYYY",
+      "date_number_format": "dd mmm yyyy",
       "cur": "USD",
-      "formula": "=IF(OR(B11=\"\",A11=\"\"),\"\",_xlfn.IFS(B11=\"THB\",1,B11=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A11,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A11,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)),\"\"),B11=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A11,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A11,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)),\"\"),B11=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A11,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A11,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)),\"\"),TRUE,\"\"))"
+      "formula": "=IF(OR(B11=\"\",A11=\"\"),\"\",_xlfn.IFS(B11=\"THB\",1,B11=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A11,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A11,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),B11=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A11,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A11,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),B11=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A11,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A11,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))"
     },
     {
       "row": 12,
       "date": "2025-01-09",
-      "date_number_format": "DD/MM/YYYY",
+      "date_number_format": "dd mmm yyyy",
       "cur": "GBP",
-      "formula": "=IF(OR(B12=\"\",A12=\"\"),\"\",_xlfn.IFS(B12=\"THB\",1,B12=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A12,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A12,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)),\"\"),B12=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A12,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A12,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)),\"\"),B12=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A12,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A12,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)),\"\"),TRUE,\"\"))"
+      "formula": "=IF(OR(B12=\"\",A12=\"\"),\"\",_xlfn.IFS(B12=\"THB\",1,B12=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A12,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A12,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),B12=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A12,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A12,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),B12=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A12,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A12,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))"
     },
     {
       "row": 13,
       "date": "2025-01-10",
-      "date_number_format": "DD/MM/YYYY",
+      "date_number_format": "dd mmm yyyy",
       "cur": "EUR",
-      "formula": "=IF(OR(B13=\"\",A13=\"\"),\"\",_xlfn.IFS(B13=\"THB\",1,B13=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A13,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A13,ExRate!$A$2:$A$13,ExRate!$B$2:$B$13,\"\",0)),\"\"),B13=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A13,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A13,ExRate!$A$2:$A$13,ExRate!$D$2:$D$13,\"\",0)),\"\"),B13=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A13,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A13,ExRate!$A$2:$A$13,ExRate!$F$2:$F$13,\"\",0)),\"\"),TRUE,\"\"))"
+      "formula": "=IF(OR(B13=\"\",A13=\"\"),\"\",_xlfn.IFS(B13=\"THB\",1,B13=\"USD\",IFERROR(IF(_xlfn.XLOOKUP(A13,ExRate!$A:$A,ExRate!$B:$B,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A13,ExRate!$A:$A,ExRate!$B:$B,\"\",0)),\"\"),B13=\"EUR\",IFERROR(IF(_xlfn.XLOOKUP(A13,ExRate!$A:$A,ExRate!$D:$D,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A13,ExRate!$A:$A,ExRate!$D:$D,\"\",0)),\"\"),B13=\"GBP\",IFERROR(IF(_xlfn.XLOOKUP(A13,ExRate!$A:$A,ExRate!$F:$F,\"\",0)=\"\",\"\",_xlfn.XLOOKUP(A13,ExRate!$A:$A,ExRate!$F:$F,\"\",0)),\"\"),TRUE,\"\"))"
     },
     {
       "row": 14,

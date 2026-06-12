@@ -308,10 +308,11 @@ def _stub_headless_engine(monkeypatch, main, *, success, fail, errors=None,
     captured: dict = {}
 
     def _fake_batch(files, start_date, *, dry_run=False, quiet=False,
-                    json_mode=False):
+                    json_mode=False, resume_settings=None):
         captured["files"] = files
         captured["start_date"] = start_date
         captured["dry_run"] = dry_run
+        captured["resume_settings"] = resume_settings
         return success, fail, errors or [], audit_path
 
     monkeypatch.setattr(main, "_process_headless_batch", _fake_batch)
@@ -432,6 +433,10 @@ def test_headless_resume_processes_only_pending_files(monkeypatch):
     fake_manifest = types.SimpleNamespace(
         pending_files=lambda: ["/a/feb.xlsx", "/a/mar.xlsx"],
         start_date=lambda: "2025-01-02",
+        # Round 11: --resume also reuses the settings snapshot persisted at
+        # the original batch start (rate basis + anomaly threshold).
+        rate_type=lambda: "selling",
+        anomaly_threshold_pct=lambda: 7.5,
     )
     monkeypatch.setattr(
         "core.engine.BatchManifest", lambda *a, **k: fake_manifest,
@@ -444,6 +449,21 @@ def test_headless_resume_processes_only_pending_files(monkeypatch):
     assert captured["start_date"] == "2025-01-02"
     # A resume is a real run, never a dry run.
     assert captured["dry_run"] is False
+    # The saved snapshot travels to the engine — a Settings change between
+    # crash and resume must not flip the rate basis mid-batch.
+    assert captured["resume_settings"] == ("selling", 7.5)
+
+
+def test_headless_non_resume_passes_no_settings_snapshot(monkeypatch, tmp_path):
+    """A normal (non-resume) headless run uses current settings: no snapshot."""
+    main = _import_main_with_fake_tk(monkeypatch)
+    monkeypatch.setattr(main, "_tokens_present", lambda: True)
+    f = tmp_path / "ledger.xlsx"
+    f.write_text("x")
+    captured = _stub_headless_engine(monkeypatch, main, success=1, fail=0)
+    args = _headless_args(main, input=str(f))
+    assert main._run_headless(args) == main.EXIT_OK
+    assert captured["resume_settings"] is None
 
 
 # ── --dry-run flag ───────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ Tracks all daemon threads launched by the GUI layer. Provides:
 SFFB: Strict < 100 lines.
 """
 
+import itertools
 import logging
 import threading
 import time
@@ -33,6 +34,8 @@ class ThreadRegistry:
         self._lock = threading.Lock()
         self._threads: dict[str, threading.Thread] = {}
         self._stop_events: dict[str, threading.Event] = {}
+        # Monotonic suffix source for same-name collisions (see register).
+        self._seq = itertools.count(1)
 
     def register(
         self,
@@ -42,10 +45,22 @@ class ThreadRegistry:
     ) -> str:
         """Register a thread for lifecycle management.
 
-        Returns the thread name used as key.
+        Returns the UNIQUE key the thread is tracked under. Normally the
+        given name; when that name is already held by a DIFFERENT live
+        thread, a ``-<n>`` suffix is appended so the prior thread's
+        tracking is never silently dropped (same-name transient workers,
+        e.g. two overlapping FolderResolveWorkers). Callers that
+        unregister on completion must use the returned key, not the name.
         """
         key = name or thread.name
         with self._lock:
+            existing = self._threads.get(key)
+            if (
+                existing is not None
+                and existing.is_alive()
+                and existing is not thread
+            ):
+                key = f"{key}-{next(self._seq)}"
             self._threads[key] = thread
             if stop_event:
                 self._stop_events[key] = stop_event
@@ -100,6 +115,10 @@ class ThreadRegistry:
 
     @property
     def active_count(self) -> int:
-        """Number of currently alive registered threads."""
+        """Number of currently alive registered threads.
+
+        Test seam: runtime code uses status()/shutdown_all(); asserted by
+        tests/test_thread_registry.py.
+        """
         with self._lock:
             return sum(1 for t in self._threads.values() if t.is_alive())

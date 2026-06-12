@@ -33,6 +33,8 @@ from core.constants import (
     API_RETRY_BACKOFF_MULTIPLIER,
     API_TIMEOUT_SECONDS,
     MAX_429_RETRIES,
+    MAX_API_TIMEOUT_SECONDS,
+    MIN_API_TIMEOUT_SECONDS,
     RETRY_AFTER_MAX_SECONDS,
 )
 from core.logic import safe_to_decimal
@@ -437,7 +439,12 @@ class BOTClient:
                 "api_timeout_seconds", API_TIMEOUT_SECONDS,
             )
             timeout = float(value)
-            if timeout > 0:
+            # Bounds guard: a hand-edited settings.json bypasses the
+            # import-side coercion in core/config_manager (only
+            # import_settings coerces), so the client is the last line of
+            # defense against a pathological timeout — 0.001 makes every
+            # call time out; 1e12 hangs ~forever on a dead network.
+            if MIN_API_TIMEOUT_SECONDS <= timeout <= MAX_API_TIMEOUT_SECONDS:
                 return timeout
         except Exception:  # noqa: S110 — deliberate: any failure falls back to the constant below
             pass
@@ -576,9 +583,13 @@ class BOTClient:
                         "BOT API returned an unexpected schema."
                     ) from None
             current_start = current_end + timedelta(days=1)
-            # Inter-chunk cooldown: 0.3-0.8s (429 handler protects against rate limiting)
-            # noqa S311: jitter is timing-only, not security-sensitive — random is intentional.
-            await asyncio.sleep(random.uniform(0.3, 0.8))  # noqa: S311
+            if current_start <= end_date:
+                # Inter-chunk cooldown: 0.3-0.8s (429 handler protects against
+                # rate limiting). Only when another chunk remains — sleeping
+                # after the LAST chunk was pure dead time (~6.6s per currency
+                # on a full-year window).
+                # noqa S311: jitter is timing-only, not security-sensitive — random is intentional.
+                await asyncio.sleep(random.uniform(0.3, 0.8))  # noqa: S311
         return all_results
 
     async def get_holidays(self, year: int) -> list[BOTHolidayDetail]:

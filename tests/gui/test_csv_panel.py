@@ -252,6 +252,32 @@ class TestCSVPanelHumanizedErrors:
         msg = _humanize_csv_error("Import", exc)
         assert "CSV format wasn't recognized" in msg
 
+    def test_encoding_failure_message(self):
+        """Round 11: the importer's encoding-fallback failure gets its own
+        actionable message (re-save as CSV UTF-8), not the generic
+        format-not-recognized text."""
+        from gui.panels.csv_panel import _humanize_csv_error
+
+        exc = ValueError(
+            "CSV file is not readable text in any supported encoding "
+            "(tried: utf-8-sig, cp874): /tmp/rates.csv."
+        )
+        msg = _humanize_csv_error("Import", exc)
+        assert "CSV UTF-8" in msg
+        # Internal detail (tried-encoding list/path) must not leak.
+        assert "utf-8-sig" not in msg
+        assert "/tmp/rates.csv" not in msg
+
+    def test_raw_unicode_decode_error_message(self):
+        """A raw UnicodeDecodeError (belt-and-suspenders) maps to the same
+        encoding guidance."""
+        from gui.panels.csv_panel import _humanize_csv_error
+
+        exc = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        msg = _humanize_csv_error("Import", exc)
+        assert "CSV UTF-8" in msg
+        assert "invalid start byte" not in msg
+
     def test_generic_os_error_message(self):
         from gui.panels.csv_panel import _humanize_csv_error
 

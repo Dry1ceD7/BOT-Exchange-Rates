@@ -13,23 +13,40 @@ slim. These functions take all of their dependencies as explicit parameters
 """
 
 import contextlib
-import gc
 import logging
+import os
+import threading
 from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import openpyxl
 
 from core.constants import (
     LEDGER_HOME_CURRENCY,
     LEDGER_SUPPORTED_CURRENCIES,
-    SKIP_SHEET_NAMES,
+    is_skip_sheet,
     parse_date,
 )
 from core.excel_io import find_header_row
 
 logger = logging.getLogger(__name__)
+
+# ── Prescan memoization (opt-in via use_cache=True) ──────────────────────
+# The Smart-Date pass (core.prescan.prescan_oldest_date) opens + scans every
+# queued file that process_ledger immediately rescans — a provably duplicate
+# full read-only workbook open per file. Results are memoized keyed on file
+# identity (abspath, st_mtime_ns, st_size) plus the header labels, so the
+# second scan is skipped when the file is byte-identical. Featherweight: each
+# entry is two small frozensets (dates + currency codes), bounded FIFO.
+# The cache is OPT-IN (use_cache=True) and only the two production callers
+# that share the canonical parse_date semantics use it; callers injecting a
+# custom parse_date_fn must not opt in (results are keyed on file identity,
+# not on the parser).
+_PRESCAN_CACHE: dict[tuple, tuple[frozenset, frozenset]] = {}
+_PRESCAN_CACHE_LOCK = threading.Lock()
+_PRESCAN_CACHE_MAX = 128
 
 
 def run_anomaly_check(
@@ -129,6 +146,7 @@ def prescan_target_dates_and_currencies(
     target_cols: dict[str, str],
     parse_date_fn: Callable[[object], date | None] = parse_date,
     emit_fn: Callable[[str], None] | None = None,
+    use_cache: bool = False,
 ) -> tuple[set[date], set[str]]:
     """Scan a workbook once for both target dates AND distinct currency codes.
 
@@ -144,16 +162,46 @@ def prescan_target_dates_and_currencies(
             ``target_cols["currency"]`` are the header labels scanned.
         parse_date_fn: Cell-value -> date parser (defaults to shared parser).
         emit_fn: Optional status callback ``emit(msg)``.
+        use_cache: When True, memoize the scan keyed on the file's
+            (abspath, mtime_ns, size) + header labels and serve repeat scans
+            of a byte-identical file from the memo — this is what lets the
+            Smart-Date prescan and process_ledger share ONE open per file.
+            Only opt in when ``parse_date_fn`` is behaviorally the shared
+            ``core.constants.parse_date`` (the cache key does not include
+            the parser). Defensive copies are returned on every hit.
 
     Returns:
         ``(set of parsed dates, set of upper-cased currency codes)``.
     """
-    if emit_fn is not None:
-        emit_fn("Scanning dates from workbook")
     all_target_dates: set[date] = set()
     all_currencies: set[str] = set()
     source_label = target_cols["source_date"]
     currency_label = target_cols.get("currency")
+
+    # ── Memo lookup (file identity + labels) ──────────────────────────
+    cache_key: tuple | None = None
+    if use_cache:
+        try:
+            st = Path(filepath).stat()
+            # noqa rationale: os.path.abspath (not Path.resolve) — abspath
+            # normalizes WITHOUT resolving symlinks, matching the exact
+            # normalization process_ledger applies to its save target.
+            cache_key = (
+                os.path.abspath(filepath), st.st_mtime_ns, st.st_size,  # noqa: PTH100
+                source_label, currency_label, target_cols.get("out_rate"),
+            )
+        except OSError:
+            cache_key = None  # unstat-able → fall through to a real scan
+        if cache_key is not None:
+            with _PRESCAN_CACHE_LOCK:
+                hit = _PRESCAN_CACHE.get(cache_key)
+            if hit is not None:
+                if emit_fn is not None:
+                    emit_fn("Reusing pre-scanned dates (file unchanged)")
+                return set(hit[0]), set(hit[1])
+
+    if emit_fn is not None:
+        emit_fn("Scanning dates from workbook")
 
     wb_scan = None
     try:
@@ -161,34 +209,47 @@ def prescan_target_dates_and_currencies(
             filepath, read_only=True, data_only=True,
         )
         for sheet_name in wb_scan.sheetnames:
-            if sheet_name in SKIP_SHEET_NAMES:
+            if is_skip_sheet(sheet_name):
                 continue
             ws = wb_scan[sheet_name]
-            # Header location + first-occurrence duplicate resolution are
-            # owned by core.excel_io.find_header_row (shared with the ledger
-            # write path's scan_sheet_headers and core.prescan).
+            # Header location + duplicate resolution are owned by
+            # core.excel_io.find_header_row (shared with the ledger write
+            # path's scan_sheet_headers and core.prescan). The out_rate
+            # label is mapped purely as the duplicate-'Date' resolution
+            # anchor: the date window fetched here MUST be the same
+            # export-entry-date column the written formulas look up, or
+            # the master sheet misses exactly the dates the formulas need.
             header_row_idx, col_indices = find_header_row(
                 ws,
-                (("source", source_label), ("currency", currency_label)),
+                (
+                    ("source", source_label),
+                    ("currency", currency_label),
+                    ("out_rate", target_cols.get("out_rate")),
+                ),
                 sheet_name=sheet_name,
+                resolve_left_of={"source": "out_rate"},
             )
 
             if header_row_idx is None or "source" not in col_indices:
                 continue
 
-            src_idx = col_indices["source"] + 1
-            cur_idx = (
-                col_indices["currency"] + 1
-                if "currency" in col_indices else None
-            )
-            for row_idx in range(header_row_idx + 1, (ws.max_row or 0) + 1):
-                parsed_date = parse_date_fn(
-                    ws.cell(row=row_idx, column=src_idx).value
-                )
+            src0 = col_indices["source"]
+            cur0 = col_indices.get("currency")
+            # ONE forward pass via iter_rows. ws.cell() random access on a
+            # READ-ONLY worksheet re-parses the sheet XML from row 1 on
+            # every call (openpyxl ReadOnlyWorksheet._get_cell) — the old
+            # per-row cell loop was O(n^2) and dominated the whole batch
+            # (measured: 193s for one 2000-row sheet vs 0.1s with
+            # iter_rows, identical dates + currencies).
+            for row in ws.iter_rows(
+                min_row=header_row_idx + 1, values_only=True,
+            ):
+                raw_date = row[src0] if src0 < len(row) else None
+                parsed_date = parse_date_fn(raw_date)
                 if parsed_date:
                     all_target_dates.add(parsed_date)
-                if cur_idx is not None:
-                    cur_val = ws.cell(row=row_idx, column=cur_idx).value
+                if cur0 is not None:
+                    cur_val = row[cur0] if cur0 < len(row) else None
                     if cur_val is not None:
                         code = str(cur_val).strip().upper()
                         if code:
@@ -197,12 +258,25 @@ def prescan_target_dates_and_currencies(
             openpyxl.utils.exceptions.InvalidFileException):
         raise
     finally:
+        # close + del only — the per-file-boundary gc.collect is owned by
+        # the writer's finally (core/exrate_updater.py); running it here
+        # too cost ~0.5s/file of redundant full collections on the 13MB run.
         if wb_scan is not None:
             with contextlib.suppress(OSError):
                 wb_scan.close()
             del wb_scan
             wb_scan = None
-        gc.collect()
+
+    # ── Memo store (successful scans only) ────────────────────────────
+    if cache_key is not None:
+        with _PRESCAN_CACHE_LOCK:
+            if len(_PRESCAN_CACHE) >= _PRESCAN_CACHE_MAX:
+                # FIFO eviction: drop the oldest entry (dict preserves
+                # insertion order) so a long-running process stays bounded.
+                _PRESCAN_CACHE.pop(next(iter(_PRESCAN_CACHE)))
+            _PRESCAN_CACHE[cache_key] = (
+                frozenset(all_target_dates), frozenset(all_currencies),
+            )
 
     return all_target_dates, all_currencies
 

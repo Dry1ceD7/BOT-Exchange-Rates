@@ -849,3 +849,244 @@ class TestFabricatedBuyingCleanup:
             assert row["eur_buying"] == Decimal("36.5000")
         finally:
             reopened.close()
+
+
+class TestRecoverFromCorruption:
+    """A transient DatabaseError must never destroy a HEALTHY cache.db."""
+
+    def test_transient_error_on_healthy_db_reraises_and_preserves(self, db):
+        """quick_check says 'ok' → re-raise, keep the file.
+
+        Regression: the old `raise exc` sat INSIDE a
+        contextlib.suppress(sqlite3.DatabaseError); exc is itself a
+        DatabaseError, so the suppress ate the re-raise and execution fell
+        through to the unlink — a transient 'database is locked' (e.g. a
+        concurrent GUI + scheduler instance) silently destroyed all cached
+        rates, including CSV-imported offline rates that cannot be
+        re-fetched from the API.
+        """
+        import sqlite3
+
+        d = date(2025, 3, 10)
+        db.insert_rate(d, usd_buying=33.4, usd_selling=33.5,
+                       eur_buying=36.1, eur_selling=36.2)
+
+        with pytest.raises(sqlite3.OperationalError):
+            db._recover_from_corruption(
+                sqlite3.OperationalError("database is locked"),
+            )
+
+        # The healthy DB survived with its data intact.
+        result = db.get_rate(d)
+        assert result is not None
+        assert result["usd_buying"] == Decimal("33.4")
+
+
+# =========================================================================
+#  TEXT-AFFINITY MIGRATION ATOMICITY (round 11)
+# =========================================================================
+
+class TestMigrationAtomicity:
+    """The REAL→TEXT rebuilds run as ONE transaction embedded in the script
+    (executescript performs no implicit transaction management): a crash
+    between DROP TABLE and RENAME must never empty the cache, and a stale
+    <table>_new leftover from a prior crashed run must never brick __init__."""
+
+    def _legacy_db(self, tmp_path, name="legacy.db"):
+        import sqlite3
+        p = str(tmp_path / name)
+        raw = sqlite3.connect(p)
+        raw.execute(
+            "CREATE TABLE rates (date TEXT PRIMARY KEY, usd_buying REAL, "
+            "usd_selling REAL, eur_buying REAL, eur_selling REAL)"
+        )
+        raw.execute(
+            "INSERT INTO rates VALUES ('2025-01-02', 33.5, 33.9, 36.1, 36.4)"
+        )
+        raw.execute(
+            "CREATE TABLE rates_multi (date TEXT NOT NULL, "
+            "currency TEXT NOT NULL, rate_type TEXT NOT NULL, value REAL, "
+            "PRIMARY KEY (date, currency, rate_type))"
+        )
+        raw.execute(
+            "INSERT INTO rates_multi VALUES "
+            "('2025-01-02', 'GBP', 'mid_rate', 44.5)"
+        )
+        raw.commit()
+        raw.close()
+        return p
+
+    def test_mid_migration_crash_preserves_rates(self, tmp_path):
+        """Simulated crash: the migration script truncated right after
+        DROP TABLE rates (no COMMIT) must leave the original table intact
+        once the connection dies — BEGIN inside the script makes the whole
+        rebuild atomic."""
+        import sqlite3
+        p = self._legacy_db(tmp_path)
+        conn = sqlite3.connect(p)
+        # Copy of core/database.py:_migrate_rates_value_text's script,
+        # truncated after the DROP (the crash window the fix closes).
+        conn.executescript("""
+            BEGIN;
+            DROP TABLE IF EXISTS rates_new;
+            CREATE TABLE rates_new (
+                date          TEXT PRIMARY KEY,
+                usd_buying    TEXT,
+                usd_selling   TEXT,
+                eur_buying    TEXT,
+                eur_selling   TEXT
+            );
+            INSERT INTO rates_new (date, usd_buying, usd_selling,
+                                   eur_buying, eur_selling)
+                SELECT date, usd_buying, usd_selling, eur_buying, eur_selling
+                FROM rates;
+            DROP TABLE rates;
+        """)
+        conn.close()  # crash: open transaction rolls back
+
+        fresh = sqlite3.connect(p)
+        rows = fresh.execute("SELECT * FROM rates").fetchall()
+        decls = {
+            r[1]: (r[2] or "").upper()
+            for r in fresh.execute("PRAGMA table_info(rates)").fetchall()
+        }
+        fresh.close()
+        assert rows == [("2025-01-02", 33.5, 33.9, 36.1, 36.4)]
+        assert decls["usd_buying"] == "REAL"  # untouched legacy schema
+
+    def test_stale_rates_new_leftover_does_not_brick_init(self, tmp_path):
+        """A prior crashed run can leave rates_new behind; the migration's
+        DROP TABLE IF EXISTS must recover it instead of raising 'table
+        rates_new already exists' out of CacheDB.__init__."""
+        import sqlite3
+        p = self._legacy_db(tmp_path)
+        raw = sqlite3.connect(p)
+        raw.execute(
+            "CREATE TABLE rates_new (date TEXT PRIMARY KEY, "
+            "usd_buying TEXT, usd_selling TEXT, eur_buying TEXT, "
+            "eur_selling TEXT)"
+        )
+        raw.execute(
+            "CREATE TABLE rates_multi_new (date TEXT NOT NULL, "
+            "currency TEXT NOT NULL, rate_type TEXT NOT NULL, value TEXT, "
+            "PRIMARY KEY (date, currency, rate_type))"
+        )
+        raw.commit()
+        raw.close()
+
+        cache = CacheDB(db_path=p)  # must not raise
+        try:
+            row = cache.get_rate(date(2025, 1, 2))
+            assert row["usd_buying"] == Decimal("33.5")
+            assert cache.get_multi_rate(
+                date(2025, 1, 2), "GBP", "mid_rate",
+            ) == Decimal("44.5000")
+            decls = {
+                r[1]: (r[2] or "").upper()
+                for r in cache._conn().execute(
+                    "PRAGMA table_info(rates)"
+                ).fetchall()
+            }
+            assert decls["usd_buying"] == "TEXT"  # migration completed
+        finally:
+            cache.close()
+
+
+# =========================================================================
+#  TRANSACTION SCOPE (round 11 — atomic CSV import)
+# =========================================================================
+
+class TestTransactionScope:
+    """CacheDB.transaction() defers per-method commits and rolls everything
+    back on error, so a multi-batch import can never half-commit."""
+
+    def test_rolls_back_bulk_inserts_on_error(self, db):
+        with pytest.raises(RuntimeError), db.transaction():
+            db.insert_rates_bulk([
+                ("2025-03-10", Decimal("34.5"), None, None, None),
+            ])
+            db.insert_multi_rates_bulk([
+                ("2025-03-10", "GBP", "mid_rate", Decimal("44.5")),
+            ])
+            db.insert_rate(date(2025, 3, 11), usd_buying=Decimal("34.6"))
+            raise RuntimeError("mid-import failure")
+
+        conn = db._conn()
+        assert conn.execute("SELECT COUNT(*) FROM rates").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM rates_multi"
+        ).fetchone()[0] == 0
+
+    def test_commits_once_on_success(self, db):
+        with db.transaction():
+            db.insert_rate(date(2025, 3, 10), usd_buying=Decimal("34.5"))
+            db.insert_multi_rates_bulk([
+                ("2025-03-10", "GBP", "mid_rate", Decimal("44.5")),
+            ])
+        assert db.get_rate(date(2025, 3, 10))["usd_buying"] == (
+            Decimal("34.5000")
+        )
+        assert db.get_multi_rate(
+            date(2025, 3, 10), "GBP", "mid_rate",
+        ) == Decimal("44.5000")
+
+    def test_nested_scope_is_reentrant_outermost_owns(self, db):
+        with pytest.raises(RuntimeError), db.transaction():
+            db.insert_rate(date(2025, 3, 10), usd_buying=Decimal("34.5"))
+            with db.transaction():  # nested no-op
+                db.insert_rate(
+                    date(2025, 3, 11), usd_buying=Decimal("34.6"),
+                )
+            raise RuntimeError("outermost rolls back everything")
+        conn = db._conn()
+        assert conn.execute("SELECT COUNT(*) FROM rates").fetchone()[0] == 0
+
+    def test_methods_autocommit_outside_scope(self, db):
+        # No scope active → behavior unchanged (per-method commit).
+        db.insert_rate(date(2025, 3, 12), usd_buying=Decimal("34.7"))
+        assert db.get_rate(date(2025, 3, 12))["usd_buying"] == (
+            Decimal("34.7000")
+        )
+
+
+# =========================================================================
+#  CORRUPT rates_multi VALUES (round 11 — InvalidOperation containment)
+# =========================================================================
+
+class TestCorruptMultiRateValues:
+    """A non-numeric TEXT value in rates_multi (older build, manual edit,
+    disk damage) raises decimal.InvalidOperation — an ArithmeticError, NOT a
+    ValueError — which used to kill the CSV-export worker thread."""
+
+    def _seed_corrupt_plus_good(self, db):
+        conn = db._conn()
+        conn.execute(
+            "INSERT INTO rates_multi (date, currency, rate_type, value) "
+            "VALUES ('2026-01-05', 'GBP', 'selling', 'N/A')"
+        )
+        conn.execute(
+            "INSERT INTO rates_multi (date, currency, rate_type, value) "
+            "VALUES ('2026-01-06', 'GBP', 'selling', '44.5000')"
+        )
+        conn.commit()
+
+    def test_get_all_multi_rates_maps_corrupt_value_to_none(self, db, caplog):
+        self._seed_corrupt_plus_good(db)
+        with caplog.at_level(logging.WARNING, logger="core.database"):
+            rows = db.get_all_multi_rates()
+        by_date = {r[0]: r for r in rows}
+        # Corrupt row surfaces with value None (export skips None rows)...
+        assert by_date["2026-01-05"][3] is None
+        # ...the good row is untouched (lossless — no 4dp quantize here)...
+        assert by_date["2026-01-06"][3] == Decimal("44.5000")
+        # ...and a warning names the junk.
+        assert any("N/A" in rec.message for rec in caplog.records)
+
+    def test_get_rates_multi_omits_corrupt_value(self, db):
+        self._seed_corrupt_plus_good(db)
+        rates = db.get_rates_multi(
+            date(2026, 1, 1), date(2026, 1, 31), "GBP", "selling",
+        )
+        # Corrupt value = cache miss (blank+warn downstream, Core Rule 9).
+        assert date(2026, 1, 5) not in rates
+        assert rates[date(2026, 1, 6)] == Decimal("44.5000")

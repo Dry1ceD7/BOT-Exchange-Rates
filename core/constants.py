@@ -12,6 +12,8 @@ Override via environment variables where noted.
 
 import logging
 import os
+import re
+import sys
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
@@ -26,6 +28,64 @@ MAX_FILE_SIZE_MB: int = int(os.environ.get("BOT_MAX_FILE_MB", "15"))
 CLAUDE.md mandates a strict 15MB "Featherweight" limit. Override via the
 BOT_MAX_FILE_MB environment variable when needed.
 """
+
+WORKBOOK_RAM_MULTIPLIER: int = 100
+"""Measured peak-RSS ratio of the write-mode openpyxl pipeline (~100x).
+
+A 13.00MB ledger peaked at ~1.4GB RSS end-to-end (load + formula injection +
+atomic save + read-back verify); standalone load+save alone peaked ~1.1GB.
+Write-mode openpyxl memory is INHERENT to this pipeline: in-place editing and
+``keep_vba`` (Core Rules 7) rule out ``write_only`` streaming, so the cost
+cannot be engineered away without breaking frozen contracts. This makes the
+15MB ``MAX_FILE_SIZE_MB`` cap above LOAD-BEARING on the 4GB target hardware
+(15MB x ~100 ≈ 1.5GB during the save+verify window), not a conservative
+default — do NOT raise it casually. ``LedgerEngine.preflight_file`` uses this
+multiplier for a selection-time free-RAM advisory (advisory only — it never
+blocks processing).
+"""
+
+def available_ram_bytes() -> int | None:
+    """Best-effort available physical RAM in bytes (None when unknown).
+
+    Used by the selection-time peak-RSS advisory (see
+    ``WORKBOOK_RAM_MULTIPLIER``). Windows: ``GlobalMemoryStatusEx`` via
+    ctypes (``ullAvailPhys``). POSIX: ``sysconf`` ``SC_AVPHYS_PAGES`` x
+    ``SC_PAGE_SIZE`` where exposed (Linux; macOS lacks ``SC_AVPHYS_PAGES``
+    so it returns None there). Never raises — any probe failure degrades to
+    "unknown" so the advisory simply stays silent.
+    """
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class _MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [  # noqa: RUF012 — ctypes field spec, not a mutable default
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = _MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                return int(stat.ullAvailPhys)
+            return None
+        names = getattr(os, "sysconf_names", {})
+        if "SC_AVPHYS_PAGES" in names and "SC_PAGE_SIZE" in names:
+            pages = os.sysconf("SC_AVPHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            if pages > 0 and page_size > 0:
+                return int(pages) * int(page_size)
+    except Exception as exc:  # noqa: BLE001 — advisory probe must never raise
+        logger.debug("available_ram_bytes probe failed: %s", exc)
+    return None
+
 
 SUPPORTED_EXCEL_EXTENSIONS: tuple = (".xlsx", ".xlsm")
 """File extensions accepted for processing."""
@@ -108,7 +168,23 @@ def collect_excel_files(
 SKIP_SHEET_NAMES: frozenset = frozenset({"ExRate", "Exrate USD", "Exrate EUR"})
 """Sheets that are reference/master and should NOT be processed as ledgers.
 "Exrate USD" / "Exrate EUR" are pre-existing rate tabs in older workbooks;
-they lack the standard Date/Cur/EX Rate header and must be skipped."""
+they lack the standard Date/Cur/EX Rate header and must be skipped.
+Membership checks go through :func:`is_skip_sheet` (case/whitespace
+tolerant) — production variants like "EXRATE USD " must not slip past an
+exact-string match into the ledger scan."""
+
+_SKIP_SHEET_NAMES_FOLDED: frozenset = frozenset(
+    s.casefold() for s in SKIP_SHEET_NAMES
+)
+
+
+def is_skip_sheet(sheet_name) -> bool:
+    """Case/whitespace-tolerant test against ``SKIP_SHEET_NAMES``.
+
+    Single owner of the skip check used by the ledger header scan, the
+    date/currency prescans, and the standalone-ExRate probe.
+    """
+    return str(sheet_name).strip().casefold() in _SKIP_SHEET_NAMES_FOLDED
 
 # THB is the company's home currency — its ledger rows take a literal 1.0, so
 # it is "supported" without an API rate (the IFS formula handles it inline).
@@ -156,6 +232,17 @@ MAX_429_RETRIES: int = int(os.environ.get("BOT_MAX_429_RETRIES", "10"))
 
 API_TIMEOUT_SECONDS: float = 30.0
 """Default httpx timeout for API calls."""
+
+MIN_API_TIMEOUT_SECONDS: float = 3.0
+"""Lower bound for a user-configured 'api_timeout_seconds'.
+
+Single source of truth shared by the settings import coercion
+(core/config_manager) and the client-side guard
+(core/api_client._resolve_timeout_seconds): a hand-edited 0.001 would
+otherwise make every BOT request time out (x4 tenacity retries per chunk)."""
+
+MAX_API_TIMEOUT_SECONDS: float = 300.0
+"""Upper bound for a user-configured 'api_timeout_seconds' (see MIN)."""
 
 API_CONNECT_TIMEOUT_SECONDS: float = 10.0
 """Default httpx connect timeout."""
@@ -220,9 +307,13 @@ def _plausible_year(year: int) -> bool:
     """True if ``year`` is within the accepted Common-Era window.
 
     Lower bound is 1970 (epoch-ish; older accounting dates are not expected);
-    upper bound is next year to tolerate forward-dated entries.
+    upper bound is next year to tolerate forward-dated entries. The upper
+    bound anchors on bot_today() (Asia/Bangkok BUSINESS year, defined later
+    in this module — resolved at call time), not the machine-local year:
+    on Dec 31 local / Jan 1 Bangkok a naive date.today() rejected
+    forward-dated entries for Bangkok's year+1 for a few hours.
     """
-    return 1970 <= year <= date.today().year + 1
+    return 1970 <= year <= bot_today().year + 1
 
 
 def parse_date(cell_val) -> date | None:
@@ -249,9 +340,43 @@ def parse_date(cell_val) -> date | None:
             try:
                 parsed = datetime.strptime(val, fmt).date()
             except ValueError:
+                # BE leap-day: Feb 29 of a Buddhist-Era year (2567 == 2024
+                # CE) fails strptime BEFORE _normalize_year can convert —
+                # BE years of CE leap years are never themselves leap years
+                # (543 % 4 == 3). Substitute year-543 and retry the same
+                # format once.
+                retried = _retry_be_leap_day(val, fmt)
+                if retried is not None:
+                    return retried
                 continue
             return _normalize_year(parsed)
     return None
+
+
+_BE_YEAR_TOKEN_RE = re.compile(r"(?<!\d)(2[4-7]\d{2})(?!\d)")
+
+
+def _retry_be_leap_day(val: str, fmt: str) -> date | None:
+    """Retry a failed strptime with the BE year converted to CE.
+
+    Only fires when the string carries a 4-digit year inside the BE
+    plausibility band; the substituted parse must still land in the
+    plausible CE window.
+    """
+    m = _BE_YEAR_TOKEN_RE.search(val)
+    if not m:
+        return None
+    be_year = int(m.group(1))
+    if not (_BE_YEAR_LOW <= be_year <= _BE_YEAR_HIGH):
+        return None
+    substituted = (
+        val[: m.start()] + str(be_year - _BE_CE_OFFSET) + val[m.end():]
+    )
+    try:
+        parsed = datetime.strptime(substituted, fmt).date()
+    except ValueError:
+        return None
+    return parsed if _plausible_year(parsed.year) else None
 
 
 def _normalize_year(parsed: date) -> date | None:

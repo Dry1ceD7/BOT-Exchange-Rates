@@ -212,6 +212,17 @@ class SingleInstanceServer:
 
                 conn = self._listener.accept()
                 try:
+                    # Bound the read: a client that connects but never sends
+                    # data must not starve the accept loop — one stuck client
+                    # would otherwise wedge RESTORE delivery for every
+                    # subsequent launch (which exits 0 believing the signal
+                    # was sent). Connection.poll() works on both Unix domain
+                    # sockets and Windows named pipes.
+                    if not conn.poll(2.0):
+                        logger.warning(
+                            "IPC: client connected but sent no data; dropping"
+                        )
+                        continue
                     # SECURITY: recv_bytes returns raw bytes and does NOT
                     # unpickle. Cap at 256 bytes to bound memory. We compare
                     # with hmac.compare_digest (constant-time) and NEVER
